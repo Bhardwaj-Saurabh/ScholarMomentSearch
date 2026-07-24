@@ -1,0 +1,101 @@
+# ScholarMomentSearch — Design
+
+**Use case:** AI Research & Conference Knowledge Base — one searchable brain over an
+ML research corpus: conference talk videos, the matching paper PDFs, and the slide
+decks for the same papers. Target user: ML researchers / applied-AI engineers; framed
+as an enterprise "internal research agent."
+
+**Demo moment:** ask *"How does the attention mechanism avoid recurrence?"* → one
+answer citing a talk timestamp, a paper page, and a slide.
+
+---
+
+## 1. What the base repo actually is (read-first findings)
+
+The assignment README describes the concept; the shipped code differs in specifics.
+Design against the **code**, satisfy the **bench contract**.
+
+| Assignment README says | Repo reality |
+|---|---|
+| `POST /admin/videos`, `src/api/admin.py` | `POST /api/videos` in `src/api/videos.py` (Bearer auth + `X-User-Id` multi-tenancy) |
+| `/ask_stream` SSE | `POST /api/ask` in `src/api/search.py` (no `/ask_stream` yet) |
+| captions → diarize → semantic chunk → LLM enrich → embed | `fetch → sample (CLIP frames) → embed-index → transcript` — **two branches**: visual (CLIP frames) + text (bge transcript chunks) |
+| one hybrid Qdrant index | **two collections**: `QDRANT_COLLECTION` (CLIP, image space) + `TEXT_COLLECTION` (bge, text space), both multi-tenant (`user_id` tenant index) |
+| status: pending→parsing→chunking→enriching→embedding→indexed | status: `pending → fetching → sampling → embedding → indexed \| skipped \| failed` (Postgres is source of truth; Prefect is the operational view) |
+| plain Prefect FIFO | optional **WFQ fair dispatcher** (`src/dispatcher.py`): rows wait `pending` in Postgres, a loop admits them round-robin per user, capped in-flight |
+
+Benchmark scaffold (`benchmark/bench.py`) hardcodes: `POST /admin/documents` (202),
+`GET /admin/sources`, `GET /ask_stream?q=`. → **We add these routes**; existing
+`/api/*` stays untouched (contract-preserved).
+
+## 2. Where papers & decks live in the vector space
+
+Papers and decks are *text* sources. They join the **text collection** (bge,
+`TEXT_EMBED_DIM`) alongside video transcript chunks — that is the shared semantic
+space where cross-source retrieval happens. The CLIP collection remains video-visual
+only. Writeup framing: "one shared index" = one shared *text* space for all three
+kinds + a visual branch for video; retrieval fuses both, exactly as the base app
+already fuses frames + transcript.
+
+Chunk payloads (extends the existing transcript payload shape):
+
+```jsonc
+// video transcript (exists):  { user_id, video_id, modality:"text", t_start, t_end, ms, text }
+// paper (new):  { user_id, source_id, kind:"paper", page: 4,  section: "3.1", text, embed_version }
+// deck  (new):  { user_id, source_id, kind:"deck",  slide: 12, text, embed_version }
+```
+
+Deterministic point IDs — `uuid5("{source_id}:{kind}:{i}")` — so re-runs overwrite
+(idempotent, same trick as video).
+
+## 3. Components to build
+
+| # | Component | File | Notes |
+|---|-----------|------|-------|
+| 1 | `documents` table + unified sources query | `src/db.py` | mirrors `videos` (id `doc_…`, user_id, kind `paper\|deck`, uri, storage_key, title, status, progress, attempts, error). Don't touch the videos table. |
+| 2 | Paper parser | `src/ingest/paper.py` | pymupdf → per-page text with structure → page-aware chunks (~500–800 tokens, never crossing page boundaries without carrying `page`) |
+| 3 | Deck parser | `src/ingest/deck.py` | PDF decks: pymupdf per page = slide; PPTX: python-pptx. Image-heavy slides (little text) → caption via the existing env-switched vision LLM (`src/llm.py`) before embedding |
+| 4 | Document ingest flow | `src/ingest/doc_pipeline.py` | Prefect flow `ms-ingest-document` with kind branch. Lifecycle: `pending → fetching → parsing → embedding → indexed \| failed`. Per-task retries like video. **Crash-safe ordering:** status → `indexed` only *after* the Qdrant upsert returns. |
+| 5 | Queue wiring | `src/jobs.py`, `src/worker.py`, `src/dispatcher.py` | `enqueue_document()`; worker serves both deployments; dispatcher claims across videos+documents (or documents ride FIFO first, WFQ unified after) |
+| 6 | Admin router | `src/api/admin.py` (new) | `POST /admin/documents` → validate, insert `pending`, enqueue, **202 immediately**; `GET /admin/sources` → union of videos+documents with `kind`, `status`, `pct`; errors 400/401/502 |
+| 7 | Cross-source search | `src/rag/search.py` + `GET /ask_stream` | SSE endpoint wrapping the existing ask path; retrieval over text collection now returns mixed kinds; citation carries `kind` + locator (`start_ms` \| `page` \| `slide`); grounded — empty retrieval ⇒ empty citations |
+| 8 | UI citation render | `ui/` | video → seek player to `start_ms`; paper → link `uri#page=N`; deck → show slide number/thumbnail |
+| 9 | Benchmark | `benchmark/bench.py` | fill the 4 TODOs: labeled queries (recall@10), concurrent-ingest load, throughput probe, worker-kill (`docker kill` the worker container mid-backfill, restart, poll `/admin/sources`) |
+
+Build order = the table order; each step is independently testable.
+
+## 4. Corpus & scale plan (right-sized)
+
+"Thousands of aligned triplets" is the *ceiling* of the use case, not what we ingest.
+Video ingest costs real time/compute (yt-dlp + CLIP per video); the SLA gates don't
+need thousands.
+
+- **Demo + recall set:** ~10–15 curated aligned triplets — e.g. *Attention Is All You
+  Need* (paper + talk + slides), BERT, RAG (Lewis et al.), CLIP, Chain-of-Thought…
+  Label 15–20 queries with the expected source+locator for recall@10 ≥ 0.70.
+- **Backfill / decoupling test:** 50–200 arXiv PDFs + a batch of decks (text-only —
+  cheap and fast) ingested while the search-latency probe runs. This exercises
+  accept-latency p95 ≤ 300 ms, search p95 ≤ 1.3× idle, ≥ 8 chunks/s, and the
+  worker-kill resilience gate at realistic scale.
+
+## 5. Why the queue (writeup seed)
+
+Search is latency-critical and read-only; ingestion is bursty and heavy (OCR, vision
+captioning, hundreds of embeddings). The queue is the seam that lets `POST
+/admin/documents` return 202 in milliseconds while workers drain at their own pace,
+retry per-stage without redoing finished stages, and scale by adding replicas. The
+base repo adds a twist worth writing up: Prefect alone is FIFO, so a **WFQ dispatcher**
+holds the waiting line in Postgres and admits work round-robin per user — fairness on
+top of the managed queue. Managed (Prefect Cloud) vs self-hosted (Redis
+Streams/RabbitMQ) trade-off + the stretch broker goes here.
+
+## 6. Risks / open questions
+
+- **Deck sourcing:** SlidesLive embeds are awkward to fetch; PMLR/author-site PDF
+  decks are easier. Fallback: export decks to PDF and upload via presign/storage URI.
+- **Vision captioning cost:** cap captioned slides per deck; only caption slides with
+  < N chars of extracted text.
+- **`/ask_stream` shape:** bench only checks status 200 + a `"page"` token in the
+  stream; keep the SSE event format close to the README's (trace → citations → answer).
+- **Dispatcher + documents:** unify `wfq_claim` over both tables or run documents
+  FIFO first; decide when wiring step 5.
