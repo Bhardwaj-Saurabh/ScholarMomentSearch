@@ -17,6 +17,11 @@ data/
 backend/data/
 qdrant_storage/
 
+# Media artifacts (papers/decks/videos) — never committed, per CLAUDE.md hygiene rule
+*.pdf
+*.pptx
+*.mp4
+
 # Model caches
 .cache/
 *.pt

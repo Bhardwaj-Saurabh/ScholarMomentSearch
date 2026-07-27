@@ -164,6 +164,14 @@ $ uv run pytest tests/ -q
 component standalone (no network/queue/retrieval surface) — it feeds throughput
 and recall once wired into components 4 and 7.
 
-**spec-guardian**: pending.
+**spec-guardian**: PASS — verified in code (not just claimed) that `deck.py` makes
+no LLM/network calls (grepped for requests/httpx/openai/anthropic/llm imports —
+none found), honoring the component-4 boundary. Independently re-ran the full
+suite: `22 passed, 6 warnings in 0.57s`, matching. Two forward notes, non-blocking:
+(1) component 4's captioning task must handle `needs_caption=True` +
+`image_jpeg=None` gracefully (a thin-text PPTX slide with no picture shape);
+(2) `.gitignore` had no `*.pdf`/`*.pptx`/`*.mp4` rule — fixed immediately (cheap,
+real hygiene gap per CLAUDE.md's media-file rule) rather than deferred.
 
-**Commit**: _pending._
+**Commit**: `8777d05` — "Add deck PDF/PPTX slide parser (component 3)".
+Follow-up `.gitignore` fix included in the next commit.
