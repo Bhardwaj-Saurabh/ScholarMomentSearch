@@ -109,3 +109,61 @@ acceptable, the docstring already calls this best-effort and DESIGN.md doesn't
 require stronger.
 
 **Commit**: `dd2b8de` — "Add page-aware paper PDF parser (component 2)".
+
+---
+
+## 2026-07-27 — Component 3: deck PDF/PPTX parser (`src/ingest/deck.py`)
+
+**Scope** (DESIGN.md §3, row 3): "Deck parser | `src/ingest/deck.py` | PDF decks:
+pymupdf per page = slide; PPTX: python-pptx. Image-heavy slides (little text) →
+caption via the existing env-switched vision LLM (`src/llm.py`) before embedding".
+Scope boundary (mirrors component 2 + where `t_transcript` sits in the video flow):
+`deck.py` stays network-free — it parses slides and, for text-thin slides, extracts
+an image; the actual vision-LLM captioning call is deferred to the Prefect flow
+(component 4), since an external LLM call needs task-level retries, not a place in
+a pure parser.
+
+**API sanity checks before writing tests** (avoided repeating component 2's
+fixture pitfall): confirmed `python-pptx`'s `shape.has_text_frame`/`.text_frame.text`
+and `shape.shape_type == MSO_SHAPE_TYPE.PICTURE` + `shape.image.blob` work as
+expected; confirmed PyMuPDF's `page.get_pixmap().tobytes("jpeg", jpg_quality=85)`
+produces a PIL-decodable JPEG.
+
+**RED** (`uv run pytest tests/test_deck_ingest.py -q`, before implementation):
+```
+ERROR tests/test_deck_ingest.py
+ImportError: cannot import name 'deck' from 'src.ingest'
+Interrupted: 1 error during collection
+```
+
+**Implementation**: `src/ingest/deck.py` — `parse_deck(path) -> list[SlideChunk]`,
+dispatching on file extension. PDF: one page = one slide via PyMuPDF; text < 40
+chars (`TEXT_THIN_CHARS`) flags `needs_caption=True` and renders the page to a JPEG.
+PPTX: one `Slide` = one slide via python-pptx; same 40-char threshold; when thin,
+the largest embedded `Picture` shape's image is extracted and normalized to JPEG
+via Pillow (so the field is always real JPEG bytes regardless of the source
+format). Added `python-pptx>=0.6.23` to `requirements.txt`.
+
+**First test run surfaced 3 failures — all eval bugs, not implementation bugs**:
+(1) a fixture used one long `insert_text` string, which PyMuPDF clips instead of
+wrapping (the exact pitfall hit in component 2 — should have reused that lesson
+immediately); (2) and (3) two "text-heavy slide" fixtures used sample sentences
+under the 40-char threshold I'd chosen, so they were correctly flagged
+`needs_caption=True` by the code — the tests' expectations, not the threshold,
+were wrong. Fixed both fixture issues (multi-line placement; longer sample text)
+without touching the 40-char threshold or any parsing logic.
+
+**GREEN**:
+```
+$ uv run pytest tests/ -q
+22 passed, 6 warnings in 0.54s
+```
+(7 new deck tests + the 15 from components 1–2, no regressions.)
+
+**Still red / not yet built**: components 4–11. No SLA row applies to this
+component standalone (no network/queue/retrieval surface) — it feeds throughput
+and recall once wired into components 4 and 7.
+
+**spec-guardian**: pending.
+
+**Commit**: _pending._

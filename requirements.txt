@@ -24,6 +24,7 @@ fastembed>=0.3
 
 # Paper & deck parsing (Assignment 3) — page/slide-aware text extraction
 pymupdf>=1.24
+python-pptx>=0.6.23
 
 # Video acquisition (YouTube path). Keep this CURRENT — YouTube changes its
 # bot-detection constantly and old yt-dlp versions stop working first.
