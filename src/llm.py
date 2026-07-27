@@ -34,34 +34,45 @@ NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 PROVIDERS = ("openai", "nvidia", "anthropic")
 
 SYSTEM = (
-    "You answer a user's question about a video using the numbered moments "
-    "provided as your evidence. Each moment has a timestamp and may include a "
-    "video FRAME (what was shown on screen) and/or a TRANSCRIPT excerpt (what was "
-    "said out loud). Use BOTH kinds of evidence: for a question about what someone "
-    "SAID or talked about, read the transcript text; for a question about what is "
-    "SHOWN, read the frame.\n"
+    "You answer a user's question using the numbered moments provided as your "
+    "evidence. Each moment is a specific excerpt from ONE named source (a video, "
+    "paper, or slide deck) and shows that source title. A moment may include a "
+    "FRAME (what was shown on screen) and/or an EXCERPT of text (what was said "
+    "aloud in a video, or a passage from a paper/deck page or slide). Use BOTH "
+    "kinds of evidence: for a question about what was said or what a document "
+    "states, read the excerpt text; for a question about what is shown, read "
+    "the frame.\n"
     "Rules:\n"
     "1. Read the question carefully and answer exactly what is asked. Start with a "
     "one-line direct answer, then explain in short paragraphs — ONE paragraph per "
     "distinct point. Keep it focused, don't pad. No preamble, don't restate the "
     "question.\n"
     "2. Ground every claim in the moments and cite the moment number(s) in square "
-    "brackets, e.g. [1] or [2, 3]. When the question is about what was said, quote "
-    "the transcript accurately — keep the actual wording and numbers, don't alter "
-    "or round them.\n"
+    "brackets, e.g. [1] or [2, 3]. Quote excerpt text accurately — keep the actual "
+    "wording, names, and numbers exactly as given, don't alter, round, or "
+    "extrapolate them.\n"
     "3. Group the relevant moments by the point they make:\n"
     "   - Moments that make the SAME point (especially several from the same "
-    "video) belong TOGETHER in ONE paragraph, cited together, e.g. [1, 2]. Do not "
+    "source) belong TOGETHER in ONE paragraph, cited together, e.g. [1, 2]. Do not "
     "split one shared point across separate paragraphs.\n"
-    "   - Moments that make DIFFERENT points, or come from different videos, go in "
-    "SEPARATE paragraphs, each with its own citation.\n"
+    "   - Moments that make DIFFERENT points, or come from different sources, go "
+    "in SEPARATE paragraphs, each with its own citation.\n"
     "   Cover every distinct relevant point — don't merge unrelated ones and don't "
     "drop any.\n"
-    "4. Don't use outside knowledge or invent details that aren't in the moments.\n"
-    "5. Abstain ONLY as a last resort: if — and only if — none of the moments are "
-    "relevant to the question at all, reply with a single sentence saying you "
-    "couldn't find it in the video. If even one moment is relevant, ANSWER from "
-    "it; do not refuse just because the match is partial."
+    "4. Don't use outside knowledge or invent details that aren't in the moments. "
+    "If the question names a specific paper, talk, or deck (e.g. \"the Mamba "
+    "paper\"), only answer as if you have it when one of the moments' source "
+    "titles actually IS that work — a moment from a different source is never "
+    "evidence about the named one, no matter how topically related its content "
+    "sounds. Never present a different source's content as if it belongs to a "
+    "named work that isn't among the moments' source titles.\n"
+    "5. Abstain if none of the moments are actually about what the question asks — "
+    "being topically adjacent (e.g. both are machine-learning papers) does not "
+    "make a moment relevant to a specific named paper, statistic, or claim it "
+    "doesn't contain. When unsure whether a moment truly supports a specific "
+    "claim, say so rather than stating it as fact. If at least one moment "
+    "genuinely does address the question, answer from it fully — do not refuse "
+    "just because the match is partial."
 )
 
 
@@ -96,10 +107,13 @@ def _intro(question: str, n: int) -> str:
     return (
         f"QUESTION: {question}\n\n"
         f"Answer this question using the {n} moments below (numbered 1 to {n}). "
-        "Each has a timestamp and a video frame and/or a transcript excerpt. If "
-        "the question is about what was said, use the transcript text. Give a "
-        "direct answer grounded in the relevant moment(s), cited as [n]. Only say "
-        "you couldn't find it if none of the moments are relevant."
+        "Each shows its source title and has a timestamp/locator and a frame "
+        "and/or excerpt text. If the question is about what was said or what a "
+        "document states, use the excerpt text. Give a direct answer grounded "
+        "in the relevant moment(s), cited as [n]. Only answer about a specific "
+        "named source if one of the moments' source titles actually matches it. "
+        "Only say you couldn't find it if none of the moments genuinely address "
+        "the question."
     )
 
 
@@ -159,10 +173,12 @@ def _base_url(cfg: LLMConfig) -> str | None:
 
 def _label(i: int, m: dict) -> str:
     line = f"[{i}] @ {m.get('timestamp', '')}"
+    if m.get("source"):
+        line += f' from "{m["source"]}"'
     if m.get("transcript"):
-        line += f' transcript: "{m["transcript"]}"'
+        line += f' — excerpt: "{m["transcript"]}"'
     if m.get("image") is None:
-        line += " (transcript only, no frame)"
+        line += " (text only, no frame)"
     return line
 
 

@@ -1330,6 +1330,140 @@ up grounding work next.
   (fabricated Mamba-paper answer; misattributed GPT-3 benchmark statistic)
   were found by the grounding-auditor agent and disclosed — not fixed.
 
-**Commit**: pending (see below) — `src/worker.py`, `tests/test_jobs_worker.py`,
-`Dockerfile`, `.dockerignore`, `benchmark/bench.py`, `tests/test_bench.py`,
+**Commit**: `5587682` — "Fix corpus seeding in Docker, Prefect entrypoint crash,
+and bench.py dedup-shadowing (Part 0)".
+
+---
+
+## 2026-07-28 — Grounding fix: source-title grounding for the 2 violations found above
+
+The user directed that AGENTS.md's non-negotiable #5 ("Grounded citations
+only... Empty retrieval → empty results, not a fabricated one") is a must,
+not a disclosed-and-deferred item — fix it, not just report it. Followed the
+`edd` loop as maintenance/hardening of existing component 7
+(`src/rag/search.py` + `src/llm.py`), not a new DESIGN.md component.
+
+**Root cause, found by reading the actual code path the two violations went
+through**: `_build_moments()` (`src/rag/search.py`) turned each citation into
+`{"image", "transcript", "timestamp"}` for the LLM — it never included WHICH
+source (video/paper/deck title) a moment came from, even though every
+citation already carries a `title` field (used by the UI). The LLM had no
+structural way to check a question naming a specific work ("the Mamba
+paper") against what was actually retrieved — only prose text to guess from.
+Combined with the system prompt's strong anti-abstain instruction ("if even
+one moment is relevant, ANSWER from it — do not refuse"), a weakly-similar
+but unrelated moment got recruited into a confident, unlabeled answer.
+
+**Evals defined** (this is inherently an LLM-output-quality fix — most of it
+can only be proven by a live behavioral before/after, not a deterministic
+unit test):
+- Unit (pure logic): new `tests/test_llm.py` — `_build_moments()` includes
+  the `source` field from a citation's `title`; `_label()` renders it;
+  the `SYSTEM` prompt contains specific guardrail phrases (regression guard
+  so a future edit can't silently drop them); the prompt still permits
+  answering from a genuine partial match (protects `recall_at_10`, doesn't
+  overcorrect into blanket over-abstention).
+- Live repro/verification: re-ran the EXACT two adversarial queries the
+  grounding-auditor used, against the real running stack, before and after.
+- Regression check: re-ran the clean, uncontended recall@10 diagnostic
+  (16 labeled queries) to confirm the fix — which only changes what the LLM
+  is shown/told, not retrieval — didn't move recall.
+
+**RED** (before implementation): `uv run pytest tests/test_llm.py -v` → 4 of
+6 failed (`_build_moments` output had no `source` key; `SYSTEM` lacked the
+guardrail phrases).
+
+**IMPLEMENT**:
+- `src/rag/search.py::_build_moments`: added `"source": c.get("title")` to
+  each moment dict.
+- `src/llm.py::_label`/`_intro`: render the source title alongside the
+  timestamp/locator; broadened "transcript"-only wording to cover paper/deck
+  excerpts too (the field was already reused for both, the LABEL wasn't).
+- `src/llm.py::SYSTEM`: rewrote to (1) be source-neutral (video/paper/deck,
+  not video-only), (2) explicitly forbid attributing a different source's
+  content to a named-but-absent work ("a moment from a different source is
+  never evidence about the named one, no matter how topically related its
+  content sounds"), (3) require genuine topical relevance, not adjacency
+  ("being topically adjacent... does not make a moment relevant to a
+  specific named paper, statistic, or claim it doesn't contain"), (4) still
+  explicitly permit answering from a genuine partial match, unchanged in
+  spirit, so recall doesn't regress.
+
+**GREEN**: `uv run pytest tests/test_llm.py -v` → 6/6 passed. Full suite:
+`uv run pytest tests/ -x -q` → **93 passed** (87 + 6 new, no regressions).
+
+**Live verification** (rebuilt + restarted the `api` container to pick up
+the change, `docker compose build api && docker compose up -d api`):
+- Mamba query (`GET /ask_stream?q=What+does+the+Mamba+paper+say+about+state+space+models`):
+  **before**: confidently invented Mamba-paper content, citing an unrelated
+  RAG-talk transcript snippet. **after**: *"The moments provided do not
+  contain specific information about state space models from the Mamba
+  paper. Therefore, I couldn't find relevant details regarding state space
+  models in the context of that paper."* — no fabrication, correctly
+  declines to attribute content to the named-but-absent source.
+- GPT-3/ARC query (`GET /ask_stream?q=What+is+GPT-3's+accuracy+on+the+ARC-AGI+benchmark`):
+  **before**: cited the real GPT-3 paper (page 17) but stated 68.8/71.2/70.1
+  — the auditor confirmed those are actually the paper's ARC-**Easy** numbers,
+  not ARC-Challenge as claimed. **after**: cites the same real paper/page and
+  now states 51.4/53.2/51.5 — the paper's actual ARC-**Challenge** numbers.
+  Residual, smaller imprecision: the answer still treats "ARC-AGI" (a modern,
+  different benchmark) as equivalent to the paper's original "ARC" dataset
+  without flagging the naming mismatch — a benchmark-identity nuance, not a
+  fabricated statistic; not chased further this session.
+- Recall regression check: clean uncontended diagnostic (16 labeled
+  queries) → **0.729**, unchanged from the pre-fix measurement — confirms
+  the fix touches only LLM-synthesis inputs, not retrieval, as intended.
+
+**Residual, disclosed (not chased further)**:
+- `abstained` in the API response is still `False` for the Mamba case even
+  though the answer content is now honest — that boolean is set by the
+  confidence gate (`CONFIDENCE_THRESHOLD`/`TEXT_CONFIDENCE_THRESHOLD` in
+  `src/rag/search.py`), untouched by this fix. The content is now grounded;
+  the metadata label describing it is not fully accurate. Fixing that would
+  mean tuning the confidence gate itself, which risks the recall gate (already
+  marginal) — a separate, riskier change deliberately not made in this pass.
+- This fix hardens against the SPECIFIC failure mode found (misattributing
+  content across sources); it is a prompt-level defense, not a formal
+  citation-faithfulness verifier — it measurably closed the two violations
+  found, but does not mathematically guarantee no other hallucination mode
+  exists. Full faithfulness checking (verifying each generated claim against
+  its cited chunk's actual text, e.g. via embedding-overlap scoring) remains
+  future work if deeper guarantees are wanted.
+
+**Independent re-check (fresh grounding-auditor run, adversarial, NOT just
+re-running the same 2 queries)**: confirmed both original repros are fixed
+(Mamba abstains cleanly; GPT-3/ARC now cites the correct 51.4/53.2/51.5).
+But 3 NEW variants of the same underlying pattern still reproduce it:
+1. **CRITICAL** — "What numerical rank value does the CLIP paper recommend
+   for low-rank adaptation?" retrieved zero CLIP citations (all 6 were
+   LoRA content) yet the answer opened with *"The CLIP paper recommends a
+   low-rank adaptation value of r..."* — the identical Mamba-shaped bug,
+   CLIP swapped in for Mamba. The prompt's general wording ("a moment from a
+   different source is never evidence about the named one") did not
+   reliably stop this specific case.
+2. **HIGH** — a false-premise question about the ReAct paper ("why did it
+   conclude pure chain-of-thought outperforms tool-use") got an answer
+   affirming the false premise, while its OWN cited moment [6] states the
+   opposite ("consistently outperform[s] baselines with only reasoning or
+   acting"). The answer contradicts its own citation.
+3. **MEDIUM** — a real-but-uncorpused model name (Mixtral 8x7B) got a
+   partial fabrication (2 paragraphs asserting facts "from the Mixtral
+   paper") before self-correcting in paragraph 3 — better than a clean
+   fabrication, still not correct.
+Clean passes: a real-paper/uncovered-subtopic question (BERT + carbon
+footprint) abstained correctly; tenant isolation re-confirmed unaffected.
+
+**Honest conclusion**: this fix demonstrably closes the two originally
+reported cases and does not regress recall, but does NOT fully generalize —
+a system-prompt-level guardrail is a probabilistic mitigation against a
+capable model's tendency to answer confidently, not a hard guarantee. Fully
+"achieving" AGENTS.md's non-negotiable #5 in the adversarial-general case
+likely needs a code-level, not prompt-level, defense (e.g., a post-hoc check
+cross-referencing every named source/entity mentioned in the generated
+answer against the actual cited titles, or an explicit false-premise check
+against cited text before the answer is accepted) — a materially bigger
+change than this session's fix, flagged for the user to decide whether to
+pursue further.
+
+**Commit**: pending — `src/rag/search.py`, `src/llm.py`, `tests/test_llm.py`,
 this entry.

@@ -233,7 +233,14 @@ def _validate_citations(answer: str, n_frames: int) -> str:
 def _build_moments(user_id: str, citations: list[dict[str, Any]]) -> list[dict]:
     """Turn citations into what the LLM sees: each moment carries its frame
     image (if any) and/or its text excerpt — transcript for video, page/slide
-    text for a paper/deck (Assignment 3) — numbered to match."""
+    text for a paper/deck (Assignment 3) — numbered to match.
+
+    `source` (the citation's own `title`) is included so the model can check
+    a question naming a specific paper/video/deck against what's ACTUALLY
+    among the moments, instead of guessing from content alone — a bare
+    timestamp/locator with no source name gave the LLM no way to tell "this
+    excerpt is from a different, unrelated source" from "this is the paper
+    you asked about" (see EVIDENCE.md's Part-0 grounding-auditor findings)."""
     def frame_bytes(c):
         if c.get("idx") is None or c.get("video_id") is None:
             return None
@@ -245,7 +252,8 @@ def _build_moments(user_id: str, citations: list[dict[str, Any]]) -> list[dict]:
     with ThreadPoolExecutor(max_workers=6) as ex:
         images = list(ex.map(frame_bytes, citations))
     return [{"image": img, "transcript": c.get("transcript") or c.get("text"),
-             "timestamp": _where(c)} for img, c in zip(images, citations)]
+             "timestamp": _where(c), "source": c.get("title")}
+            for img, c in zip(images, citations)]
 
 
 def resolve_llm(user_id: str) -> tuple[llm.LLMConfig | None, str]:
