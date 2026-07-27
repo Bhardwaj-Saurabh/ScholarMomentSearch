@@ -483,3 +483,124 @@ convention)".
 
 **Commit**: `ca66c98` — "Add admin router: POST /admin/documents and GET
 /admin/sources (component 6)". Follow-up ARCHITECTURE.md fix in the next commit.
+
+---
+
+## 2026-07-27 — Component 7: cross-source search (`src/rag/search.py`, `GET /ask_stream`)
+
+**Scope** (DESIGN.md §3, row 7): "Cross-source search | `src/rag/search.py` +
+`GET /ask_stream` | SSE endpoint wrapping the existing ask path; retrieval over
+text collection now returns mixed kinds; citation carries `kind` + locator
+(`start_ms` \| `page` \| `slide`); grounded — empty retrieval ⇒ empty
+citations." The biggest logic-surgery component so far — `_fuse()` is the
+heart of the existing (PROVIDED) RRF-fusion algorithm, and it had a real,
+previously-latent bug this component surfaces and fixes.
+
+**The bug**: `_fuse()`'s window-grouping loop directly indexed `h["video_id"]`
+— fine while every text hit came from a video transcript (always has that
+key), but the moment `moments_text` also holds paper/deck chunks (component
+4's doc_pipeline, which have `source_id` instead), any query touching a
+document hit would raise `KeyError: 'video_id'`. RED caught this immediately
+and precisely (`src/rag/search.py:55: KeyError: 'video_id'`).
+
+**Design decision**: paper/deck chunks are split out of the video
+time-windowing entirely — `video_text_hits = [h for h in text_hits if
+h.get("video_id")]`, `doc_text_hits` = the rest. A page or slide is already
+the precise citation unit (unlike a raw ~20s transcript chunk, which benefits
+from merging with a nearby frame); each document hit becomes its OWN window,
+never merged with anything, never cross-modal-boosted (no visual companion is
+retrievable for a paper/deck chunk in this design). Video-only behavior is
+UNCHANGED — same grouping key, same rrf math, same cross-modal boost — proven
+by a regression test using the exact payload shape the original code was
+built for.
+
+**Two downstream functions also needed the same fix** (not just `_fuse`):
+`_build_moments` (`c["timestamp"]` direct-indexed — KeyError for a document
+citation with no `timestamp` key) and `_fallback_answer` (same). Both now use
+a new `_where(c)` helper that produces a human label regardless of kind
+(`"14:22"` for video, `"page 4"` / `"slide 12"` for documents) — otherwise the
+no-LLM fallback path and the LLM-moment-builder would both crash the instant a
+cross-source result included a document citation. `_fallback_answer`'s wording
+changed from "Closest visual match" to "Closest match" (no longer necessarily
+visual) — the only observable text change, and necessary, not cosmetic.
+
+**Backward compatibility (the hard invariant)**: every citation dict — video
+included — gained two additive keys (`kind`, `locator`) but kept every
+pre-existing flat field (`video_id`, `ms`, `idx`, `thumbnail`, `media_url`,
+`deeplink`, `transcript`, `modalities`, `title`, `url`, `source`) unchanged.
+Confirmed `POST /api/ask` has no `response_model=` constraining its output
+(`grep` of `src/api/search.py`) — FastAPI serializes the dict as-is, so
+additive keys are invisible to any code that doesn't look for them; a
+regression test asserts every original field is still present for a video
+citation.
+
+**`GET /ask_stream`**: added to `src/api/search.py` (allowed to extend per
+CLAUDE.md), wrapping `rag_search.ask()` exactly as DESIGN.md's row says — no
+token-by-token rewrite of `llm.py`'s blocking `answer()` call, which "wrapping
+the existing ask path" doesn't ask for and would be a much bigger, out-of-scope
+change. Emits `trace` → `citations` (kind + locator, cross-source) → `answer` →
+`done` as SSE events.
+
+**Testing note — avoided a heavy dependency deliberately**: `retrieve()` calls
+`embed_text()` (CLIP, needs `sentence-transformers`/torch) unconditionally for
+the visual branch, even in tests that only care about the text/document
+fusion logic. Rather than installing torch just to embed a throwaway query
+vector, `embed_text` is mocked at the `rag_search` module boundary (returns a
+correctly-sized 512-d zero vector) — the one real end-to-end test still uses
+genuine fastembed (bge) embeddings for the text branch that actually matters,
+and a real (unmocked) `vector_store.search()` against the empty CLIP
+collection degrades gracefully to `[]`, exactly as production does when
+Qdrant has nothing indexed yet.
+
+**Product eval — labeled queries added** (`benchmark/labeled_queries.json`,
+16 queries, 1-2 per `corpus.json` triplet): each expects specific citation
+`kind`s for recall@10 (component 9 will resolve `corpus_id` to actual
+video_id/doc_id once the corpus is seeded — component 10 — since document IDs
+are randomly generated at registration, unlike video's deterministic
+`yt_<id>`).
+
+**RED** (`uv run pytest tests/test_cross_source_search.py -v`, before implementation):
+```
+KeyError: 'video_id' (src/rag/search.py:55) — 4 tests, the exact bug above
+KeyError: 'kind' — 1 test (downstream of the same bug)
+ModuleNotFoundError: No module named 'sentence_transformers' — 3 tests (fixed by mocking embed_text, not the implementation)
+404 == 200 — 1 test (/ask_stream doesn't exist yet)
+7 failed, 3 passed in 11.87s
+```
+
+**GREEN** — all 10 passed on the first implementation attempt:
+```
+$ uv run pytest tests/test_cross_source_search.py -v
+10 passed, 2 warnings in 12.39s
+```
+Covers: video-only `_fuse` regression (unchanged); grounded-empty regression;
+document hits becoming standalone windows; never cross-modal-boosted; two
+different documents' same-page-number chunks staying separate citations
+(no accidental merging); video citation shape fully backward-compatible
+(every old field present) plus the new `kind`/`locator`; paper+deck citation
+shape with correct `locator` per kind; grounded-empty-retrieval regression via
+`ask()`; **a genuine end-to-end test with real embedded Qdrant + real
+fastembed embeddings proving one query — "how does the attention mechanism
+avoid recurrence?" — returns all three kinds (video, paper, deck) together**,
+the assignment's #1 graded criterion; and the `/ask_stream` SSE shape,
+including the exact self-verify check from README (`grep -m1 '"page"'`
+against the citations event).
+
+**Full suite**:
+```
+$ uv run pytest tests/ -q
+59 passed, 7 warnings in 72.67s
+```
+(10 new + 49 from components 1–6, no regressions.)
+
+**sla-gate**: recall@10 is now measurable in principle (retrieval + citation
+shape both exist), but still needs the seeded corpus (component 10) and
+bench.py's own implementation (component 9) to produce a real number — no
+number fabricated here.
+
+**Still red / not yet built**: components 8–11 (UI citation render, benchmark
+implementation, corpus seeding, self-serve tab).
+
+**spec-guardian**: pending.
+
+**Commit**: _pending._

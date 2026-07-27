@@ -1,0 +1,85 @@
+{
+  "_comment": "Labeled queries for recall@10 (benchmark/sla.json: recall_at_10_min=0.70). One or two natural-language questions per benchmark/corpus.json triplet, each expecting cross-source citations (video + paper + deck) for that triplet's topic. `corpus_id` matches corpus.json's triplet `id` -- ids are assigned at registration time (yt_<youtube-id> is deterministic; doc_<uuid> is not), so component 9's bench.py resolves corpus_id -> actual source_id/video_id via the seeded manifest (component 10), or by matching citation title/uri against corpus.json. A query is scored correct if the top-10 citations include at least one hit per expected kind for that corpus_id.",
+  "queries": [
+    {
+      "query": "How does the attention mechanism avoid recurrence?",
+      "corpus_id": "attention",
+      "expect_kinds": ["video", "paper", "deck"]
+    },
+    {
+      "query": "What is the transformer architecture and why does it use self-attention?",
+      "corpus_id": "attention",
+      "expect_kinds": ["paper", "deck"]
+    },
+    {
+      "query": "How is BERT pre-trained and what makes it bidirectional?",
+      "corpus_id": "bert",
+      "expect_kinds": ["video", "paper", "deck"]
+    },
+    {
+      "query": "What is masked language modeling?",
+      "corpus_id": "bert",
+      "expect_kinds": ["paper"]
+    },
+    {
+      "query": "How does CLIP learn transferable visual representations from natural language supervision?",
+      "corpus_id": "clip",
+      "expect_kinds": ["video", "paper", "deck"]
+    },
+    {
+      "query": "What is contrastive pretraining between images and text?",
+      "corpus_id": "clip",
+      "expect_kinds": ["paper", "deck"]
+    },
+    {
+      "query": "How does chain-of-thought prompting improve reasoning in large language models?",
+      "corpus_id": "cot",
+      "expect_kinds": ["video", "paper"]
+    },
+    {
+      "query": "What is an emergent ability of large language models?",
+      "corpus_id": "cot",
+      "expect_kinds": ["video", "deck"]
+    },
+    {
+      "query": "What makes GPT-3 a few-shot learner?",
+      "corpus_id": "gpt3",
+      "expect_kinds": ["paper", "deck"]
+    },
+    {
+      "query": "How does in-context learning work without gradient updates?",
+      "corpus_id": "gpt3",
+      "expect_kinds": ["paper"]
+    },
+    {
+      "query": "How does ReAct combine reasoning and acting in language model agents?",
+      "corpus_id": "react",
+      "expect_kinds": ["video", "paper", "deck"]
+    },
+    {
+      "query": "What is the difference between a reasoning trace and an action in an LLM agent?",
+      "corpus_id": "react",
+      "expect_kinds": ["paper", "deck"]
+    },
+    {
+      "query": "How does LoRA reduce the number of trainable parameters when fine-tuning a model?",
+      "corpus_id": "lora",
+      "expect_kinds": ["video", "paper", "deck"]
+    },
+    {
+      "query": "What is low-rank decomposition in the context of adapting a pretrained model?",
+      "corpus_id": "lora",
+      "expect_kinds": ["paper", "deck"]
+    },
+    {
+      "query": "How does retrieval-augmented generation combine a retriever with a generator?",
+      "corpus_id": "rag",
+      "expect_kinds": ["video", "paper", "deck"]
+    },
+    {
+      "query": "Why does grounding an LLM's answer in retrieved documents reduce hallucination?",
+      "corpus_id": "rag",
+      "expect_kinds": ["paper", "deck"]
+    }
+  ]
+}

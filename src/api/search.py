@@ -7,6 +7,7 @@ playback stream via presigned URLs and never touch this process.
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -146,6 +147,36 @@ def ask(req: AskRequest, x_user_id: str | None = Header(default=None)):
     return rag_search.ask(req.question.strip(), _uid(x_user_id),
                           top_k=req.top_k, video_id=req.video_id,
                           video_ids=video_ids)
+
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+@router.get("/ask_stream")
+def ask_stream(q: str, x_user_id: str | None = Header(default=None),
+              video_id: str | None = None):
+    """SSE wrapper around the existing ask() path (DESIGN.md component 7):
+    trace -> citations (kind + locator, cross-source) -> answer -> done. No
+    token-by-token generation — llm.answer() is a single blocking call, so
+    "streamed answer" means the whole answer arrives as one SSE event, same
+    content POST /api/ask already returns."""
+    if not q.strip():
+        raise HTTPException(400, "Empty question.")
+    uid = _uid(x_user_id)
+
+    def gen():
+        yield _sse("trace", {"stage": "retrieving"})
+        result = rag_search.ask(q.strip(), uid, video_id=video_id)
+        yield _sse("citations", {"citations": result["citations"]})
+        yield _sse("answer", {
+            "answer": result["answer"],
+            "llm_used": result.get("llm_used", False),
+            "abstained": result.get("abstained", False),
+        })
+        yield _sse("done", {})
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 # ── Media (local-dev only; buckets serve these via presigned URLs) ───────────

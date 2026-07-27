@@ -36,6 +36,11 @@ def _fuse(visual_hits: list[dict], text_hits: list[dict]) -> list[dict]:
     within FUSION_WINDOW_S seconds of each other (same video) into one 'moment',
     sum their rrf, and boost windows where BOTH modalities agree — two
     independent signals pointing at the same instant is the strongest evidence.
+
+    Paper/deck chunks (Assignment 3) carry no video_id and no timestamp — a
+    page or slide IS already the precise citation unit, so each becomes its
+    own window directly rather than being time-windowed (which wouldn't mean
+    anything for them) or merged with anything else.
     """
     def ranked(hits, modality):
         out = []
@@ -44,12 +49,15 @@ def _fuse(visual_hits: list[dict], text_hits: list[dict]) -> list[dict]:
             out.append({**h, "modality": modality, "rrf": 1.0 / (RRF_K + rank), "t": t})
         return out
 
+    video_text_hits = [h for h in text_hits if h.get("video_id")]
+    doc_text_hits = [h for h in text_hits if not h.get("video_id")]
+
     windows: list[dict] = []
     # Hits arrive best-first (rrf desc), so the first hit landing in a window for
     # a given modality is that modality's best hit there.
-    for h in sorted(ranked(visual_hits, "frame") + ranked(text_hits, "text"),
+    for h in sorted(ranked(visual_hits, "frame") + ranked(video_text_hits, "text"),
                     key=lambda x: x["rrf"], reverse=True):
-        w = next((w for w in windows if w["video_id"] == h["video_id"]
+        w = next((w for w in windows if w.get("video_id") == h["video_id"]
                   and abs(w["t"] - h["t"]) <= FUSION_WINDOW_S), None)
         if w is None:
             w = {"video_id": h["video_id"], "t": h["t"], "rrf": 0.0,
@@ -70,6 +78,11 @@ def _fuse(visual_hits: list[dict], text_hits: list[dict]) -> list[dict]:
                    (w["text"]["rrf"] if w["text"] else 0.0)
         if {"frame", "text"} <= w["modalities"]:
             w["rrf"] *= CROSS_MODAL_BOOST
+
+    for h in ranked(doc_text_hits, "text"):
+        windows.append({"video_id": None, "t": 0.0, "rrf": h["rrf"],
+                        "modalities": {"text"}, "frame": None, "text": h})
+
     windows.sort(key=lambda w: w["rrf"], reverse=True)
     return windows
 
@@ -126,42 +139,80 @@ def retrieve(question: str, user_id: str, *, top_k: int | None = None,
         best_text = thits[0]["score"] if thits else 0.0
 
     windows = _fuse(vhits, thits)[:k]
-    videos = db.videos_by_ids(sorted({w["video_id"] for w in windows}))
+    videos = db.videos_by_ids(sorted({w["video_id"] for w in windows if w["video_id"]}))
+    documents = db.documents_by_ids(sorted({w["text"]["source_id"] for w in windows
+                                            if w["video_id"] is None}))
     citations = []
     for i, w in enumerate(windows, 1):
-        vid = w["video_id"]
-        meta = videos.get(vid)
-        fr, tx = w["frame"], w["text"]
-        # Anchor on the frame's exact timestamp when there is one (precise visual
-        # seek); otherwise the transcript chunk's start.
-        ms = int(fr["ms"]) if fr else int(w["t"] * 1000)
-        idx = int(fr["idx"]) if fr else None
-        citations.append({
-            "n": i,
-            "video_id": vid,
-            "title": (meta or {}).get("title") or vid,
-            "url": (meta or {}).get("url"),
-            "source": (meta or {}).get("source"),
-            "ms": ms,
-            "timestamp": _seconds(ms),
-            "idx": idx,
-            "thumbnail": _thumb_url(user_id, vid, idx) if idx is not None else None,
-            "media_url": _media_url(meta, user_id, vid),
-            "deeplink": _deeplink(meta, vid, ms),
-            "score": round(w["rrf"], 4),
-            "transcript": (tx or {}).get("text"),
-            "modalities": sorted(w["modalities"]),
-        })
+        if w["video_id"] is not None:
+            vid = w["video_id"]
+            meta = videos.get(vid)
+            fr, tx = w["frame"], w["text"]
+            # Anchor on the frame's exact timestamp when there is one (precise
+            # visual seek); otherwise the transcript chunk's start.
+            ms = int(fr["ms"]) if fr else int(w["t"] * 1000)
+            idx = int(fr["idx"]) if fr else None
+            citations.append({
+                "n": i,
+                "kind": "video",
+                "video_id": vid,
+                "title": (meta or {}).get("title") or vid,
+                "url": (meta or {}).get("url"),
+                "source": (meta or {}).get("source"),
+                "ms": ms,
+                "timestamp": _seconds(ms),
+                "idx": idx,
+                "thumbnail": _thumb_url(user_id, vid, idx) if idx is not None else None,
+                "media_url": _media_url(meta, user_id, vid),
+                "deeplink": _deeplink(meta, vid, ms),
+                "locator": {"start_ms": ms},
+                "score": round(w["rrf"], 4),
+                "transcript": (tx or {}).get("text"),
+                "modalities": sorted(w["modalities"]),
+            })
+        else:
+            # Paper/deck chunk (Assignment 3) — page/slide IS the locator, no
+            # timestamp/thumbnail/frame concept applies.
+            tx = w["text"]
+            doc_id = tx["source_id"]
+            meta = documents.get(doc_id)
+            kind = tx.get("kind", "document")
+            locator_key = "page" if "page" in tx else "slide"
+            citations.append({
+                "n": i,
+                "kind": kind,
+                "source_id": doc_id,
+                "title": (meta or {}).get("title") or doc_id,
+                "uri": (meta or {}).get("uri"),
+                "locator": {locator_key: tx.get(locator_key)},
+                "score": round(w["rrf"], 4),
+                "text": tx.get("text"),
+                "modalities": sorted(w["modalities"]),
+            })
     return {"citations": citations, "best_visual": best_visual, "best_text": best_text}
 
 
+def _where(c: dict[str, Any]) -> str:
+    """Human-readable locator label regardless of citation kind."""
+    if "timestamp" in c:
+        return c["timestamp"]
+    loc = c.get("locator") or {}
+    if "page" in loc:
+        return f"page {loc['page']}"
+    if "slide" in loc:
+        return f"slide {loc['slide']}"
+    return ""
+
+
 def _fallback_answer(citations: list[dict[str, Any]]) -> str:
-    """No-LLM summary: rank the visually-closest moments. Honest about being
-    similarity, not synthesis."""
+    """No-LLM summary: rank the closest matches across every source kind.
+    Honest about being similarity, not synthesis."""
     top = citations[0]
-    where = f"{top['title']} at {top['timestamp']}" if top.get("title") else top["timestamp"]
-    others = ", ".join(f"{c['timestamp']} [{c['n']}]" for c in citations[1:4])
-    msg = f"Closest visual match: {where} [{top['n']}] (similarity {top['score']})."
+    label = _where(top)
+    where = f"{top['title']} at {label}" if top.get("title") and label else \
+            (top.get("title") or label)
+    others = ", ".join(f"{_where(c)} [{c['n']}]" for c in citations[1:4])
+    msg = f"Closest match: {where} [{top['n']}] (similarity {top['score']})."
     if others:
         msg += f" Other relevant moments: {others}."
     return msg
@@ -181,9 +232,10 @@ def _validate_citations(answer: str, n_frames: int) -> str:
 
 def _build_moments(user_id: str, citations: list[dict[str, Any]]) -> list[dict]:
     """Turn citations into what the LLM sees: each moment carries its frame
-    image (if any) and/or its transcript excerpt (if any), numbered to match."""
+    image (if any) and/or its text excerpt — transcript for video, page/slide
+    text for a paper/deck (Assignment 3) — numbered to match."""
     def frame_bytes(c):
-        if c.get("idx") is None:
+        if c.get("idx") is None or c.get("video_id") is None:
             return None
         try:
             return storage.get_bytes(storage.frame_key(user_id, c["video_id"], c["idx"]))
@@ -192,8 +244,8 @@ def _build_moments(user_id: str, citations: list[dict[str, Any]]) -> list[dict]:
 
     with ThreadPoolExecutor(max_workers=6) as ex:
         images = list(ex.map(frame_bytes, citations))
-    return [{"image": img, "transcript": c.get("transcript"),
-             "timestamp": c["timestamp"]} for img, c in zip(images, citations)]
+    return [{"image": img, "transcript": c.get("transcript") or c.get("text"),
+             "timestamp": _where(c)} for img, c in zip(images, citations)]
 
 
 def resolve_llm(user_id: str) -> tuple[llm.LLMConfig | None, str]:
