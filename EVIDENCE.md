@@ -820,6 +820,16 @@ real stack) so these can run for real.
 **Still red / not yet built**: components 10–11 (corpus seeding, self-serve
 tab). Part 0 remains the prerequisite for this component's own live run.
 
-**spec-guardian**: pending.
+**spec-guardian**: PASS, no findings. Independently verified: every `gate()`
+call receives a value from a real measurement function (no hardcoded
+placeholder feeding a gate); `benchmark/sla.json` untouched; the
+`chunk_count` schema addition is genuinely additive (reads pre-existing
+Postgres columns, no consumer breaks, both updated tests disclosed
+honestly); the resilience check uses dynamic `docker compose ps -q worker`
+container discovery (no hardcoded name) and correctly relies on the worker
+service's pre-existing `restart: unless-stopped` policy rather than assuming
+one. Re-ran the suite independently: `71 passed, 7 warnings in 65.73s`,
+matching exactly.
 
-**Commit**: _pending._
+**Commit**: `d936117` — "Fill benchmark/bench.py's 4 TODOs: recall,
+concurrent load, throughput, resilience (component 9)".
