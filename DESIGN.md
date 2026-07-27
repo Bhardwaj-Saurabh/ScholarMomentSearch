@@ -61,8 +61,15 @@ Deterministic point IDs — `uuid5("{source_id}:{kind}:{i}")` — so re-runs ove
 | 7 | Cross-source search | `src/rag/search.py` + `GET /ask_stream` | SSE endpoint wrapping the existing ask path; retrieval over text collection now returns mixed kinds; citation carries `kind` + locator (`start_ms` \| `page` \| `slide`); grounded — empty retrieval ⇒ empty citations |
 | 8 | UI citation render | `ui/` | video → seek player to `start_ms`; paper → link `uri#page=N`; deck → show slide number/thumbnail |
 | 9 | Benchmark | `benchmark/bench.py` | fill the 4 TODOs: labeled queries (recall@10), concurrent-ingest load, throughput probe, worker-kill (`docker kill` the worker container mid-backfill, restart, poll `/admin/sources`) |
+| 10 | Seed the triplet corpus | `src/seeding.py`, `src/samples.py` | extend the boot-time seed gate to ingest `benchmark/corpus.json` (8 papers + 8 decks + 8 talks) alongside the sample videos — a fresh deploy is cross-source queryable on first load, idempotent like today |
+| 11 | Self-serve ingest tab | `ui/index.html` | the existing ingest box (YouTube URL / Upload tabs) gains a "Paper / Deck" tab → `POST /admin/documents`; the library panel shows document lifecycle + retry, tenant-scoped like videos |
 
 Build order = the table order; each step is independently testable.
+
+**How content gets in (product model):** (1) seeded shared corpus at boot — day-one
+value; (2) self-serve at runtime — any user pastes a YouTube/arXiv/deck URL in the
+UI, tenant-scoped to them; (3) bulk backfill via the admin API. All three ride the
+same queue; search never waits on any of them.
 
 ## 4. Corpus & scale plan (right-sized)
 
