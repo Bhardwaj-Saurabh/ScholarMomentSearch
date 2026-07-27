@@ -702,6 +702,19 @@ corpus seeding, self-serve tab). A live-browser check (actually clicking a
 paper/deck citation card once real data is seeded) is still owed once Part 0
 stands up the real stack — this component's evidence is unit-level only.
 
-**spec-guardian**: pending.
+**spec-guardian**: PASS. Independently confirmed `playCitation()` is
+byte-for-byte untouched (diffed the pre/post function body directly); the
+static-file-mount claim verified by grep (no `StaticFiles`/`.mount(`
+anywhere); re-ran both suites (`node --test`: 7/7; `pytest`: 59 passed) and
+field-name parity between `retrieve()`'s citation dict and the JS reader —
+all confirmed, not taken on faith. One non-blocking observation: `retrieve()`
+(component 7) has a defensive `kind:"document"` fallback for a chunk payload
+missing `kind` entirely, but `citeIsDocument` only checked for literal
+`"paper"`/`"deck"`, so that fallback would have mis-routed to the video path.
+**Fixed**: `citeIsDocument` now treats anything non-`"video"` as a document —
+forward-compatible with any future kind, not just today's two. Added a test
+for the `"document"` fallback case; 7/7 still pass.
 
-**Commit**: _pending._
+**Commit**: `80cb427` — "Add cross-source UI citation rendering: video
+unchanged, paper/deck open at locator (component 8)". Follow-up
+forward-compat fix in the next commit.

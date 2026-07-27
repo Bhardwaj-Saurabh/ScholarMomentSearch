@@ -148,7 +148,10 @@
    document/window/fetch calls, so ui/citation.test.js can extract and run
    just this block with plain Node — no browser, no DOM stub needed. */
 function citeKind(c){ return (c && c.kind) || "video"; }
-function citeIsDocument(c){ const k=citeKind(c); return k==="paper"||k==="deck"; }
+// Anything that isn't "video" is a document (paper/deck, or retrieve()'s
+// defensive "document" fallback for a chunk payload missing kind entirely) —
+// forward-compatible with any future non-video kind, not just today's two.
+function citeIsDocument(c){ return citeKind(c)!=="video"; }
 function citeLabel(c){
   const loc=c&&c.locator;
   if(loc && "page" in loc) return `Page ${loc.page}`;

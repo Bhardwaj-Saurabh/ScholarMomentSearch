@@ -36,11 +36,14 @@ test("citeKind reads c.kind, defaults to video", () => {
   assert.equal(C.citeKind(null), "video");
 });
 
-test("citeIsDocument true only for paper/deck", () => {
+test("citeIsDocument true for paper/deck and any other non-video kind", () => {
   assert.equal(C.citeIsDocument({ kind: "paper" }), true);
   assert.equal(C.citeIsDocument({ kind: "deck" }), true);
   assert.equal(C.citeIsDocument({ kind: "video" }), false);
   assert.equal(C.citeIsDocument({}), false);
+  // retrieve()'s defensive fallback (src/rag/search.py) for a chunk payload
+  // missing `kind` entirely -- must route to the document path, not video's.
+  assert.equal(C.citeIsDocument({ kind: "document" }), true);
 });
 
 test("citeLabel: video uses timestamp, paper/deck use the locator", () => {
