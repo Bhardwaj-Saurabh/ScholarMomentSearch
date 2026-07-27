@@ -52,6 +52,8 @@ columns present with correct types/defaults, matching ARCHITECTURE.md §4.1.
 search, UI, benchmark, seeding). No SLA rows apply yet — this component has no
 network/queue/retrieval surface.
 
-**spec-guardian**: pending (run before next component starts).
+**spec-guardian**: PASS — additive-only, `ms_videos` untouched (0 deletions), no
+protected files touched, `list_sources` shape matches README/ARCHITECTURE, RED/GREEN
+counts consistent (9 tests).
 
-**Commit**: _pending — see git log after this entry is written._
+**Commit**: `1afb14e` — "Add documents table and unified sources query (component 1)".
