@@ -1,0 +1,3 @@
+# Test-only. Runtime deps (including pymupdf, used by src/ingest/paper.py at
+# runtime too) live in requirements.txt.
+pytest>=8.0

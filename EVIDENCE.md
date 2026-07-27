@@ -57,3 +57,50 @@ protected files touched, `list_sources` shape matches README/ARCHITECTURE, RED/G
 counts consistent (9 tests).
 
 **Commit**: `1afb14e` — "Add documents table and unified sources query (component 1)".
+
+---
+
+## 2026-07-27 — Component 2: paper PDF parser (`src/ingest/paper.py`)
+
+**Scope** (DESIGN.md §3, row 2): "Paper parser | `src/ingest/paper.py` | pymupdf →
+per-page text with structure → page-aware chunks (~500–800 tokens, never crossing
+page boundaries without carrying `page`)". Pure parsing/chunking over a local file —
+no network, no DB, no Qdrant (component 4's job).
+
+**Fixture design note**: PyMuPDF's `insert_textbox` silently drops text that
+overflows its rect in the installed version (1.28.0) — confirmed by a throwaway
+smoke test (negative deficit return + 0 extracted chars). Switched fixtures to
+explicit per-line `insert_text` calls, which reproduce reliably (verified: 48 lines
+of a repeated sentence -> 3360 extracted chars on one page, comfortably over the
+~3200-char/~800-token budget).
+
+**RED** (`uv run pytest tests/test_paper_ingest.py -q`, before implementation):
+```
+ERROR tests/test_paper_ingest.py
+ImportError: cannot import name 'paper' from 'src.ingest'
+Interrupted: 1 error during collection
+```
+
+**Implementation**: `src/ingest/paper.py` — `parse_pdf(path) -> list[PaperChunk]`.
+Per-page line extraction via `get_text("dict")` (text + font size); a line whose
+size is >=1.15x the page's median body-line size and <=90 chars is treated as a
+section heading (excluded from body text, carried forward as `section` until the
+next heading); body text is joined per page and split on sentence boundaries into
+<=3200-char chunks (~800 tokens at ~4 chars/token) — a chunk never spans two pages.
+Added `pymupdf>=1.24` to `requirements.txt` (new runtime dependency) and a new
+`requirements-dev.txt` (`pytest>=8.0`, test-only) for reproducibility.
+
+**GREEN**:
+```
+$ uv run pytest tests/ -q
+15 passed, 6 warnings in 0.33s
+```
+(6 new paper tests + the 9 from component 1, no regressions. Warnings are
+pre-existing SWIG/psycopg deprecation notices, not from this change.)
+
+**Still red / not yet built**: components 3–11. This component has no SLA-relevant
+surface standalone; it feeds throughput/recall once wired into components 4 and 7.
+
+**spec-guardian**: pending.
+
+**Commit**: _pending._
