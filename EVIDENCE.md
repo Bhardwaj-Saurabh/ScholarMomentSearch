@@ -614,3 +614,94 @@ does survive unmodified."
 
 **Commit**: `8dd3803` — "Add cross-source search: fix video_id KeyError,
 kind+locator citations, GET /ask_stream (component 7)".
+
+---
+
+## 2026-07-27 — Component 8: UI citation render (`ui/index.html`)
+
+**Scope** (DESIGN.md §3, row 8): "UI citation render | `ui/` | video → seek
+player to `start_ms`; paper → link `uri#page=N`; deck → show slide
+number/thumbnail."
+
+**Testing constraint discovered before writing anything**: the app serves
+`index.html` as a single inline-script page with NO static-file mount
+(`grep -rn "StaticFiles\|mount(" src/ ui/` — nothing). Adding a separate
+`citation.js` and `<script src="citation.js">` would 404 in production —
+there's no route serving it. Fix: kept the pure kind/locator logic in its OWN
+`<script id="citation-logic">` tag inside the same `index.html` (browsers
+share global scope across `<script>` tags on one page, so this changes
+nothing about how the page runs) — zero new routes, zero new files served.
+
+**Testing approach**: no JS test framework exists in this repo. Rather than
+add one (or skip testing entirely), `ui/citation.test.js` uses only Node
+built-ins (`node:test`, `node:vm`) to regex-extract the `citation-logic`
+script block directly OUT OF `index.html` and run it in a bare `vm` context —
+this tests the ACTUAL shipped code every time (drift-proof: edit the block,
+the test picks up the edit automatically), and needs no DOM stub since the
+block is deliberately pure (no `document`/`window`/`fetch`).
+
+**RED found a real bug, not a test-fixture issue**: the first `citeOpenUrl`
+implementation sniffed the uri for a literal `.pdf` suffix before appending
+`#page=N`. arXiv — our corpus's primary paper source — serves PDFs at URLs
+like `https://arxiv.org/pdf/1706.03762`, with **no `.pdf` in the URL at all**
+(the server sets `Content-Type`, not the path). The suffix heuristic would
+have silently dropped the page anchor for exactly the case that matters most.
+**Fix**: removed the sniffing entirely — a `#page=N`/`#page={slide}` fragment
+is always appended when a locator exists. PDF viewers honor it; anything else
+(e.g. a downloaded `.pptx`) silently ignores an unused fragment — harmless
+either way, and simpler than the wrong heuristic it replaced.
+
+**Design decisions**:
+- `playCitation()` (the existing video modal — seek, YouTube embed, `<video>`
+  seek) is **completely untouched**, byte-for-byte. A new `openCitation(n)`
+  dispatches by `citeIsDocument(c)`: document citations `window.open()` the
+  source at its locator; video citations call the unchanged `playCitation`.
+  This is the safest way to guarantee "video path survives unmodified" — its
+  own function body was never edited, only what calls it changed.
+- "deck → show slide number/thumbnail": implemented the slide **number**
+  (shown on the card, e.g. "Slide 12") and the **link** (opens the deck at
+  that position). No slide **thumbnail** — `deck.py` (component 3) only ever
+  uses a slide's rendered image transiently for LLM captioning; it's never
+  persisted to object storage, so there is no URL to show a visual thumbnail
+  from. Building that would mean persisting slide images too — an unplanned,
+  bigger change DESIGN.md's row doesn't ask for outright ("thumbnail" is the
+  second half of an "or" in the row's own phrasing). Documented as a known
+  gap, not silently dropped.
+- Field names used (`c.kind`, `c.locator.page`/`.slide`, `c.uri`,
+  `c.source_id`) match exactly what `retrieve()` (component 7) emits — no
+  naming drift between the Python citation shape and the JS consumer.
+
+**RED** (`node --test ui/citation.test.js`, before implementation):
+```
+AssertionError: expected true, got null — citation-logic script block not found in index.html
+tests 1, pass 0, fail 1
+```
+
+**GREEN** — 6/7 passed on the first implementation attempt; the 7th (arXiv
+uri) failed for the real reason above, fixed by simplifying the logic (not
+by weakening the test):
+```
+$ node --test ui/citation.test.js
+tests 7, pass 7, fail 0
+```
+Covers: kind defaulting, document-vs-video dispatch, label text per kind
+(timestamp / "Page N" / "Slide N"), page-anchor construction for arXiv-style
+extensionless paper URLs and `.pdf`/`.pptx` deck URLs, missing-uri → null,
+and an existing query-string on the uri being preserved before the fragment.
+
+**Full Python suite unaffected** (no `.py` files touched by this component):
+```
+$ uv run pytest tests/ -q
+59 passed, 7 warnings in 66.36s
+```
+
+**sla-gate**: N/A — no network/queue/index surface in this component.
+
+**Still red / not yet built**: components 9–11 (benchmark implementation,
+corpus seeding, self-serve tab). A live-browser check (actually clicking a
+paper/deck citation card once real data is seeded) is still owed once Part 0
+stands up the real stack — this component's evidence is unit-level only.
+
+**spec-guardian**: pending.
+
+**Commit**: _pending._
