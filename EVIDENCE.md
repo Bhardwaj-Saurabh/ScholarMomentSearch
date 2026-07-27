@@ -920,6 +920,15 @@ seeding 24 real sources (8 videos via yt-dlp+CLIP, 16 documents via
 fetch+parse+embed) has never been run — that's real network/compute work
 appropriately deferred to Part 0, not something to fabricate here.
 
-**spec-guardian**: pending.
+**spec-guardian**: PASS, no findings. Independently verified: `SAMPLE_VIDEOS`'s
+list body has zero diff lines (only additions around it); the deterministic
+`doc_seed_<corpus_id>_<kind>` id is the single source used consistently by
+`_corpus_documents()`, `_not_indexed_documents()`, and `seed_to_completion()`
+— no parallel id derivation exists; `examples/quickstart.py` (PROVIDED)
+confirmed unaffected; the honest-failure loop genuinely attempts every source
+every pass (per-item try/except, no early abort) and only returns `False`
+when something is truly still unindexed after all passes. Re-ran the suite
+independently: `79 passed, 7 warnings in 70.37s`, matching.
 
-**Commit**: _pending._
+**Commit**: `bc06390` — "Extend boot-time seed gate to ingest the 8 corpus
+triplets (component 10)".
