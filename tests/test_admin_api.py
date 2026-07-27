@@ -136,3 +136,51 @@ def test_list_sources_requires_no_auth(client):
     existing convention — only mutating routes carry the Bearer requirement."""
     resp = client.get("/admin/sources")
     assert resp.status_code == 200
+
+
+# ── Component 11: retry (library panel "document lifecycle + retry") ────────
+
+def test_retry_document_requires_auth(client, cleanup):
+    resp = client.post("/admin/documents", json={
+        "uri": "https://arxiv.org/pdf/1706.03762", "kind": "paper"}, headers=AUTH)
+    doc_id = resp.json()["id"]
+    cleanup.append(doc_id)
+    db.set_document_status(doc_id, "failed", error="boom")
+
+    resp = client.post(f"/admin/documents/{doc_id}/retry")
+    assert resp.status_code == 401
+
+
+def test_retry_document_resets_to_pending_and_reenqueues(client, cleanup):
+    resp = client.post("/admin/documents", json={
+        "uri": "https://arxiv.org/pdf/1706.03762", "kind": "paper"}, headers=AUTH)
+    doc_id = resp.json()["id"]
+    cleanup.append(doc_id)
+    db.set_document_status(doc_id, "failed", error="network blip")
+
+    resp = client.post(f"/admin/documents/{doc_id}/retry", headers=AUTH)
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["id"] == doc_id
+    assert body["status"] == "pending"
+
+    row = db.get_document(doc_id)
+    assert row["status"] == "pending"
+    assert row["error"] is None
+
+
+def test_retry_document_404_when_missing(client):
+    resp = client.post("/admin/documents/doc_does_not_exist/retry", headers=AUTH)
+    assert resp.status_code == 404
+
+
+def test_retry_document_404_for_wrong_tenant(client, cleanup):
+    resp = client.post("/admin/documents", json={
+        "uri": "https://arxiv.org/pdf/1706.03762", "kind": "paper"}, headers=AUTH)
+    doc_id = resp.json()["id"]
+    cleanup.append(doc_id)
+    db.set_document_status(doc_id, "failed", error="boom")
+
+    resp = client.post(f"/admin/documents/{doc_id}/retry",
+                       headers={**AUTH, "X-User-Id": "someone-else"})
+    assert resp.status_code == 404

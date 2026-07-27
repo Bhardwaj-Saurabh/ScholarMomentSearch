@@ -58,3 +58,16 @@ def register_document(req: DocumentRequest, uid: str = Depends(user_id_dep)):
 @router.get("/sources")
 def list_sources(uid: str = Depends(user_id_dep)):
     return {"sources": db.list_sources(uid)}
+
+
+@router.post("/documents/{doc_id}/retry", status_code=202, dependencies=[Depends(require_auth)])
+def retry_document(doc_id: str, uid: str = Depends(user_id_dep)):
+    """Mirrors POST /api/videos/{id}/retry. Documents ride FIFO directly
+    (component 5's decision — no dispatcher/fair-queue branch), so a retry
+    always re-enqueues immediately."""
+    row = db.get_document(doc_id)
+    if row is None or row["user_id"] != uid:
+        raise HTTPException(404, "Document not found.")
+    db.set_document_status(doc_id, "pending", error=None)
+    flow_run_id = jobs.enqueue_document(doc_id, uid, row["kind"])
+    return {"id": doc_id, "status": "pending", "flow_run_id": flow_run_id}

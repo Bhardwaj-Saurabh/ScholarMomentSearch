@@ -932,3 +932,93 @@ independently: `79 passed, 7 warnings in 70.37s`, matching.
 
 **Commit**: `bc06390` — "Extend boot-time seed gate to ingest the 8 corpus
 triplets (component 10)".
+
+---
+
+## 2026-07-27 — Component 11: self-serve ingest tab (`ui/index.html`)
+
+**Scope** (DESIGN.md §3, row 11): "the existing ingest box (YouTube URL / Upload
+tabs) gains a 'Paper / Deck' tab → `POST /admin/documents`; the library panel
+shows document lifecycle + retry, tenant-scoped like videos." This is the
+11th and final DESIGN.md component.
+
+Gap found during scoping: DESIGN.md's row explicitly asks for "+ retry", but
+component 6 only shipped `POST /admin/documents` and `GET /admin/sources` —
+no retry route exists for documents (unlike videos' `POST /api/videos/{id}/retry`).
+Added `POST /admin/documents/{doc_id}/retry` to `src/api/admin.py` (not a
+protected file — it's the component-6-created router), mirroring `videos.py`'s
+retry but always direct-enqueuing (no fair-dispatch branch, consistent with
+component 5's decision that documents ride FIFO).
+
+**Evals defined**:
+- Unit (Python): 4 new tests in `tests/test_admin_api.py` for the retry route
+  (202+pending on success, 401 without Bearer, 404 missing doc, 404 wrong tenant).
+- Unit (JS, pure logic): new `ui/ingest.test.js` (7 tests) exercising a new
+  DOM-free `<script id="ingest-logic">` block in `index.html` — `docBadge(status)`
+  (lifecycle icon/label incl. `parsing`, a status documents have that videos
+  don't) and `buildDocumentPayload(kind, uri, title)` (client-side mirror of
+  `admin.py`'s validation). Same node:vm regex-extraction pattern as component 8's
+  `citation.test.js` — no DOM stub, no new JS framework.
+- Contract probe: `tests/test_admin_api.py` doubles as the contract-probe layer
+  again (TestClient, in-process), per the convention component 6 established —
+  no live stack exists yet (Part 0 still deferred).
+- SLA relevance: none directly. This is a UI-only feature plus one lightweight
+  endpoint mirroring an existing pattern; the accept-latency path it rides
+  (`POST /admin/documents`) was already SLA-tested in component 6/9.
+
+**RED** (before implementation):
+```
+$ uv run pytest tests/test_admin_api.py -x -q
+assert resp.status_code == 401
+E       assert 404 == 401
+1 failed, 9 passed in 12.59s   # /admin/documents/{id}/retry route doesn't exist
+
+$ node --test ui/ingest.test.js
+generatedMessage: false, code: 'ERR_ASSERTION', actual: null, expected: true
+✖ ui/ingest.test.js — <script id="ingest-logic"> block doesn't exist yet
+```
+
+**IMPLEMENT**:
+- `src/api/admin.py`: `POST /admin/documents/{doc_id}/retry` (202, Bearer-gated,
+  tenant-scoped 404, resets status to pending + clears error + re-enqueues).
+- `ui/index.html`:
+  - Third tab "Paper / Deck" in `#addTabs` (kind select, URI input, optional
+    title input, register button) — hidden by default like the existing tabs,
+    and hidden entirely in sample mode via the existing `applyMode()` logic
+    (no new visibility branch needed).
+  - `<script id="ingest-logic">`: `docBadge(status)`, `buildDocumentPayload(...)`.
+  - `loadDocuments()`: fetches the already-unified `GET /admin/sources`
+    (component 6), filters to non-video rows, renders chips with lifecycle
+    badge + retry button on `failed`. Deliberately does NOT touch `loadVideos()`
+    or reuse `/admin/sources` for videos — `/api/videos` stays the single
+    source of truth for video rendering (is_sample, frame_count, thumbnails),
+    so this component is purely additive.
+  - `$("#docBtn").onclick`: validates via `buildDocumentPayload`, POSTs to
+    `/admin/documents`, matches the existing `registerIngest` UX (clear inputs,
+    "Queued — processing in the background", triggers the shared refresher).
+  - `startRefresher()`/`_INFLIGHT` extended to poll `loadDocuments()` alongside
+    `loadVideos()` and to include `"parsing"` (a document-only status) in the
+    in-flight set.
+
+**GREEN**:
+```
+$ node --test ui/*.test.js
+ℹ tests 13
+ℹ pass 13
+ℹ fail 0
+
+$ uv run pytest tests/ -x -q
+83 passed, 7 warnings in 79.88s
+```
+(4 new Python tests + 79 from components 1–10 = 83, no regressions; 6 existing
++ 7 new JS tests = 13, no regressions.)
+
+**Still deferred**: exercising this in an actual browser against a live stack,
+and the live-curl contract-probe checklist — both wait on Part 0 (the user's
+explicit choice to finish all 11 components first). No UI screenshot/manual
+click-through was performed in this session; only the pure-logic and
+TestClient layers were run.
+
+All 11 DESIGN.md components are now implemented.
+
+**Commit**: pending (see below).

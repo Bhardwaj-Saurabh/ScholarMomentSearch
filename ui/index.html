@@ -82,6 +82,7 @@
       <div id="addTabs" class="flex gap-2">
         <span class="tab active" data-tab="yt">YouTube URL</span>
         <span class="tab" data-tab="up">Upload</span>
+        <span class="tab" data-tab="doc">Paper / Deck</span>
       </div>
     </div>
     <div id="addControls">
@@ -94,9 +95,21 @@
         <input id="upFile" type="file" accept="video/*" class="flex-1 min-w-[220px] text-sm">
         <button id="upBtn" class="bg-ink hover:bg-black text-white text-sm font-semibold rounded-xl px-5 py-2.5">Upload &amp; ingest</button>
       </div>
+      <div id="tab-doc" class="hidden flex gap-2 flex-wrap items-center">
+        <select id="docKind" class="bg-white border border-line rounded-xl px-3 py-2.5 text-sm outline-none focus:border-coral">
+          <option value="paper">Paper (PDF)</option>
+          <option value="deck">Deck (PDF/PPTX)</option>
+        </select>
+        <input id="docUri" type="text" placeholder="https://arxiv.org/pdf/1706.03762"
+          class="flex-1 min-w-[220px] bg-white border border-line rounded-xl px-4 py-2.5 text-sm outline-none focus:border-coral">
+        <input id="docTitle" type="text" placeholder="Title (optional)"
+          class="min-w-[160px] bg-white border border-line rounded-xl px-4 py-2.5 text-sm outline-none focus:border-coral">
+        <button id="docBtn" class="bg-ink hover:bg-black text-white text-sm font-semibold rounded-xl px-5 py-2.5">Ingest</button>
+      </div>
       <div id="ingestStatus" class="text-sm text-muted mt-3 min-h-[20px]"></div>
     </div>
     <div id="videos" class="flex flex-wrap gap-2 mt-2"></div>
+    <div id="documents" class="flex flex-wrap gap-2 mt-2"></div>
     <div id="scopeLine" class="hidden text-xs text-muted mt-3"></div>
     <p id="libNote" class="text-xs text-muted mt-3">YouTube is searched by picture (frames) and transcript; uploads by picture only for now. First ingest downloads the models.</p>
   </section>
@@ -168,6 +181,35 @@ function citeOpenUrl(c){
   if(loc && "page" in loc) return `${uri}#page=${loc.page}`;
   if(loc && "slide" in loc) return `${uri}#page=${loc.slide}`;
   return uri;
+}
+</script>
+<script id="ingest-logic">
+/* Pure, DOM-free helpers for the Paper/Deck self-serve tab (DESIGN.md
+   component 11). Kept separate from the main script (same reasoning as
+   citation-logic, component 8): ui/ingest.test.js regex-extracts and runs
+   just this block with plain Node — no browser needed. */
+const _DOC_KINDS = ["paper", "deck"];
+function docBadge(status){
+  switch(status){
+    case "indexed":   return {icon:"✓", label:"indexed", c:"text-[#1f7a43]"};
+    case "pending":   return {icon:"◷", label:"waiting (fair queue)", c:"text-[#8a6d1a]"};
+    case "queued":    return {icon:"◷", label:"queued", c:"text-[#8a6d1a]"};
+    case "fetching":  return {icon:"⏬", label:"fetching…", c:"text-[#8a6d1a]"};
+    case "parsing":   return {icon:"⏳", label:"parsing…", c:"text-[#8a6d1a]"};
+    case "embedding": return {icon:"⏳", label:"embedding…", c:"text-[#8a6d1a]"};
+    case "failed":    return {icon:"⚠", label:"failed", c:"text-coral2"};
+    case "skipped":   return {icon:"⊘", label:"duplicate", c:"text-muted"};
+    default:          return {icon:"•", label:status, c:"text-muted"};
+  }
+}
+// Client-side mirror of src/api/admin.py's validation, so a bad form never
+// even reaches the network — the server remains the source of truth.
+function buildDocumentPayload(kind, uri, title){
+  if(!_DOC_KINDS.includes(kind)) return {ok:false, error:`kind must be one of ${_DOC_KINDS.join("/")}.`};
+  const u=(uri||"").trim();
+  if(!u) return {ok:false, error:"uri is required."};
+  const t=(title||"").trim();
+  return {ok:true, body:{kind, uri:u, title: t || null}};
 }
 </script>
 <script>
@@ -316,23 +358,53 @@ document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{
   document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active")); t.classList.add("active");
   $("#tab-yt").classList.toggle("hidden",t.dataset.tab!=="yt");
   $("#tab-up").classList.toggle("hidden",t.dataset.tab!=="up");
+  $("#tab-doc").classList.toggle("hidden",t.dataset.tab!=="doc");
 });
+
+/* ---------- documents (papers/decks — component 11) ----------
+   Sample mode (/) shows only the 4 curated talks, same as loadVideos(); the
+   self-serve library (/get-started) additionally lists papers/decks via the
+   unified GET /admin/sources (already {id,kind,status,title,pct,chunk_count}
+   for both videos and documents — filtered here to the non-video rows so
+   loadVideos()'s own video rendering/is_sample logic stays untouched). */
+async function loadDocuments(){
+  if(!SELECTABLE()){ $("#documents").innerHTML=""; return []; }
+  const {sources}=await (await fetch("/admin/sources")).json();
+  const docs=sources.filter(s=>s.kind!=="video");
+  const box=$("#documents");
+  if(!docs.length){ box.innerHTML=""; return docs; }
+  const kindLabel=k=>k==="paper"?"📄 paper":"🖼 deck";
+  box.innerHTML=docs.map(d=>{
+    const b=docBadge(d.status);
+    const pct=(d.pct!=null)?` ${Math.round(d.pct*100)}%`:"";
+    const retry=(d.status==="failed")
+      ? `<button class="ml-2 text-muted hover:text-coral2" data-doc-retry="${esc(d.id)}" title="Retry ingest">↻</button>` : "";
+    return `<span class="chip" style="cursor:default">`
+      + `<span class="mr-1.5 ${b.c}" title="${esc(b.label)}">${b.icon}</span>`
+      + `${esc(d.title||d.id)} <span class="${b.c}">· ${kindLabel(d.kind)} · ${esc(b.label)}${pct}</span>${retry}</span>`;
+  }).join("");
+  box.querySelectorAll("[data-doc-retry]").forEach(btn=>btn.onclick=async(e)=>{
+    e.stopPropagation();
+    await fetch("/admin/documents/"+encodeURIComponent(btn.dataset.docRetry)+"/retry",{method:"POST"});
+    loadDocuments(); startRefresher();
+  });
+  return docs;
+}
 
 /* Ingestion is a QUEUE — register returns 202 instantly and the worker(s)
    process videos concurrently. So we free the button the moment a video is
    queued (you can add more right away) and let a single background refresher
    update the chips until nothing is processing. Per-video progress shows on
    the chips themselves (sampling… / embedding 40%). */
-const _INFLIGHT=["pending","queued","fetching","sampling","embedding"];
+const _INFLIGHT=["pending","queued","fetching","sampling","embedding","parsing"];
 let _refresher=null;
 function startRefresher(){
   if(_refresher) return;
   _refresher=setInterval(async()=>{
-    const videos=await loadVideos();
-    if(!videos || !videos.some(v=>_INFLIGHT.includes(v.status))){
-      clearInterval(_refresher); _refresher=null;
-      $("#ingestStatus").textContent="";
-    }
+    const [videos,docs]=await Promise.all([loadVideos(),loadDocuments()]);
+    const busy=(videos&&videos.some(v=>_INFLIGHT.includes(v.status)))
+      || (docs&&docs.some(d=>_INFLIGHT.includes(d.status)));
+    if(!busy){ clearInterval(_refresher); _refresher=null; $("#ingestStatus").textContent=""; }
   }, 2500);
 }
 async function registerIngest(body, btns){
@@ -364,6 +436,22 @@ $("#upBtn").onclick=async()=>{ const f=$("#upFile").files[0]; if(!f)return;
     registerIngest({video_id:p.video_id,key:p.key,title:f.name.replace(/\.[^.]+$/,"")},[$("#upBtn")]);
     $("#upFile").value="";   // clear so you can pick the next file right away
   }catch(e){ st.textContent="Error: "+e.message; $("#upBtn").disabled=false; }
+};
+$("#docBtn").onclick=async()=>{
+  const st=$("#ingestStatus");
+  const r=buildDocumentPayload($("#docKind").value, $("#docUri").value, $("#docTitle").value);
+  if(!r.ok){ st.textContent="Error: "+r.error; return; }
+  $("#docBtn").disabled=true;
+  try{
+    const resp=await fetch("/admin/documents",{method:"POST",
+      headers:{"Content-Type":"application/json"}, body:JSON.stringify(r.body)});
+    if(!resp.ok){ const e=await resp.json().catch(()=>({})); throw new Error(e.detail||resp.statusText); }
+    await resp.json();
+    $("#docUri").value=""; $("#docTitle").value="";   // ready for the next one
+    st.textContent="Queued — processing in the background. Add another anytime.";
+    loadDocuments(); startRefresher();
+  }catch(e){ st.textContent="Error: "+e.message; }
+  finally{ $("#docBtn").disabled=false; }
 };
 
 /* ---------- ask ---------- */
@@ -508,7 +596,7 @@ const EXAMPLES=["a diagram of the attention mechanism","an animation of a neural
 $("#examples").innerHTML=EXAMPLES.map(q=>`<span class="chip">${esc(q)}</span>`).join("");
 $("#examples").querySelectorAll(".chip").forEach(c=>c.onclick=()=>{ qEl.value=c.textContent; autogrow(); qEl.focus(); });
 
-applyMode(); loadConfig(); loadVideos();
+applyMode(); loadConfig(); loadVideos(); loadDocuments();
 </script>
 </body>
 </html>
