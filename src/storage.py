@@ -25,6 +25,7 @@ from pathlib import Path
 from .config import (
     AWS_REGION,
     DATA,
+    DOC_KEY_PREFIX,
     FRAME_KEY_PREFIX,
     PRESIGN_EXPIRY_S,
     PRESIGN_GET_EXPIRY_S,
@@ -52,6 +53,10 @@ def frame_key(user_id: str, video_id: str, index: int) -> str:
 
 def frame_prefix(user_id: str, video_id: str) -> str:
     return f"{FRAME_KEY_PREFIX}{user_id}/{video_id}/"
+
+
+def doc_key(user_id: str, doc_id: str, ext: str) -> str:
+    return f"{DOC_KEY_PREFIX}{user_id}/{doc_id}{ext}"
 
 
 def _s3():

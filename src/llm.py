@@ -126,6 +126,18 @@ def answer(question: str, moments: list[dict], cfg: LLMConfig) -> str:
     return _answer_openai(cfg, question, moments)
 
 
+def caption_image(image_jpeg: bytes, cfg: LLMConfig) -> str:
+    """One-line caption for a slide with too little extractable text to embed
+    on its own (DESIGN.md component 4's deck captioning step). Reuses answer()'s
+    provider dispatch exactly like ping() does, rather than a parallel code path."""
+    return answer(
+        "Describe this presentation slide in one or two sentences: what claim, "
+        "diagram, or result does it show? Be concrete and specific.",
+        [{"image": image_jpeg, "transcript": None, "timestamp": ""}],
+        cfg,
+    )
+
+
 def ping(cfg: LLMConfig) -> str:
     """Connectivity + vision check: one tiny image, one word back. Raises with
     the provider's error on failure (surfaced to the settings UI)."""

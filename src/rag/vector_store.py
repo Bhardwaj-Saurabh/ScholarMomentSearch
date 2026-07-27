@@ -124,6 +124,11 @@ def _ensure(collection: str, dim: int) -> None:
                                field_schema=qm.PayloadSchemaType.KEYWORD)
     except Exception:
         pass
+    try:  # paper/deck chunks in the text collection filter/delete by source_id
+        c.create_payload_index(collection_name=collection, field_name="source_id",
+                               field_schema=qm.PayloadSchemaType.KEYWORD)
+    except Exception:
+        pass
 
 
 def ensure_collection() -> None:
@@ -207,6 +212,34 @@ def search_text(vector: np.ndarray, user_id: str, *, top_k: int,
             return []
         raise
     return [{"score": float(h.score), **(h.payload or {})} for h in hits]
+
+
+def upsert_document_chunks(user_id: str, source_id: str, kind: str, vectors: np.ndarray,
+                           payloads: list[dict[str, Any]]) -> None:
+    """Paper/deck chunks into the SAME text collection video transcripts use —
+    the shared cross-source semantic space (DESIGN.md component 4). IDs are
+    uuid5 of '<source_id>:<kind>:<i>' so re-runs overwrite, and never collide
+    with video ids ('<video_id>:text:<i>')."""
+    points = [
+        qm.PointStruct(id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source_id}:{kind}:{i}")),
+                       vector=vec.tolist(), payload=payload)
+        for i, (vec, payload) in enumerate(zip(vectors, payloads))
+    ]
+    if points:
+        client().upsert(collection_name=TEXT_COLLECTION, points=points, wait=True)
+
+
+def delete_document_chunks(user_id: str, source_id: str) -> None:
+    """Purge a document's chunks before re-embedding, mirroring delete_video's
+    role for the video branches — keeps a re-run idempotent."""
+    sel = qm.FilterSelector(filter=qm.Filter(must=[
+        qm.FieldCondition(key="user_id", match=qm.MatchValue(value=user_id)),
+        qm.FieldCondition(key="source_id", match=qm.MatchValue(value=source_id)),
+    ]))
+    try:
+        client().delete(collection_name=TEXT_COLLECTION, points_selector=sel, wait=True)
+    except Exception:
+        pass
 
 
 def delete_video(user_id: str, video_id: str) -> None:

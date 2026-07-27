@@ -175,3 +175,110 @@ real hygiene gap per CLAUDE.md's media-file rule) rather than deferred.
 
 **Commit**: `8777d05` — "Add deck PDF/PPTX slide parser (component 3)".
 Follow-up `.gitignore` fix included in the next commit.
+
+---
+
+## 2026-07-27 — Component 4: document ingest Prefect flow (`src/ingest/doc_pipeline.py`)
+
+**Scope** (DESIGN.md §3, row 4): "Document ingest flow | `src/ingest/doc_pipeline.py`
+| Prefect flow `ms-ingest-document` with kind branch. Lifecycle: `pending →
+fetching → parsing → embedding → indexed | failed`. Per-task retries like video.
+**Crash-safe ordering:** status → `indexed` only *after* the Qdrant upsert
+returns." This is the biggest component so far — it wires DB (1) + parsers (2, 3)
+together and needed small additive plumbing beyond the named file:
+
+- `src/config.py` — `DOC_KEY_PREFIX = "docs/"` (new key-layout constant)
+- `src/storage.py` — `doc_key(user_id, doc_id, ext)` (mirrors `upload_key`)
+- `src/db.py` — `set_document_storage_key(doc_id, storage_key)` (small setter)
+- `src/rag/vector_store.py` — `upsert_document_chunks`/`delete_document_chunks`
+  (mirror `upsert_chunks`/`delete_video`'s text-branch role, ID scheme
+  `{source_id}:{kind}:{i}`) + a `source_id` payload index in `_ensure()`
+- `src/llm.py` — `caption_image(image_jpeg, cfg)`, implemented as a one-line
+  wrapper around the existing `answer()` (same trick `ping()` already uses) —
+  zero new provider-dispatch code
+
+None of these are on CLAUDE.md's protected-file list; each is purely additive
+(new functions/constants, no existing video-path behavior touched).
+
+**Product decision beyond the letter of DESIGN.md's row**: `t_fetch` persists the
+downloaded paper/deck to object storage (`storage.upload_file` + `doc_key`) before
+proceeding, unlike the video pipeline's YouTube path (which never persists,
+relying on YouTube's own stability). Justification: `benchmark/corpus.json`'s
+`known_gaps` already flagged that `.edu`/course-page deck URLs "can rotate across
+course terms" — persisting a durable copy is what keeps a citation's `uri` alive
+after that happens. Matches ARCHITECTURE.md §5.1's "P1 fetch: download PDF → sha256
+dup check → docs/ in object storage" line, which the video flow's precedent alone
+would not have implied.
+
+**Environment/tooling decisions** (so the tests are real, not theater):
+- Installed `prefect`, `qdrant-client`, `fastembed` into the venv (already
+  base-app deps in `requirements.txt` — no new entries needed there).
+- Confirmed Prefect flows/tasks run fully locally with no Cloud account (a
+  temporary local server auto-starts when `PREFECT_API_URL` is unset — matches
+  `examples/quickstart.py`'s documented behavior). Timed the cost: a full `@flow`
+  call costs ~1s (fixed per-run overhead); calling a `@task` directly (its
+  `.fn` attribute, bypassing flow-run tracking) costs ~40ms after the one-time
+  ~10s server bootstrap. Used a **session-scoped** `prefect_test_harness()`
+  fixture (`tests/conftest.py`, opt-in via `test_doc_pipeline.py`'s local
+  autouse fixture, not global) so only this component's tests pay that cost,
+  once. Tests call `.fn` directly except the 2 full end-to-end flow tests.
+- Qdrant: real, **embedded on-disk mode** (`QDRANT_LOCAL_PATH` env pointed at a
+  throwaway temp dir in `conftest.py`, no server/cloud key) — proves the actual
+  upsert/payload/ID-scheme wiring, not a mock's approximation.
+- Embeddings: real fastembed (bge-small-en-v1.5, ONNX, CPU). First call
+  downloads the model from HF Hub: **~13s one-time** (`Fetching 5 files...`,
+  confirmed live); cached after (~2ms on the second call). No API key needed.
+- Object storage: real, local provider (writes under `./data/`, gitignored per
+  the `.gitignore` fix from component 3); test fixtures clean up their keys.
+- Mocked at the two genuine external boundaries per the `tdd` skill's own
+  guidance: the network `_download()` call (an arbitrary external URL) and
+  `llm.caption_image` (a paid provider API) — never a real network fetch or a
+  real LLM call in the test suite.
+
+**RED** (`uv run pytest tests/test_doc_pipeline.py -q`, before implementation):
+```
+ImportError: cannot import name 'doc_pipeline' from 'src.ingest'
+Interrupted: 1 error during collection
+```
+
+**GREEN** — all 14 tests passed on the first implementation attempt (no
+red-then-fix cycle needed this time):
+```
+$ uv run pytest tests/test_doc_pipeline.py -v
+14 passed, 7 warnings in 40.23s
+```
+Covers: `_download`'s own URL-fetch logic; `t_fetch`'s storage-key-vs-uri
+dispatch, hash computation + storage persistence, and duplicate-skip path;
+`t_parse`'s kind branching (page locator for papers, slide locator for decks,
+including the unknown-kind error); `t_caption`'s three states (no LLM
+configured → no-op, LLM available → caption injected, LLM raises → swallowed,
+never crashes the flow); `t_embed_index`'s real Qdrant round-trip (payload
+shape verified directly via `client().scroll()` — `kind`, `page`/`slide`,
+`user_id`, `source_id`, `embed_version` all present) **and** the named
+crash-safety invariant (`vector_store.upsert_document_chunks` forced to raise
+→ status asserted to stay `"embedding"`, never reaches `"indexed"`); the full
+`ingest_document` flow succeeding end-to-end and setting `"failed"` with a
+readable error on an injected parse failure.
+
+**Full suite**:
+```
+$ uv run pytest tests/ -q
+36 passed, 7 warnings in 39.50s
+```
+(14 new + 22 from components 1–3, no regressions. One new warning is Qdrant's
+local mode noting "payload indexes have no effect in local Qdrant" — expected
+and harmless; indexes take effect against real Qdrant Cloud in production.)
+
+**sla-gate deferred, not skipped**: `benchmark/bench.py` needs a running HTTP
+stack (`POST /admin/documents`, the queue trigger) that doesn't exist until
+components 5 (queue wiring) and 6 (admin router) are built — there is nothing
+for it to hit yet. The mechanism the resilience gate will later verify at the
+system level (worker crash → zero loss → no re-run of finished stages) is
+already directly proven here at the unit level via the crash-safety test above.
+
+**Still red / not yet built**: components 5–11 (queue wiring, admin API, search,
+UI, benchmark, seeding).
+
+**spec-guardian**: pending.
+
+**Commit**: _pending._

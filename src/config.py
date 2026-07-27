@@ -93,8 +93,12 @@ def gcs_service_account_info() -> dict:
 # Bucket key layout — every key is user-scoped (tenant isolation at the path level):
 #   uploads/{user_id}/{video_id}.{ext}      raw uploaded video (presigned PUT target)
 #   frames/{user_id}/{video_id}/NNNNNN.jpg  downscaled frame thumbnails (citations)
+#   docs/{user_id}/{doc_id}.{ext}           fetched paper/deck (Assignment 3) —
+#                                            persisted so a citation's uri still
+#                                            resolves after a course page rotates
 UPLOAD_KEY_PREFIX = "uploads/"
 FRAME_KEY_PREFIX = "frames/"
+DOC_KEY_PREFIX = "docs/"
 
 # --- Presigned uploads (browser -> bucket, bypassing the API) -----------------
 PRESIGN_EXPIRY_S = _int("PRESIGN_EXPIRY_S", 900)          # presigned PUT lifetime

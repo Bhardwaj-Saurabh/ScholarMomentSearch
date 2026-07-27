@@ -245,6 +245,14 @@ def set_document_status(doc_id: str, status: str, *, error: str | None = None,
         )
 
 
+def set_document_storage_key(doc_id: str, storage_key: str) -> None:
+    """Record where the fetched paper/deck was persisted (docs/{user}/{id}.ext) —
+    so its citation still resolves after the original uri rotates or 404s."""
+    with pool().connection() as conn:
+        conn.execute("UPDATE ms_documents SET storage_key = %s, updated_at = now() WHERE id = %s",
+                     (storage_key, doc_id))
+
+
 def set_document_progress(doc_id: str, progress: float) -> None:
     with pool().connection() as conn:
         conn.execute("UPDATE ms_documents SET progress = %s, updated_at = now() WHERE id = %s",
