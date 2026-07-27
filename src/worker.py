@@ -22,6 +22,7 @@ import os
 import time
 
 from prefect import serve
+from prefect.deployments.runner import EntrypointType
 
 from .db import init_schema
 from .ingest.doc_pipeline import ingest_document
@@ -31,10 +32,24 @@ from .ingest.pipeline import ingest_video
 def _build_deployments():
     """Both flows' deployments, sharing the "ingest" deployment name — the
     full identity (flow_name/ingest) is what jobs.py's INGEST_DEPLOYMENT and
-    DOCUMENT_DEPLOYMENT constants point at."""
+    DOCUMENT_DEPLOYMENT constants point at.
+
+    entrypoint_type=MODULE_PATH (not Prefect's default FILE_PATH): a worker
+    executing a SCHEDULED run re-imports the flow fresh via the deployment's
+    stored entrypoint. FILE_PATH loads the module as a bare script
+    (importlib spec_from_file_location, no parent package) — both pipeline
+    modules use relative imports (`from .. import db`), which then raise
+    "ImportError: attempted relative import beyond top-level package". This
+    silently never showed up before: seed.py calls ingest_video/
+    ingest_document as plain in-process function calls, bypassing Prefect
+    scheduling entirely, so this path was never exercised until a real
+    worker executed a real scheduled run (Part 0). MODULE_PATH loads via
+    normal importlib.import_module("src.ingest.doc_pipeline"), which keeps
+    the module inside its real package and resolves relative imports fine.
+    """
     return [
-        ingest_video.to_deployment(name="ingest"),
-        ingest_document.to_deployment(name="ingest"),
+        ingest_video.to_deployment(name="ingest", entrypoint_type=EntrypointType.MODULE_PATH),
+        ingest_document.to_deployment(name="ingest", entrypoint_type=EntrypointType.MODULE_PATH),
     ]
 
 

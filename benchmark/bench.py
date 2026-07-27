@@ -27,6 +27,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SLA = json.loads((ROOT / "benchmark" / "sla.json").read_text())
@@ -34,13 +35,15 @@ BASE = os.getenv("BASE_URL", "http://localhost:8100").rstrip("/")
 ADMIN = os.getenv("ADMIN_TOKEN", "")
 
 
-def _req(method, path, body=None, token=None, timeout=30):
+def _req(method, path, body=None, token=None, timeout=30, user=None):
     url = f"{BASE}{path}"
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("content-type", "application/json")
     if token:
         req.add_header("authorization", f"Bearer {token}")
+    if user:
+        req.add_header("x-user-id", user)
     t0 = time.perf_counter()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -163,13 +166,18 @@ def measure_recall() -> float:
     return _score_recall(labeled, by_query)
 
 
-def _submit_documents(uris: list[dict]) -> list[str]:
+def _submit_documents(uris: list[dict], user: str | None = None) -> list[str]:
     """POST /admin/documents for each, concurrently (real load, not
-    serialized) — returns the accepted ids."""
+    serialized) — returns the accepted ids. `user` scopes the registration to
+    a tenant (X-User-Id) other than the default: without it, every corpus URI
+    here is byte-identical to what component 10 already seeded under
+    user_id='default', so the fetch step's per-tenant duplicate check would
+    mark every one 'skipped' — never 'indexed' — no matter how fast real
+    ingest actually is."""
     from concurrent.futures import ThreadPoolExecutor
 
     def submit(u):
-        st, body, _ = _req("POST", "/admin/documents", token=ADMIN, body=u)
+        st, body, _ = _req("POST", "/admin/documents", token=ADMIN, body=u, user=user)
         return json.loads(body)["id"] if st == 202 else None
 
     with ThreadPoolExecutor(max_workers=8) as ex:
@@ -181,14 +189,17 @@ _TERMINAL = {"indexed", "skipped", "failed"}
 
 
 def _poll_sources_until_terminal(ids: set[str], timeout_s: float,
-                                 interval_s: float = 3.0) -> dict[str, str]:
+                                 interval_s: float = 3.0,
+                                 user: str | None = None) -> dict[str, str]:
     """Poll GET /admin/sources until every id reaches a terminal status or the
     timeout elapses. Returns the final {id: status} map for the caller to
-    judge — a missing id after the timeout is reported as 'missing'."""
+    judge — a missing id after the timeout is reported as 'missing'. `user`
+    must match whatever tenant _submit_documents() registered these ids
+    under, or they'll never show up in the (tenant-scoped) listing."""
     deadline = time.time() + timeout_s
     last: dict[str, str] = {}
     while time.time() < deadline:
-        st, body, _ = _req("GET", "/admin/sources")
+        st, body, _ = _req("GET", "/admin/sources", user=user)
         if st == 200:
             rows = {s["id"]: s["status"] for s in json.loads(body)["sources"]}
             last = {i: rows.get(i, "missing") for i in ids}
@@ -198,24 +209,35 @@ def _poll_sources_until_terminal(ids: set[str], timeout_s: float,
     return last
 
 
+def _fresh_bench_tenant(label: str) -> str:
+    """A tenant id no prior bench.py run (or the boot-time seed) could have
+    used — so per-tenant duplicate detection never shadows this run's REAL
+    fetch/parse/embed work against already-indexed content."""
+    return f"bench-{label}-{uuid.uuid4().hex[:10]}"
+
+
 def run_concurrent_ingest_load(n: int = 20) -> None:
     """Fire n REAL document registrations (real arXiv PDFs, not throwaway
     URLs) so search-during-ingest measures genuine fetch/parse/embed
-    contention, not just a fast-failing HTTP GET."""
-    _submit_documents(_cycle_to_n(_load_corpus_uris(), n))
+    contention, not just a fast-failing HTTP GET. Runs under its own fresh
+    tenant (see _fresh_bench_tenant) so these actually parse+embed instead of
+    deduping against the seeded corpus."""
+    user = _fresh_bench_tenant("load")
+    _submit_documents(_cycle_to_n(_load_corpus_uris(), n), user=user)
 
 
 def measure_throughput(n: int = 16, timeout_s: float = 600.0) -> float:
-    """Submit n documents, poll until all reach a terminal state, return
-    total indexed chunk_count / elapsed seconds."""
+    """Submit n documents under a fresh tenant, poll until all reach a
+    terminal state, return total indexed chunk_count / elapsed seconds."""
+    user = _fresh_bench_tenant("throughput")
     t0 = time.perf_counter()
-    ids = _submit_documents(_cycle_to_n(_load_corpus_uris(), n))
+    ids = _submit_documents(_cycle_to_n(_load_corpus_uris(), n), user=user)
     if not ids:
         return 0.0
-    final = _poll_sources_until_terminal(set(ids), timeout_s)
+    final = _poll_sources_until_terminal(set(ids), timeout_s, user=user)
     elapsed = time.perf_counter() - t0
 
-    st, body, _ = _req("GET", "/admin/sources")
+    st, body, _ = _req("GET", "/admin/sources", user=user)
     counts = {}
     if st == 200:
         counts = {s["id"]: (s.get("chunk_count") or 0) for s in json.loads(body)["sources"]}
@@ -243,7 +265,8 @@ def run_resilience_check(n: int = 10, kill_after_s: float = 8.0,
     polling again — this asserts that promise holds, it doesn't manufacture it."""
     import subprocess
 
-    ids = _submit_documents(_cycle_to_n(_load_corpus_uris(), n))
+    user = _fresh_bench_tenant("resilience")
+    ids = _submit_documents(_cycle_to_n(_load_corpus_uris(), n), user=user)
     if not ids:
         print("[resilience] no documents were accepted — is the stack up?")
         return False
@@ -257,7 +280,7 @@ def run_resilience_check(n: int = 10, kill_after_s: float = 8.0,
     subprocess.run(["docker", "kill", cid], timeout=15)
     print(f"[resilience] killed worker container {cid[:12]} mid-ingest")
 
-    final = _poll_sources_until_terminal(set(ids), timeout_s)
+    final = _poll_sources_until_terminal(set(ids), timeout_s, user=user)
     lost = [i for i, s in final.items() if s not in _TERMINAL]
     if lost:
         print(f"[resilience] {len(lost)} source(s) never reached a terminal state: {lost}")

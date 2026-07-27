@@ -103,3 +103,61 @@ def test_cycle_to_n_handles_n_smaller_than_list():
     uris = [{"uri": "a"}, {"uri": "b"}, {"uri": "c"}]
     out = bench._cycle_to_n(uris, 2)
     assert [u["uri"] for u in out] == ["a", "b"]
+
+
+# ── Part-0 finding: throughput/load/resilience must not dedup-shadow the
+# already-seeded corpus (see EVIDENCE.md). ────────────────────────────────────
+
+def test_req_sets_x_user_id_header_when_user_given(monkeypatch):
+    """Repro for the dedup-shadowing bug: _req() must be ABLE to scope a
+    request to a non-default tenant, or every corpus URI submitted by the
+    benchmark collides with what component 10 already seeded under
+    user_id='default' and gets marked 'skipped' — never 'indexed' — no
+    matter how fast real ingest is."""
+    captured = {}
+
+    class _FakeResp:
+        status = 202
+        def read(self):
+            return b"{}"
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def _fake_urlopen(req, timeout=30):
+        captured["headers"] = dict(req.header_items())
+        return _FakeResp()
+
+    monkeypatch.setattr(bench.urllib.request, "urlopen", _fake_urlopen)
+    bench._req("POST", "/admin/documents", body={"x": 1}, user="bench-throughput-abc123")
+    assert captured["headers"].get("X-user-id") == "bench-throughput-abc123"
+
+
+def test_req_omits_x_user_id_header_when_no_user_given(monkeypatch):
+    captured = {}
+
+    class _FakeResp:
+        status = 200
+        def read(self):
+            return b"{}"
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def _fake_urlopen(req, timeout=30):
+        captured["headers"] = dict(req.header_items())
+        return _FakeResp()
+
+    monkeypatch.setattr(bench.urllib.request, "urlopen", _fake_urlopen)
+    bench._req("GET", "/admin/sources")
+    assert "X-user-id" not in captured["headers"]
+
+
+def test_fresh_bench_tenant_is_unique_per_call_and_labeled():
+    a = bench._fresh_bench_tenant("throughput")
+    b = bench._fresh_bench_tenant("throughput")
+    assert a != b  # two runs (or two calls) must never collide with each other
+    assert a.startswith("bench-throughput-")
+    assert "default" not in a  # must never accidentally land on the seeded tenant

@@ -60,6 +60,25 @@ def test_worker_serves_both_deployments_with_correct_full_names():
     assert full_names == {jobs.INGEST_DEPLOYMENT, jobs.DOCUMENT_DEPLOYMENT}
 
 
+def test_worker_deployments_use_module_path_entrypoints():
+    """Regression test for a Part-0 finding: Prefect's default FILE_PATH
+    entrypoint (e.g. 'src/ingest/doc_pipeline.py:ingest_document') makes the
+    worker re-import the flow's module as a bare script when it actually
+    executes a scheduled run — which breaks on `from .. import db` etc. with
+    'ImportError: attempted relative import beyond top-level package'. This
+    crashed EVERY real document ingestion submitted through /admin/documents
+    against a live worker (seed.py never hit it — it calls ingest_video/
+    ingest_document directly, bypassing Prefect scheduling entirely).
+    MODULE_PATH entrypoints (e.g. 'src.ingest.doc_pipeline:ingest_document')
+    load via normal importlib.import_module, preserving package context."""
+    from prefect.deployments.runner import EntrypointType
+
+    deployments = worker._build_deployments()
+    for d in deployments:
+        assert d.entrypoint_type == EntrypointType.MODULE_PATH, d.full_name
+        assert ".py:" not in d.entrypoint, d.full_name
+
+
 def test_dispatcher_module_untouched_by_this_component():
     """Guard against silent scope creep: dispatcher.py (protected) should have
     no document-related content — documents ride FIFO via enqueue_document(),

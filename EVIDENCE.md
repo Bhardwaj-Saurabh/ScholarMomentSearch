@@ -1035,3 +1035,301 @@ defect — documents never emit it). Re-ran independently: `pytest tests/ -q`
 
 **Commit**: `7ac58d4` — "Add self-serve Paper/Deck ingest tab with document
 retry (component 11)".
+
+---
+
+## 2026-07-28 — Part 0: real stack, sla-gate, contract-probe, grounding-auditor
+
+All 11 DESIGN.md components were built against mocks/local Postgres/embedded
+Qdrant. This session stood up the REAL stack (`docker compose up`, real Neon,
+real Prefect Cloud, real Qdrant Cloud, real OpenAI) for the first time and ran
+it for real, per the user's earlier choice to finish all 11 components before
+Part 0. Three real bugs were found and fixed; two real operational gaps and
+two real grounding violations were found and are disclosed, not fixed, below.
+
+### Bug 1 — Dockerfile never copied `benchmark/` into the image (found+fixed)
+
+`Dockerfile` only `COPY`'d `src/` and `ui/`. `src/samples.py`'s `_load_corpus()`
+reads `benchmark/corpus.json` at runtime and silently returns `[]` if the file
+is missing (a deliberate dev-convenience fallback). Inside the container this
+meant `CORPUS = []` regardless of `SEED_CORPUS`, so the first `docker compose
+up` seeded only the 4 base sample videos — the 8 corpus videos and 16
+documents from component 10 never seeded, with no error at all.
+**Fix**: `COPY benchmark/corpus.json benchmark/corpus.json` added to
+`Dockerfile`. Rebuilt, re-seeded: `docker compose logs seed` confirmed
+`[seed] pass 1/3: 8 video(s), 16 document(s)` then `[seed] corpus complete —
+everything indexed`. Verified via `GET /admin/sources`: 28 sources, all
+`indexed` (`Counter({'video': 12, 'deck': 8, 'paper': 8})`,
+`Counter({'indexed': 28})`).
+
+### Bug 2 — Prefect deployments used FILE_PATH entrypoints, crashing every real registration (found+fixed)
+
+`worker.py`'s `_build_deployments()` called `flow.to_deployment(name="ingest")`
+with Prefect's default `entrypoint_type=EntrypointType.FILE_PATH`. A worker
+executing an actually-SCHEDULED run re-imports the flow fresh via
+`load_script_as_module(script_path)` — loading e.g. `src/ingest/doc_pipeline.py`
+as a bare script with no parent package. Both pipeline modules use relative
+imports (`from .. import db, llm, storage`), which then raise
+`ImportError: attempted relative import beyond top-level package`. This
+crashed **every single** real document (and would have crashed every real
+video) registration submitted through the actual API — `seed.py` never hit
+this because it calls `ingest_video`/`ingest_document` as plain in-process
+function calls, bypassing Prefect scheduling entirely. This is why it
+survived 11 components of test coverage: nothing before this session ever
+exercised a real worker executing a real scheduled run.
+
+Root-caused via `docker compose logs worker` (`Unexpected exception
+encountered when trying to load flow` → `ImportError: attempted relative
+import beyond top-level package`, 100% reproducible on every submitted
+document). Confirmed `Flow.to_deployment(entrypoint_type=...)` and
+`EntrypointType.MODULE_PATH` exist in the installed Prefect version by
+inspecting it inside the worker container. `MODULE_PATH` loads via
+`importlib.import_module("src.ingest.doc_pipeline")` — normal package import,
+relative imports resolve fine.
+
+**Fix**: `src/worker.py`'s `_build_deployments()` now passes
+`entrypoint_type=EntrypointType.MODULE_PATH` for both flows. New regression
+test `test_worker_deployments_use_module_path_entrypoints` in
+`tests/test_jobs_worker.py` asserts `d.entrypoint_type == EntrypointType.MODULE_PATH`
+and `".py:" not in d.entrypoint` for both deployments — RED before the fix
+(`AssertionError`), GREEN after.
+
+**Live verification**: rebuilt+restarted the worker, submitted a fresh
+duplicate-of-seeded document (`doc_1e9fc890ff`, BERT paper). Worker log:
+`Beginning flow run` → `doc-fetch` `Finished in state Completed()` →
+`[ingest] doc_1e9fc890ff skipped (duplicate content)` → `Finished in state
+Completed()`. No crash. Confirmed both deployments' entrypoints via
+`docker compose exec worker python -c "from src.worker import
+_build_deployments; ..."`:
+```
+ms-ingest-video/ingest    | entrypoint= src.ingest.pipeline.ingest_video    | type= EntrypointType.MODULE_PATH
+ms-ingest-document/ingest | entrypoint= src.ingest.doc_pipeline.ingest_document | type= EntrypointType.MODULE_PATH
+```
+
+### Bug 3 — bench.py's own load/throughput tests dedup-shadowed the seeded corpus (found+fixed)
+
+`measure_throughput()`, `run_concurrent_ingest_load()`, and
+`run_resilience_check()` all submitted documents built from the same
+`benchmark/corpus.json` URIs already seeded (component 10) under
+`user_id='default'`, with no `X-User-Id` header — so every submission
+deduped (`find_duplicate_document`, tenant-scoped) against the seeded corpus
+and landed on `skipped`, never `indexed`, no matter how fast real ingest
+actually was. `measure_throughput()` only sums `chunk_count` for
+`status=='indexed'` ids, so it read `0.0` structurally, independent of the
+Prefect crash (bug 2) — confirmed directly: after fixing bug 2, a full
+bench.py re-run still produced `ingest_throughput_chunks_per_s: 0.0`, and
+querying Postgres showed all 16-36 bench-submitted docs at `status='skipped'`,
+zero newly `indexed`.
+
+**Fix**: added `_fresh_bench_tenant(label)` (mints `bench-<label>-<uuid8>`)
+and threaded a `user` param through `_req`/`_submit_documents`/
+`_poll_sources_until_terminal`; `run_concurrent_ingest_load`,
+`measure_throughput`, and `run_resilience_check` now each register under
+their own fresh tenant per call, so their submissions genuinely parse+embed
+instead of instantly deduping. Three new tests in `tests/test_bench.py`
+(`test_req_sets_x_user_id_header_when_user_given`,
+`test_req_omits_x_user_id_header_when_no_user_given`,
+`test_fresh_bench_tenant_is_unique_per_call_and_labeled`) — RED before
+(`_req` had no `user` param), GREEN after. Full suite: `uv run pytest tests/
+-x -q` → **87 passed**.
+
+### Operational finding — worker/Prefect-runner froze solid under sustained load (found, worked around, NOT fixed in code)
+
+After the bug-3 fix, a bench run submitted ~66 documents in a burst (30
+deliberately-fake accept-latency probes + 20 load + 16 throughput) against
+only 4 concurrent execution slots (2 workers × `WORKER_CONCURRENCY=2`).
+Partway through, `docker stats` showed both worker containers at 0-3% CPU
+and `docker compose logs worker` repeated `"44 scheduled runs skipped (at
+capacity)"` **unchanged** for 13+ minutes — genuinely stuck, not slow
+(`updated_at` on the pending rows was frozen). `docker compose restart
+worker` cleared it immediately; real fetch→parse→caption→embed→index cycles
+resumed at ~15-20s/document. This looks like a Prefect `Runner`
+internal-concurrency-accounting leak (a crashed/orphaned execution not
+releasing its slot) rather than anything in this repo's own code. **Not
+fixed this session** — flagged as a real production concern: the worker
+service should have a liveness health-check + auto-restart policy (or the
+Prefect runner's concurrency-leak needs its own investigation), since
+`restart: unless-stopped` alone does not help when the process itself doesn't
+exit, it just stops making progress.
+
+### Operational finding — the resilience gate's crash-recovery is NOT automatic
+
+`bench.py --resilience` submitted 10 documents under a fresh tenant,
+`docker kill`ed the worker mid-ingest, and polled. Result:
+```
+$ uv run python benchmark/bench.py --resilience
+[resilience] killed worker container ecfaf0a0378a mid-ingest
+[resilience] 2 source(s) never reached a terminal state: ['doc_665584d466', 'doc_d928b50a31']
+[FAIL] no_loss_under_crash: False (target 0 dropped, all indexed)
+```
+Investigated two layers:
+1. **Docker never auto-restarted the killed container.** `docker compose ps
+   -a` showed `worker-1: Exited (137) 5 minutes ago` — `restart:
+   unless-stopped` (confirmed set via `docker inspect`, `restartCount=0`)
+   simply never fired for this `--scale`-created replica. Manually running
+   `docker compose up -d --scale worker=2` brought it back.
+2. **Even with a worker available again, the two interrupted documents
+   stayed `pending` indefinitely** — `ingest_video`/`ingest_document`'s
+   `@flow(...)` decorators (`pipeline.py:157`, `doc_pipeline.py:164`) set
+   `timeout_seconds=3600` but no `retries`. A hard-killed process doesn't
+   raise a Python exception Prefect can retry on; without flow-level
+   retries or an external reconciliation sweep, an interrupted run has no
+   automatic path back to execution. Manually calling this session's own
+   `POST /admin/documents/{id}/retry` (component 11) on both stuck ids
+   immediately re-enqueued them and they completed normally (worker log:
+   `Beginning flow run` → `doc-fetch Completed` for both). So recovery
+   **is possible but is operator/automation-driven, not automatic** — the
+   ARCHITECTURE.md/DESIGN.md assumption ("Prefect redelivers the interrupted
+   run once a worker is polling again") does not hold for a hard kill
+   without flow-level retries.
+**Not fixed this session** (would need `retries=N` on both flows — one of
+which, `pipeline.py`, is a CLAUDE.md-protected file — plus verification that
+Prefect actually retries a `Crashed` state the same way it retries a
+`Failed` one, which needs its own investigation). `no_loss_under_crash`
+remains **FAIL** as measured; disclosed here with full root cause and a
+proven manual recovery path.
+
+### Contract-probe checklist (`.claude/skills/contract-probe/SKILL.md`, `BASE_URL=http://localhost:8000`)
+
+| # | Probe | Result |
+|---|---|---|
+| 1 | `GET /` → 200 | **PASS** |
+| 2 | `POST /admin/documents` (Bearer, valid) → 202, `{id,status,kind}`, <1s | **PASS** (202, 0.987s) |
+| 3 | Auth: no/wrong Bearer → 401 | **PASS** (both) |
+| 4 | Validation: bad kind / bad scheme → 400 | **PASS** (both) |
+| 5 | `GET /admin/sources` unified shape | **PASS** (video/paper/deck rows all correct shape) |
+| 6 | Provided endpoints unchanged: `/api/health` 200, `/api/ask` 200 with answer+citations | **PASS** |
+| 7 | Cross-source citations: one query → ≥2 kinds, `start_ms` + `page` locators | **PASS** ("how does attention avoid recurrence" → video `start_ms` + paper `page` in one response) |
+| 8 | Grounding on nonsense query: `q=zorbulax+quantum+pickles` | **SOFT FAIL** — see grounding-auditor verdict below: real citations returned (not invented), `abstained:false`, but the checklist's literal "abstain/empty citations" expectation isn't met. Root cause: `CONFIDENCE_THRESHOLD`/`TEXT_CONFIDENCE_THRESHOLD` gate on raw per-branch similarity, which nonsense queries can still weakly clear. Not touched — this is PROVIDED confidence-gate logic, not a component built this session. |
+
+### sla-gate (`benchmark/bench.py`, `benchmark/sla.json` — thresholds untouched)
+
+| Metric | Target | Run 1 (pre-fix) | Run 2 (bug 2 fixed) | Run 3 (bug 3 fixed) |
+|---|---|---|---|---|
+| `accept_latency_p95_ms` | ≤300 | 1277.7 FAIL | 1369.6 FAIL | 1280.5 FAIL |
+| `search_p95_during_ingest_ratio` | ≤1.3 | 0.77 PASS | 0.97 PASS | 1.02 PASS |
+| `recall_at_10` | ≥0.70 | 0.604 FAIL | 0.604 FAIL | 0.667 FAIL |
+| `ingest_throughput_chunks_per_s` | ≥8 | 0.0 FAIL | 0.0 FAIL | 0.0 FAIL |
+
+All three runs' exact console output preserved in session logs. Every number
+above is verbatim from `uv run python benchmark/bench.py` — none rounded
+favorably or omitted.
+
+**accept_latency_p95_ms — genuinely network-bound, not a code bug.** Isolated
+directly inside the running `api` container (`docker compose exec api
+python -c "..."`, 4 back-to-back warm calls): `db.upsert_pending_document`
+≈400ms, `jobs.enqueue_document` (Prefect Cloud `run_deployment`) ≈500-600ms,
+every single call, steady-state — matching the ≈950-1030ms curl end-to-end
+measurements exactly. This is two real network round trips (Neon Postgres +
+Prefect Cloud) from a home/office machine to two separate managed clouds,
+consistent with CLAUDE.md's own architecture invariant (insert+schedule,
+zero parsing in the request path — the code is correct). The 300ms target
+almost certainly assumes a co-located topology (e.g., Fly.io + Neon + Prefect
+Cloud in the same region), not this local topology. **Recommend
+re-measuring after the Fly.io deploy** before deciding this gate is
+unreachable.
+
+**recall_at_10 — real gap, with a precise, disclosed mechanism.** bench.py's
+own official numbers (0.604, 0.604, 0.667) all FAIL. A clean, uncontended
+re-run of the same 16 labeled queries via direct curl (run only after all
+concurrent bench-generated ingest load had fully drained, confirmed via
+`docker stats` near-idle) scored **0.729** — above target — on the identical
+scoring logic. The gap between bench.py's own runs and this clean re-check is
+real and explainable: `measure_recall()` runs immediately after
+`run_concurrent_ingest_load()` fires 20 real registrations, so bench.py's own
+official recall measurement is itself contending with real background
+ingest/embedding/LLM-captioning load — a genuine interaction, not a
+discrepancy to paper over.
+
+Root mechanism for the residual gap (found by reading `src/rag/search.py`,
+NOT modified): `TOP_K=6` (`src/config.py:286`) caps the final citations list
+at 6 windows — the system architecturally never returns more than 6,
+regardless of `labeled_queries.json`'s "top-10" framing. Video windows where
+both frame+transcript agree get `CROSS_MODAL_BOOST=1.5×` (`_fuse()`,
+`search.py:79-80`); paper/deck windows get no such boost. With only 6 total
+slots and one modality boosted, whichever document kind (paper or deck)
+scores lower via RRF for a given query is often the one squeezed out — the
+uncontended diagnostic's missing-kind tally was `{'deck': 5, 'paper': 5}`,
+evenly split, not skewed to one kind. This is a genuine product tradeoff
+(fewer, more focused citations → cheaper/faster LLM calls), not a bug in
+this session's components; **not modified**, per instruction to diagnose
+only.
+
+**ingest_throughput_chunks_per_s — 0.0 in all three official runs, for three
+different reasons in sequence**: run 1 = worker crash (bug 2); runs 2-3 =
+bench's own dedup-shadowing (bug 3, fixed mid-session, so run 3 still read
+0.0 because the *fix* for run 3 hadn't landed until after run 3 started) /
+then a genuine worker/Prefect-runner freeze (see operational finding above)
+ate the entire 600s poll window. After manually restarting the worker and
+letting the backlog drain to completion (outside bench.py's own poll
+window), all 16 `bench-throughput-*` documents did reach `indexed`
+(832 total chunks). Two honest supplementary numbers, computed post-hoc,
+NOT from an official bench.py run: including the ~13-minute freeze,
+832 chunks / 1308s ≈ **0.64 chunks/s**; excluding the freeze (from the
+`docker compose restart worker` timestamp to completion), 832 chunks / 479s
+≈ **1.74 chunks/s**. Both are still below the 8 chunks/s target — a real,
+disclosed gap, not just a measurement artifact, though the true steady-state
+number is likely higher than either (LLM-captioning rate limits — see
+grounding-auditor section — were also throttling this same window: worker
+log shows repeated `RateLimitError: ... tokens per min (TPM): Limit 200000,
+Used 200000` during this exact period).
+
+### grounding-auditor verdict
+
+Spawned an agent to adopt `.claude/agents/grounding-auditor.md`'s persona
+against the live stack. Findings, most-severe first:
+
+1. **CRITICAL — fabricated answer for a nonexistent source.** Query "What
+   does the Mamba paper say about state space models" (no Mamba/SSM source
+   exists in the 58-source corpus, confirmed via `/admin/sources`) got a
+   confident answer inventing Mamba-paper content, built on a real citation
+   that is actually an unrelated RAG-talk transcript snippet (misheard "RAG
+   models" as "rack models"). Should have abstained (empty corpus for this
+   topic) and did not.
+2. **HIGH — real citation, fabricated claim.** Query about GPT-3's
+   "ARC-AGI benchmark" accuracy got specific percentages attributed to a
+   real, correctly-numbered citation (GPT-3 paper, page in range) — but the
+   cited page's actual numbers are for ARC (Easy), not ARC (Challenge) as
+   claimed; the answer's specific statistic does not match what the source
+   says.
+3. **LOW — the zorbulax case, re-confirmed.** All cited content is real and
+   indexed; the answer text correctly disclaims relevance
+   ("does not appear in the provided moments"). `abstained:false` is a
+   metadata-label inaccuracy, not an invented citation.
+4. **Tenant isolation — PASS.** A novel `X-User-Id` sees zero sources via
+   `/admin/sources` and gets `abstained:true`/empty citations from
+   `/ask_stream` — no cross-tenant leakage.
+5. **Spot-check on an on-topic query — PASS.** Citations' locators
+   (slide/page numbers) were internally consistent and plausible.
+
+Findings 1-2 are **new, real grounding violations** distinct from and more
+severe than the zorbulax soft-fail already known from the contract probe —
+the LLM answer-synthesis step (`src/llm.py`/`_validate_citations` in
+`search.py`) validates that cited `[n]` markers refer to real, existing
+citations, but does not verify that the answer's specific *claims* are
+actually supported by the cited text's content. **Not fixed this session**
+(would require either a citation-faithfulness check post-generation or a
+stricter abstain condition when the corpus has zero genuinely on-topic
+matches) — disclosed here as the most important open item for whoever picks
+up grounding work next.
+
+### Summary of what's still red, honestly
+
+- `accept_latency_p95_ms`, `recall_at_10`, `ingest_throughput_chunks_per_s`,
+  `no_loss_under_crash`: all **FAIL** as officially measured by
+  `benchmark/bench.py` against the frozen `benchmark/sla.json` thresholds.
+  Each has a precise, real, investigated root cause above — none are
+  mysteries, none are code bugs left unfixed out of neglect, and none of the
+  thresholds were touched.
+- Three real code bugs (Dockerfile, Prefect entrypoint, bench.py
+  dedup-shadowing) were found and fixed, each verified live.
+- Two real operational gaps (worker/Prefect-runner freeze under load;
+  crash-recovery is operator-driven, not automatic) were found, worked
+  around live, and disclosed — not fixed in code.
+- Two real, more-severe-than-previously-known grounding violations
+  (fabricated Mamba-paper answer; misattributed GPT-3 benchmark statistic)
+  were found by the grounding-auditor agent and disclosed — not fixed.
+
+**Commit**: pending (see below) — `src/worker.py`, `tests/test_jobs_worker.py`,
+`Dockerfile`, `.dockerignore`, `benchmark/bench.py`, `tests/test_bench.py`,
+this entry.

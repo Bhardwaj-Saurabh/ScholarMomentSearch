@@ -23,6 +23,8 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
 
 COPY src/ src/
 COPY ui/ ui/
+# src/samples.py._load_corpus() reads this at runtime (seed gate, component 10)
+COPY benchmark/corpus.json benchmark/corpus.json
 
 EXPOSE 8000
 CMD ["uvicorn", "src.app:app", "--host", "0.0.0.0", "--port", "8000"]
