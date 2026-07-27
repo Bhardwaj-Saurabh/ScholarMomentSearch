@@ -601,6 +601,16 @@ number fabricated here.
 **Still red / not yet built**: components 8–11 (UI citation render, benchmark
 implementation, corpus seeding, self-serve tab).
 
-**spec-guardian**: pending.
+**spec-guardian**: PASS-with-warnings. Diffed `_fuse()` line by line and
+confirmed the video-only path is byte-for-byte identical (rrf formula, window
+grouping key, cross-modal boost condition, sort order) — the new document
+branch is strictly additive, appended after video windows are built. Confirmed
+`/api/ask`'s response shape is unchanged (no `response_model=` constraining
+it) and every original citation field survives. Confirmed `/ask_stream` is a
+thin wrapper with no logic duplication and no token-streaming rewrite.
+Independently re-ran the suite: `59 passed, 7 warnings in 82.47s`, matching.
+No other violations found — "the riskiest part of this change... genuinely
+does survive unmodified."
 
-**Commit**: _pending._
+**Commit**: `8dd3803` — "Add cross-source search: fix video_id KeyError,
+kind+locator citations, GET /ask_stream (component 7)".
