@@ -378,6 +378,97 @@ fire-and-forget `enqueue_document` call) is structurally identical to
 **Still red / not yet built**: components 6–11 (admin API, search, UI,
 benchmark, seeding).
 
+**spec-guardian**: PASS. Verified independently: crash-safety ordering holds by
+inspection (the single `"indexed"` write is the last line of `t_embed_index`,
+strictly after the upsert); no protected files touched; video-path functions
+only added-to; the two ID schemes structurally cannot collide. One low finding
+(the new `source_id` index lived in the shared `_ensure()` helper, so it also
+fired — harmlessly — against the video-only collection) fixed immediately:
+moved into `ensure_text_collection()` specifically. Full suite re-confirmed
+green after the fix.
+
+**Commit**: `49142d8` — "Add document queue wiring: enqueue_document and
+multi-deployment worker (component 5)". Note: `.env.example` was found to
+contain real, live credentials (Neon/Prefect/Qdrant/OpenAI) mid-session —
+excluded from this and every commit; moved to the gitignored `.env`, `.env.example`
+reverted to placeholders, user advised to rotate all four. See conversation
+record; not a code-quality finding, a security incident caught before push.
+
+---
+
+## 2026-07-27 — Component 6: admin router (`src/api/admin.py`)
+
+**Scope** (DESIGN.md §3, row 6): "Admin router | `src/api/admin.py` (new) |
+`POST /admin/documents` → validate, insert `pending`, enqueue, **202
+immediately**; `GET /admin/sources` → union of videos+documents with `kind`,
+`status`, `pct`; errors 400/401/502."
+
+**Design choices, each grounded in an existing convention, not invented**:
+- Auth/tenancy (`require_auth`, `user_id`) are **imported from
+  `src.api.videos`**, not duplicated — the exact pattern `src/api/search.py`
+  (an existing, provided file) already uses for its own Bearer-gated routes
+  (`from .videos import require_auth, user_id as user_id_dep`).
+- `GET /admin/sources` is **public/tenant-scoped, no Bearer required** —
+  matches `GET /api/videos`'s existing convention (only mutating routes carry
+  the admin-token dependency).
+- `uri` validation accepts `http://`, `https://`, or `storage://` — the two
+  shapes README's own contract examples show. A `storage://` uri is split into
+  `uri` (kept as given, for reference) and `storage_key` (the raw key,
+  immediately usable by `doc_pipeline.t_fetch`'s existing storage_key branch —
+  no new fetch logic needed).
+- `502` is raised specifically when `jobs.enqueue_document` fails — the
+  Postgres insert already succeeded, so a scheduling failure is the upstream
+  queue's fault (Prefect Cloud unreachable), matching "502 upstream failure"
+  literally. The row is marked `failed` first so it's visible in
+  `GET /admin/sources` rather than silently stuck `pending`.
+- `app.py` (not a protected file) gained one import + one `include_router`
+  line — the smallest possible touch to wire a third router onto the existing
+  two.
+
+**RED** (`uv run pytest tests/test_admin_api.py -v`, before implementation):
+```
+ERROR ... ImportError: cannot import name 'admin' from 'src.api'
+9 errors
+```
+
+**GREEN** — all 9 passed on the first implementation attempt:
+```
+$ uv run pytest tests/test_admin_api.py -v
+9 passed, 2 warnings in 3.33s
+```
+Covers: 202-before-work with the exact `{id, status, kind}` shape; 401 without
+Bearer; 400 for bad `kind`, empty `uri`, and a disallowed scheme; the
+`storage://` → `storage_key` split; 502 + `failed` status when the queue
+schedule call raises; `GET /admin/sources`' unified shape (exact dict equality
+against the README-documented fields) and its no-auth-required contract.
+
+Doubles as the **contract-probe** layer (FastAPI's `TestClient` exercises the
+real request/response/validation cycle in-process) until a live
+`docker compose up` stack exists for the skill's live-curl variant.
+
+**Full suite**:
+```
+$ uv run pytest tests/ -q
+49 passed, 7 warnings in 57.71s
+```
+(9 new + 40 from components 1–5, no regressions.)
+
+**sla-gate: now technically runnable, deliberately not run yet.** This is the
+first component giving `bench.py` a real HTTP surface (`POST
+/admin/documents`) to hit. Running it for real needs a live server process
+plus a live Prefect Cloud connection actually scheduling runs (this session's
+`.env` now holds real Neon/Prefect/Qdrant/OpenAI credentials — see the
+component-5 security note above) — a bigger operational step (effectively
+Part 0) than this component's own scope. Deferred to the next session step
+rather than spending the user's real cloud credentials without being asked
+first. The TestClient-based accept-fast contract (202 with no parsing in the
+handler body — `jobs.enqueue_document` is the only post-insert call, and it's
+fire-and-forget) is structurally verified above.
+
+**Still red / not yet built**: components 7–11 (cross-source search, UI,
+benchmark, seeding, self-serve tab). Part 0 (real stack, live `bench.py` run)
+is now unblocked and a natural next step.
+
 **spec-guardian**: pending.
 
 **Commit**: _pending._

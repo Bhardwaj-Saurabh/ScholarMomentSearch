@@ -18,6 +18,7 @@ os.environ.setdefault(
     "QDRANT_LOCAL_PATH",
     str(Path(tempfile.gettempdir()) / "momentsearch_test_qdrant"),
 )
+os.environ.setdefault("ADMIN_TOKEN", "test-admin-token")
 
 
 @pytest.fixture(scope="session")
