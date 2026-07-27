@@ -297,3 +297,87 @@ the fix: `36 passed, 7 warnings in 54.23s` (timing noise only, count unchanged).
 
 **Commit**: `1a87a97` — "Add document ingest Prefect flow with crash-safe status
 ordering (component 4)". Follow-up index-scoping fix in the next commit.
+
+---
+
+## 2026-07-27 — Component 5: queue wiring (`src/jobs.py`, `src/worker.py`)
+
+**Scope** (DESIGN.md §3, row 5): "Queue wiring | `src/jobs.py`, `src/worker.py`,
+`src/dispatcher.py` | `enqueue_document()`; worker serves both deployments;
+dispatcher claims across videos+documents (**or documents ride FIFO first, WFQ
+unified after**)."
+
+**Scope decision — a real conflict between our own governance docs, resolved
+in writing before coding.** `src/dispatcher.py` is on CLAUDE.md's protected-file
+list ("Extend around them; never edit their behavior"), but DESIGN.md's row 5
+literally names it for unification. DESIGN.md's own row offers an explicit
+fallback — documents ride FIFO first — so I took it: **`src/dispatcher.py` is
+untouched, 0 diff** (`git diff --stat src/dispatcher.py` — empty output,
+confirmed after shipping). Documents are enqueued immediately via
+`enqueue_document()`, which the future admin endpoint (component 6) will call
+directly at registration; WFQ-unifying the dispatcher across both tables is a
+later, optional enhancement DESIGN.md itself defers, not a dropped requirement.
+No graded SLA needs document-side fairness (`sla.json` only checks accept
+latency, search-during-ingest ratio, throughput, recall, no-loss).
+
+**API research before implementing**: confirmed Prefect's module-level `serve()`
+accepts multiple `RunnerDeployment` objects built via `flow.to_deployment(name=
+...)`, and that `deployment.full_name` reproduces the exact `{flow_name}/
+{deployment_name}` convention `jobs.py`'s existing `INGEST_DEPLOYMENT =
+"ms-ingest-video/ingest"` already relies on — verified live
+(`f1.to_deployment(name="ingest").full_name == "f1/ingest"`) before touching
+`worker.py`, so switching from the single-flow `.serve()` method to the
+multi-flow `serve()` function provably preserves the video deployment's
+existing identity (a hard invariant: the provided video contract must survive
+unmodified).
+
+**Implementation**:
+- `src/jobs.py` — `DOCUMENT_DEPLOYMENT = "ms-ingest-document/ingest"` +
+  `enqueue_document(doc_id, user_id, kind)`, mirroring `enqueue_video` exactly
+  (same fire-and-forget `timeout=0` contract).
+- `src/worker.py` — extracted `_build_deployments()` (returns both flows'
+  `RunnerDeployment`s) so the deployment-construction logic is testable without
+  running the actual blocking `serve()` loop (infra, not business logic — same
+  reasoning `ingest_video.serve()` itself was never unit-tested under).
+  `main()` now serves both deployments with `WORKER_CONCURRENCY` as one
+  **shared** concurrency pool (a deliberate simplification: Prefect's `serve()`
+  takes a single `limit` across all served deployments, and a worker VM's
+  CPU/memory doesn't care which pipeline is using it). Also now eagerly
+  ensures the text collection at startup (previously only the CLIP collection
+  was), since it's shared by transcripts and documents alike.
+
+**RED** (`uv run pytest tests/test_jobs_worker.py -v`, before implementation):
+```
+FAILED test_enqueue_document_calls_run_deployment_with_correct_contract - AttributeError: module 'src.jobs' has no attribute 'enqueue_document'
+FAILED test_worker_serves_both_deployments_with_correct_full_names - AttributeError: module 'src.worker' has no attribute '_build_deployments'
+2 failed, 2 passed in 1.41s
+```
+(The 2 passes were pre-existing-state guards — `INGEST_DEPLOYMENT` unchanged,
+`dispatcher.py` has no document content — correctly green before any change,
+since they assert what must NOT change.)
+
+**GREEN**:
+```
+$ uv run pytest tests/test_jobs_worker.py -v
+4 passed, 5 warnings in 1.42s
+$ uv run pytest tests/ -q
+40 passed, 7 warnings in 38.25s
+```
+(4 new + 36 from components 1–4, no regressions.) `enqueue_video`/`enqueue_document`
+tested by mocking `prefect.deployments.run_deployment` at the module boundary —
+a real call needs a live Prefect deployment + polling worker, out of scope for
+a unit test (mirrors how `enqueue_video` itself was never tested before this
+component, since no tests existed in the repo pre-Assignment-3 work).
+
+**sla-gate deferred, not skipped** — same reason as component 4: `bench.py`
+needs `POST /admin/documents` (component 6), which doesn't exist yet. The
+accept-latency-relevant piece this component contributes (a fast,
+fire-and-forget `enqueue_document` call) is structurally identical to
+`enqueue_video`'s already-fast contract, verified via the mocked dispatch test.
+
+**Still red / not yet built**: components 6–11 (admin API, search, UI,
+benchmark, seeding).
+
+**spec-guardian**: pending.
+
+**Commit**: _pending._

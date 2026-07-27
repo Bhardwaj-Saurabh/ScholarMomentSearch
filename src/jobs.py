@@ -13,6 +13,7 @@ from __future__ import annotations
 from prefect.deployments import run_deployment
 
 INGEST_DEPLOYMENT = "ms-ingest-video/ingest"
+DOCUMENT_DEPLOYMENT = "ms-ingest-document/ingest"
 
 
 def enqueue_video(video_id: str, user_id: str) -> str:
@@ -22,5 +23,19 @@ def enqueue_video(video_id: str, user_id: str) -> str:
         parameters={"video_id": video_id, "user_id": user_id},
         timeout=0,  # fire-and-forget: don't block the API waiting for the run
         flow_run_name=f"ingest-{video_id}",
+    )
+    return str(flow_run.id)
+
+
+def enqueue_document(doc_id: str, user_id: str, kind: str) -> str:
+    """Schedule the document ingest flow (paper or deck). Documents ride FIFO —
+    enqueued immediately at registration, not through the WFQ claim table
+    (DESIGN.md component 5's documented alternative to unifying the dispatcher).
+    Returns the Prefect flow-run id."""
+    flow_run = run_deployment(
+        name=DOCUMENT_DEPLOYMENT,
+        parameters={"doc_id": doc_id, "user_id": user_id, "kind": kind},
+        timeout=0,
+        flow_run_name=f"ingest-{doc_id}",
     )
     return str(flow_run.id)
