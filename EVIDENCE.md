@@ -1021,4 +1021,17 @@ TestClient layers were run.
 
 All 11 DESIGN.md components are now implemented.
 
-**Commit**: pending (see below).
+**spec-guardian**: PASS, no findings. Independently verified: `src/api/videos.py`,
+`src/dispatcher.py`, `src/ingest/*.py`, `benchmark/sla.json`, `eval/rubric.json`
+have zero diff lines in this commit; the new retry route's tenant check is a
+verbatim match of `videos.py`'s own pattern (404 for both missing and
+wrong-tenant, no info leak); `loadDocuments()` writes only to `#documents`
+and never touches `#videos`/`loadVideos()`'s state; every status
+`doc_pipeline.py`/`db.py` can actually produce (pending, fetching, parsing,
+embedding, indexed, failed, skipped) has a correctly-spelled case in
+`docBadge()` (one harmless unused `"queued"` case noted as dead code, not a
+defect — documents never emit it). Re-ran independently: `pytest tests/ -q`
+→ 83 passed; `node --test ui/*.test.js` → 13 passed. Matches this entry.
+
+**Commit**: `7ac58d4` — "Add self-serve Paper/Deck ingest tab with document
+retry (component 11)".
