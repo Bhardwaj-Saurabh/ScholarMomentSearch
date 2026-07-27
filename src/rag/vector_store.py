@@ -124,11 +124,6 @@ def _ensure(collection: str, dim: int) -> None:
                                field_schema=qm.PayloadSchemaType.KEYWORD)
     except Exception:
         pass
-    try:  # paper/deck chunks in the text collection filter/delete by source_id
-        c.create_payload_index(collection_name=collection, field_name="source_id",
-                               field_schema=qm.PayloadSchemaType.KEYWORD)
-    except Exception:
-        pass
 
 
 def ensure_collection() -> None:
@@ -137,8 +132,15 @@ def ensure_collection() -> None:
 
 
 def ensure_text_collection() -> None:
-    """Transcript (bge text) collection — the second branch."""
+    """Transcript (bge text) collection — the second branch, now also home to
+    paper/deck chunks. source_id gets its own index attempt here (not in
+    _ensure): frame payloads in the visual collection never carry that field."""
     _ensure(TEXT_COLLECTION, TEXT_EMBED_DIM)
+    try:
+        client().create_payload_index(collection_name=TEXT_COLLECTION, field_name="source_id",
+                                      field_schema=qm.PayloadSchemaType.KEYWORD)
+    except Exception:
+        pass
 
 
 def upsert_frames(user_id: str, video_id: str, ids: Iterable[int],

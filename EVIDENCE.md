@@ -279,6 +279,21 @@ already directly proven here at the unit level via the crash-safety test above.
 **Still red / not yet built**: components 5–11 (queue wiring, admin API, search,
 UI, benchmark, seeding).
 
-**spec-guardian**: pending.
+**spec-guardian**: PASS-with-warnings. Independently verified (not just trusted
+EVIDENCE.md's claims): the crash-safety invariant holds by inspection —
+`set_document_status(doc_id, "indexed", ...)` is the last line of
+`t_embed_index`, strictly after the upsert call, and appears nowhere else in the
+file; no protected files touched; the video path's existing functions
+(`upsert_chunks`, `delete_video`, `set_status`, `answer`, `ping`, `upload_key`)
+were only added-to, never modified; the two ID schemes
+(`{video_id}:text:i` vs `{source_id}:{kind}:i`) cannot collide since `kind` is
+never the literal `"text"`. Independently re-ran the suite: `36 passed, 7
+warnings in 38.30s`, matching. One low finding: the new `source_id` payload-index
+attempt lived in the shared `_ensure()` helper, so it also (harmlessly, via
+try/except) fired against the video-only CLIP collection — beyond DESIGN.md row
+4's text-collection-only scope. **Fixed**: moved the index creation out of
+`_ensure()` into `ensure_text_collection()` specifically. Re-ran full suite after
+the fix: `36 passed, 7 warnings in 54.23s` (timing noise only, count unchanged).
 
-**Commit**: _pending._
+**Commit**: `1a87a97` — "Add document ingest Prefect flow with crash-safe status
+ordering (component 4)". Follow-up index-scoping fix in the next commit.
