@@ -96,5 +96,5 @@
     "Caption availability not programmatically verified for any video - spot-check before relying on the transcript branch",
     ".edu / GitHub Pages deck URLs can rotate across course terms - download local copies before the big backfill (do NOT commit the PDFs)"
   ],
-  "backfill_note": "These 8 triplets are the demo + recall corpus. The scale/decoupling benchmark additionally backfills 50-200 arXiv PDFs (any recent cs.CL/cs.LG listing) - papers only, no videos needed."
+  "backfill_note": "DECIDED: these 8 triplets ARE the product corpus, seeded at boot. No bulk backfill ships with the product - users add their own sources via the UI. bench.py generates its own transient document-ingest load (a few dozen registrations) to prove decoupling/throughput/resilience, then cleans it up."
 }

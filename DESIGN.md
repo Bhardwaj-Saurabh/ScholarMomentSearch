@@ -71,19 +71,19 @@ value; (2) self-serve at runtime — any user pastes a YouTube/arXiv/deck URL in
 UI, tenant-scoped to them; (3) bulk backfill via the admin API. All three ride the
 same queue; search never waits on any of them.
 
-## 4. Corpus & scale plan (right-sized)
+## 4. Corpus & scale plan (right-sized — DECIDED)
 
-"Thousands of aligned triplets" is the *ceiling* of the use case, not what we ingest.
-Video ingest costs real time/compute (yt-dlp + CLIP per video); the SLA gates don't
-need thousands.
+The product ships **pre-built with the 8 curated triplets** in `benchmark/corpus.json`
+(seeded at boot, component 10). **No bulk backfill lives in the product** — users grow
+the corpus themselves via the UI/API (self-serve, tenant-scoped). "Thousands of
+triplets" stays a writeup ceiling, not ingested content.
 
-- **Demo + recall set:** ~10–15 curated aligned triplets — e.g. *Attention Is All You
-  Need* (paper + talk + slides), BERT, RAG (Lewis et al.), CLIP, Chain-of-Thought…
-  Label 15–20 queries with the expected source+locator for recall@10 ≥ 0.70.
-- **Backfill / decoupling test:** 50–200 arXiv PDFs + a batch of decks (text-only —
-  cheap and fast) ingested while the search-latency probe runs. This exercises
-  accept-latency p95 ≤ 300 ms, search p95 ≤ 1.3× idle, ≥ 8 chunks/s, and the
-  worker-kill resilience gate at realistic scale.
+- **Demo + recall set:** the 8 seeded triplets. Label 15–20 queries with the expected
+  source+locator for recall@10 ≥ 0.70.
+- **Benchmark load is transient test traffic, not content:** bench.py registers a
+  burst of a few dozen document ingests to saturate the workers while the
+  search-latency probe runs (accept p95 ≤ 300 ms, search p95 ≤ 1.3× idle,
+  ≥ 8 chunks/s, worker-kill no-loss), then cleans them up. Test load ≠ corpus.
 
 ## 5. Why the queue (writeup seed)
 
