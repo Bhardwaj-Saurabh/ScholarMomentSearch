@@ -128,7 +128,7 @@ def test_list_sources_returns_unified_shape(client, cleanup):
     sources = resp.json()["sources"]
     match = next(s for s in sources if s["id"] == doc_id)
     assert match == {"id": doc_id, "kind": "paper", "status": "pending",
-                     "title": "CLIP", "pct": None}
+                     "title": "CLIP", "pct": None, "chunk_count": None}
 
 
 def test_list_sources_requires_no_auth(client):

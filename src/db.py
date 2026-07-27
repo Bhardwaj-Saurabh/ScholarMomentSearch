@@ -317,14 +317,19 @@ def _pct(progress: float | None) -> int | None:
 
 def list_sources(user_id: str) -> list[dict]:
     """Unified status for GET /admin/sources: videos + documents, normalized to
-    {id, kind, status, title, pct}, newest first."""
+    {id, kind, status, title, pct, chunk_count}, newest first. chunk_count is
+    frame_count for a video, chunk_count for a document — additive field
+    (benchmark/bench.py's throughput measurement needs it over the public API,
+    never touching the DB directly)."""
     rows = [
         (v["created_at"], {"id": v["id"], "kind": "video", "status": v["status"],
-                           "title": v["title"], "pct": _pct(v["progress"])})
+                           "title": v["title"], "pct": _pct(v["progress"]),
+                           "chunk_count": v["frame_count"]})
         for v in list_videos(user_id)
     ] + [
         (d["created_at"], {"id": d["id"], "kind": d["kind"], "status": d["status"],
-                           "title": d["title"], "pct": _pct(d["progress"])})
+                           "title": d["title"], "pct": _pct(d["progress"]),
+                           "chunk_count": d["chunk_count"]})
         for d in list_documents(user_id)
     ]
     rows.sort(key=lambda r: r[0], reverse=True)

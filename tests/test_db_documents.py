@@ -142,9 +142,9 @@ def test_list_sources_unifies_videos_and_documents(cleanup):
     by_id = {s["id"]: s for s in sources}
 
     assert by_id[video_id] == {"id": video_id, "kind": "video", "status": "indexed",
-                               "title": "Attention talk", "pct": None}
+                               "title": "Attention talk", "pct": None, "chunk_count": None}
     assert by_id[doc_id] == {"id": doc_id, "kind": "paper", "status": "embedding",
-                             "title": "Attention paper", "pct": 60}
+                             "title": "Attention paper", "pct": 60, "chunk_count": None}
 
     ids_in_order = [s["id"] for s in sources]  # doc created after video -> newest first
     assert ids_in_order.index(doc_id) < ids_in_order.index(video_id)
