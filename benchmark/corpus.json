@@ -1,0 +1,100 @@
+{
+  "_comment": "Aligned triplets for the AI Research Knowledge Base (Use Case A). Each entry: one paper (arXiv PDF), one YouTube talk, one public slide-deck PDF on the same topic. URLs verified 2026-07-27. video_alignment/deck_alignment: how tightly the artifact covers THIS paper.",
+  "triplets": [
+    {
+      "id": "attention",
+      "paper_title": "Attention Is All You Need (Vaswani et al. 2017)",
+      "paper_pdf": "https://arxiv.org/pdf/1706.03762",
+      "video_url": "https://www.youtube.com/watch?v=rBCqOTEfxvg",
+      "video_note": "Lukasz Kaiser (co-author) masterclass, Pi School",
+      "video_alignment": "high (author)",
+      "deck_pdf": "https://courses.grainger.illinois.edu/ece537/fa2022/slides/lec23.pdf",
+      "deck_note": "UIUC ECE537 Lecture 23 - Attention is All You Need",
+      "deck_alignment": "high (paper-specific lecture)"
+    },
+    {
+      "id": "bert",
+      "paper_title": "BERT (Devlin et al. 2018)",
+      "paper_pdf": "https://arxiv.org/pdf/1810.04805",
+      "video_url": "https://www.youtube.com/watch?v=knTc-NQSjKA",
+      "video_note": "Stanford CS224N guest lecture by Jacob Devlin (lead author)",
+      "video_alignment": "high (author)",
+      "deck_pdf": "https://www.cs.princeton.edu/courses/archive/fall22/cos597G/lectures/lec02.pdf",
+      "deck_note": "Princeton COS597G Lecture 2 - BERT (encoder-only models)",
+      "deck_alignment": "high (paper-specific lecture)"
+    },
+    {
+      "id": "clip",
+      "paper_title": "CLIP (Radford et al. 2021)",
+      "paper_pdf": "https://arxiv.org/pdf/2103.00020",
+      "video_url": "https://www.youtube.com/watch?v=3X3EY2Fgp3g",
+      "video_note": "Alec Radford (lead author) CLIP talk",
+      "video_alignment": "high (author)",
+      "deck_pdf": "https://icml.cc/media/icml-2021/Slides/9193.pdf",
+      "deck_note": "Official ICML 2021 author slides for the CLIP paper",
+      "deck_alignment": "very high (official conference slides)"
+    },
+    {
+      "id": "cot",
+      "paper_title": "Chain-of-Thought Prompting (Wei et al. 2022)",
+      "paper_pdf": "https://arxiv.org/pdf/2201.11903",
+      "video_url": "https://www.youtube.com/watch?v=0SuyDLjNR9g",
+      "video_note": "Jason Wei (lead author) Stanford talk on emergence/reasoning",
+      "video_alignment": "high (author; CoT central but talk is broader)",
+      "deck_pdf": "https://interpretable-ml-class.github.io/slides/Lecture_23_CoT.pdf",
+      "deck_note": "Harvard CS282BR seminar deck on the CoT paper",
+      "deck_alignment": "high (paper-specific seminar)"
+    },
+    {
+      "id": "gpt3",
+      "paper_title": "GPT-3: Language Models are Few-Shot Learners (Brown et al. 2020)",
+      "paper_pdf": "https://arxiv.org/pdf/2005.14165",
+      "video_url": "https://www.youtube.com/watch?v=5i-SC-roENM",
+      "video_note": "Yannic Kilcher paper walkthrough (third-party explainer)",
+      "video_alignment": "medium (explainer, not author)",
+      "deck_pdf": "https://ysu1989.github.io/courses/au20/cse5539/GPT-3.pdf",
+      "deck_note": "Ohio State CSE5539 seminar deck on GPT-3",
+      "deck_alignment": "high (paper-specific seminar)"
+    },
+    {
+      "id": "react",
+      "paper_title": "ReAct (Yao et al. 2022)",
+      "paper_pdf": "https://arxiv.org/pdf/2210.03629",
+      "video_url": "https://www.youtube.com/watch?v=QX-p-vsDoiQ",
+      "video_note": "Arize AI paper discussion (third-party)",
+      "video_alignment": "medium (explainer, not author)",
+      "deck_pdf": "https://yumeng5.github.io/teaching/2024-spring-cs6501/agent.pdf",
+      "deck_note": "UVA CS6501 lecture covering ReAct",
+      "deck_alignment": "high (lecture on the paper)"
+    },
+    {
+      "id": "lora",
+      "paper_title": "LoRA (Hu et al. 2021)",
+      "paper_pdf": "https://arxiv.org/pdf/2106.09685",
+      "video_url": "https://www.youtube.com/watch?v=DhRoTONcyZE",
+      "video_note": "Edward Hu (lead author / inventor) explains LoRA",
+      "video_alignment": "high (author)",
+      "deck_pdf": "https://web.stanford.edu/class/archive/cs/cs224n/cs224n.1244/slides/cs224n-2024-lecture11-adaptation.pdf",
+      "deck_note": "Stanford CS224n 2024 Lecture 11 - Efficient Adaptation (covers LoRA/PEFT)",
+      "deck_alignment": "medium (LoRA within broader adaptation lecture)"
+    },
+    {
+      "id": "rag",
+      "paper_title": "RAG: Retrieval-Augmented Generation (Lewis et al. 2020)",
+      "paper_pdf": "https://arxiv.org/pdf/2005.11401",
+      "video_url": "https://www.youtube.com/watch?v=JGpmQvlYRdU",
+      "video_note": "Patrick Lewis (lead author) presents the RAG paper",
+      "video_alignment": "high (author)",
+      "deck_pdf": "https://raw.githubusercontent.com/Tongji-KGLLM/RAG-Survey/main/assets/RAG_Slide_ENG.pdf",
+      "deck_note": "Tongji KG-LLM RAG survey deck (covers Lewis 2020 among others)",
+      "deck_alignment": "medium (survey, not paper-specific)"
+    }
+  ],
+  "known_gaps": [
+    "DPR (arXiv 2004.04906): no confirmed author video + paper-specific deck found",
+    "DPO (arXiv 2305.18290): author talk only on SlidesLive (pipeline needs YouTube); no confirmed deck",
+    "Caption availability not programmatically verified for any video - spot-check before relying on the transcript branch",
+    ".edu / GitHub Pages deck URLs can rotate across course terms - download local copies before the big backfill (do NOT commit the PDFs)"
+  ],
+  "backfill_note": "These 8 triplets are the demo + recall corpus. The scale/decoupling benchmark additionally backfills 50-200 arXiv PDFs (any recent cs.CL/cs.LG listing) - papers only, no videos needed."
+}
