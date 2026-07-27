@@ -58,65 +58,100 @@ already-built index.
 
 ### 3.1 System context
 
+Two flows share one platform: the **write path** (amber, ①–⑦) ingests sources through
+the queue; the **read path** (blue, Ⓐ–Ⓓ) answers questions from the already-built
+index. They meet only at the managed state layer — never in a process.
+
 ```mermaid
-flowchart LR
-  subgraph actors [Actors]
-    U[User / Researcher]
-    A[Admin / CI]
+flowchart TB
+  classDef actor fill:#1d4ed8,stroke:#1e3a8a,stroke-width:2px,color:#ffffff
+  classDef app fill:#f1f5f9,stroke:#475569,stroke-width:1.5px,color:#0f172a
+  classDef state fill:#fef9c3,stroke:#a16207,stroke-width:1.5px,color:#0f172a
+  classDef ext fill:#dcfce7,stroke:#15803d,stroke-width:1.5px,color:#0f172a
+
+  U(["👤 Researcher"]):::actor
+  A(["🛠️ Admin · CI · Benchmark"]):::actor
+
+  subgraph RUNTIME ["APPLICATION RUNTIME — stateless containers · one Docker image"]
+    direction LR
+    API["<b>API</b><br/>FastAPI :8000<br/>register · search · UI<br/>/ask_stream SSE ★"]:::app
+    EMB["<b>Embedding Service</b><br/>:8001 — warm models<br/>CLIP 512d · bge 384d"]:::app
+    WK["<b>Ingest Workers ×N</b><br/>Prefect flow runners<br/>video ✔ · paper ★ · deck ★"]:::app
+    SEED["<b>Seed Gate</b><br/>one-shot at deploy<br/>8 triplets from corpus.json ★"]:::app
   end
 
-  subgraph app ["App services (one Docker image, stateless)"]
-    API["api :8000<br/>FastAPI — register, search UI,<br/>/ask_stream SSE (NEW)"]
-    W["worker<br/>Prefect flow.serve —<br/>video flow (PROVIDED)<br/>document flow (NEW)"]
-    CLIP["clip :8001<br/>warm CLIP + bge models"]
-    SEED["seed (one-shot gate)<br/>corpus.json triplets (NEW)"]
+  subgraph STATE ["MANAGED STATE — every durable byte is rented"]
+    direction LR
+    PG[("<b>Neon Postgres</b><br/>source manifest<br/>status lifecycle")]:::state
+    MQ[["<b>Prefect Cloud</b><br/>work queue<br/>runs · retries · dashboard"]]:::state
+    VDB[("<b>Qdrant Cloud</b><br/>moments — visual<br/>moments_text — shared text")]:::state
+    OBJ[("<b>Object Storage</b><br/>Tigris · S3 · GCS<br/>media · frames · docs")]:::state
   end
 
-  subgraph managed ["Managed state (rented)"]
-    PG[("Neon Postgres<br/>ms_videos · documents NEW<br/>ms_user_llms")]
-    PF[["Prefect Cloud<br/>work queue: runs,<br/>retries, dashboard"]]
-    QD[("Qdrant Cloud<br/>moments 512-d CLIP<br/>moments_text 384-d bge")]
-    OS[("Object storage<br/>Tigris / S3 / GCS<br/>uploads · frames")]
-    LLM["LLM APIs<br/>OpenAI / NVIDIA / Anthropic"]
-  end
+  LLMX["<b>LLM Providers</b><br/>OpenAI · Anthropic · NVIDIA<br/>answer synthesis · slide captions ★"]:::ext
 
-  U -- "questions (read path)" --> API
-  U -- "paste URL / upload (202)" --> API
-  A -- "POST /admin/documents (202)" --> API
-  API -- "insert pending row" --> PG
-  API -- "schedule flow run" --> PF
-  W -- "long-poll runs (HTTPS out)" --> PF
-  W -- "status lifecycle" --> PG
-  W -- "embed via HTTP" --> CLIP
-  W -- "upsert vectors" --> QD
-  W -- "thumbnails / raw media" --> OS
-  API -- "dual-branch search" --> QD
-  API -- "query embed" --> CLIP
-  API -- "answer synthesis" --> LLM
-  W -- "caption image slides (NEW)" --> LLM
-  SEED -- "runs pipeline to completion, then exits" --> PG
+  U ---->|"Ⓐ ask a question"| API
+  U -->|"① add source · 202"| API
+  A -->|"① backfill · 202"| API
+  API -->|"② insert pending"| PG
+  API -->|"③ schedule run"| MQ
+  WK -->|"④ long-poll runs"| MQ
+  WK -->|"⑤ status updates"| PG
+  WK -->|"⑥ embed chunks"| EMB
+  WK -->|"⑦ upsert vectors"| VDB
+  WK -->|"⑦ store media"| OBJ
+  API -->|"Ⓑ query embed"| EMB
+  API -->|"Ⓒ dual-branch search"| VDB
+  API -->|"Ⓓ grounded answer"| LLMX
+  WK -->|"caption image slides ★"| LLMX
+  SEED -.->|"pre-indexes corpus, exits 0 before UI serves"| PG
+
+  linkStyle 0,10,11,12 stroke:#1d4ed8,stroke-width:2.5px
+  linkStyle 1,2,3,4,5,6,7,8,9,13 stroke:#d97706,stroke-width:2px
+  linkStyle 14 stroke:#64748b,stroke-width:1.5px
 ```
 
-Everything in the app box is stateless and disposable; every arrow to the managed box is
-the only place state lives. Kill any container and nothing is lost.
+| | Write path (amber) | | Read path (blue) |
+|---|---|---|---|
+| ① | user/admin registers a source → **202 in < 300 ms** | Ⓐ | user asks a question (SSE) |
+| ② | API inserts a `pending` manifest row | Ⓑ | embed the query — CLIP text + bge |
+| ③ | API schedules a Prefect flow run (fire-and-forget) | Ⓒ | search both collections, RRF-fuse, gate on confidence |
+| ④ | workers long-poll the queue — outbound HTTPS only | Ⓓ | LLM synthesizes a grounded, cited answer |
+| ⑤–⑦ | status lifecycle → embeddings → idempotent upserts | | |
+
+★ = NEW (our extension) · ✔ = PROVIDED (base repo). Every container is disposable —
+kill any of them and no data is lost, because all state lives in the managed layer.
 
 ### 3.2 Deployment topology
 
 ```mermaid
-flowchart TB
-  subgraph fly ["Fly.io app (region iad) — one image, three process groups"]
+flowchart LR
+  classDef gate fill:#fee2e2,stroke:#b91c1c,stroke-width:1.5px,color:#0f172a
+  classDef proc fill:#f1f5f9,stroke:#475569,stroke-width:1.5px,color:#0f172a
+  classDef edge fill:#dbeafe,stroke:#1d4ed8,stroke-width:1.5px,color:#0f172a
+
+  WWW(["🌐 public HTTPS<br/>force_https · auto-start"]):::edge
+
+  subgraph FLY ["FLY.IO — one image · region iad · private IPv6 mesh"]
     direction LR
-    FAPI["api — shared-cpu-1x / 512 MB<br/>http_service :8000, force_https,<br/>auto-stop / auto-start"]
-    FW["worker — shared-cpu-2x / 2 GB<br/>restart: always<br/>fly scale count worker=N"]
-    FCLIP["clip — shared-cpu-2x / 2 GB<br/>private IPv6:<br/>clip.process.&lt;app&gt;.internal:8001"]
+    REL["<b>release_command</b><br/>python -m src.seed<br/>seed fails ⇒ deploy aborts,<br/>traffic stays on old version"]:::gate
+    subgraph PROCS ["process groups — sized per role"]
+      direction TB
+      FAPI["<b>api</b><br/>shared-cpu-1x · 512 MB<br/>:8000 · scale: N machines"]:::proc
+      FWK["<b>worker</b><br/>shared-cpu-2x · 2 GB<br/>restart always<br/>fly scale count worker=N"]:::proc
+      FCLIP["<b>clip</b><br/>shared-cpu-2x · 2 GB<br/>clip.process.&lt;app&gt;.internal:8001<br/>GPU-ready: change one URL"]:::proc
+    end
   end
-  REL["release_command:<br/>python -m src.seed<br/>(gate: deploy aborts if seeding fails)"]
-  REL -.->|"must exit 0 before go-live"| fly
+
+  WWW --> FAPI
+  REL -.->|"gate passes → machines start"| PROCS
+  FAPI -.->|"query embeds"| FCLIP
+  FWK -.->|"batch embeds"| FCLIP
 ```
 
-Local development is the same shape via `docker compose up`: services `clip`, `seed`
-(gate: `restart: "no"`, `depends_on: service_completed_successfully`), `api` (:8100 on
-host), `worker` (`WORKER_CONCURRENCY=2`). Scale locally with
+Local development is the identical shape via `docker compose up`: `clip` (:8001, model
+cache volume), `seed` (gate — `depends_on: service_completed_successfully`), `api`
+(:8100 on host), `worker` (`WORKER_CONCURRENCY=2`). Scale locally with
 `docker compose up -d --scale worker=3`. CI deploys on push via
 `.github/workflows/fly-deploy.yml`.
 
