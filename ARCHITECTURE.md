@@ -400,7 +400,7 @@ retrieval returns empty citations — never an invented page or timestamp.
 | `GET/PUT/POST/DELETE /api/llm` | PROVIDED | Bearer (mutating) | per-tenant BYO-LLM (keys masked in responses) |
 | `GET /api/health`, `GET /api/config` | PROVIDED | — | liveness / feature discovery |
 | `POST /admin/documents` | **NEW** | Bearer | `{uri, kind: paper\|deck, title}` → `202 {id, status:"pending", kind}` — **returns before any parsing** |
-| `GET /admin/sources` | **NEW** | Bearer | unified videos + documents: `{id, kind, status, title, pct}` |
+| `GET /admin/sources` | **NEW** | — (tenant-scoped, no Bearer — matches `GET /api/videos`'s read-only convention) | unified videos + documents: `{id, kind, status, title, pct}` |
 | `GET /ask_stream?q=…` | **NEW** | — | SSE: trace → citations (kind + locator) → streamed answer |
 
 Errors: `400` bad input · `401` missing/bad Bearer · `413` oversize upload · `502`

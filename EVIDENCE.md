@@ -469,6 +469,17 @@ fire-and-forget) is structurally verified above.
 benchmark, seeding, self-serve tab). Part 0 (real stack, live `bench.py` run)
 is now unblocked and a natural next step.
 
-**spec-guardian**: pending.
+**spec-guardian**: PASS-with-warnings. Verified in code, not just claimed: the
+202-before-work contract (only `upsert_pending_document` + `enqueue_document`
+before returning), `app.py`'s diff is genuinely additive-only, auth reuse
+matches `search.py`'s existing precedent exactly, and all four status codes
+(202/401/400/502) trace to real `HTTPException` calls. Independently re-ran the
+suite: `49 passed, 7 warnings in 55.99s`, matching. One low finding: ARCHITECTURE.md's
+API-contract table listed `GET /admin/sources`' auth as plain "Bearer" with no
+qualifier, inconsistent with the deliberate no-auth-required implementation
+(which correctly mirrors `GET /api/videos`'s precedent). **Fixed**: table now
+reads "— (tenant-scoped, no Bearer — matches `GET /api/videos`'s read-only
+convention)".
 
-**Commit**: _pending._
+**Commit**: `ca66c98` — "Add admin router: POST /admin/documents and GET
+/admin/sources (component 6)". Follow-up ARCHITECTURE.md fix in the next commit.
