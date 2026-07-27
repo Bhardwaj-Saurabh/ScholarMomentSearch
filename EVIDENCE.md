@@ -101,6 +101,11 @@ pre-existing SWIG/psycopg deprecation notices, not from this change.)
 **Still red / not yet built**: components 3–11. This component has no SLA-relevant
 surface standalone; it feeds throughput/recall once wired into components 4 and 7.
 
-**spec-guardian**: pending.
+**spec-guardian**: PASS — no protected files touched, chunk/page invariant verified
+in the code, independently re-ran the full suite and got an identical
+`15 passed, 6 warnings in 0.33s`. Non-blocking note: the heading-detection median
+includes heading lines themselves, which could skew on a heavily-headinged page —
+acceptable, the docstring already calls this best-effort and DESIGN.md doesn't
+require stronger.
 
-**Commit**: _pending._
+**Commit**: `dd2b8de` — "Add page-aware paper PDF parser (component 2)".
