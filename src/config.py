@@ -257,6 +257,13 @@ YT_REMOTE_COMPONENTS = [c.strip() for c in
 # the / page without running anything by hand. Set false to skip.
 SEED_SAMPLE_VIDEOS = _envbool("SEED_SAMPLE_VIDEOS", True)
 
+# Assignment 3: also seed the 8 aligned research triplets (talk + paper + deck
+# each, benchmark/corpus.json) alongside the four base samples — a fresh
+# deploy is cross-source queryable on first load. Independent flag: heavier
+# than the base 4 (24 sources vs 4), so it can be disabled for fast local
+# dev iteration without losing the original sample seeding.
+SEED_CORPUS = _envbool("SEED_CORPUS", True)
+
 # --- Work orchestration (Prefect Cloud) ----------------------------------------
 # The SDK reads PREFECT_API_URL / PREFECT_API_KEY from the environment directly.
 # WORKER_CONCURRENCY is read by worker.py; retries live on the flow's tasks.

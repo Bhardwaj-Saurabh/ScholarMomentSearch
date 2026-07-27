@@ -1,4 +1,5 @@
-"""The curated sample corpus — "A Deep Dive into LLMs" (the read-only / page).
+"""The curated sample corpus — "A Deep Dive into LLMs" (the read-only / page)
+— plus (Assignment 3) the 8 aligned research triplets in benchmark/corpus.json.
 
 Four visually-rich LLM talks. The worker auto-ingests any that aren't indexed
 when it boots (SEED_SAMPLE_VIDEOS=true, the default), so a fresh clone is
@@ -7,7 +8,10 @@ list for the in-process route.
 """
 from __future__ import annotations
 
+import json
 import re
+
+from .config import ROOT
 
 SAMPLE_VIDEOS = [
     {
@@ -34,9 +38,24 @@ def sample_video_id(url: str) -> str:
     return f"yt_{m.group(1)}" if m else url
 
 
-# The four sample ids — protected: they can be unselected from a query but
-# never deleted (the seed gate would just re-add them anyway).
-SAMPLE_IDS = frozenset(sample_video_id(v["url"]) for v in SAMPLE_VIDEOS)
+def _load_corpus() -> list[dict]:
+    """The 8 aligned research triplets (benchmark/corpus.json) — video + paper
+    + deck for each. Read from the single source of truth the benchmark also
+    uses, so seeding and grading never drift apart. Missing file -> empty
+    list (dev convenience, matches how the app degrades elsewhere)."""
+    path = ROOT / "benchmark" / "corpus.json"
+    if not path.exists():
+        return []
+    return json.loads(path.read_text()).get("triplets", [])
+
+
+CORPUS = _load_corpus()
+
+# The four base sample ids + the 8 corpus videos — protected: they can be
+# unselected from a query but never deleted (the seed gate would just re-add
+# them anyway).
+SAMPLE_IDS = frozenset(sample_video_id(v["url"]) for v in SAMPLE_VIDEOS) | frozenset(
+    sample_video_id(t["video_url"]) for t in CORPUS if t.get("video_url"))
 
 
 def is_sample(video_id: str) -> bool:

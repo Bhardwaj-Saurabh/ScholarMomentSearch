@@ -833,3 +833,93 @@ matching exactly.
 
 **Commit**: `d936117` — "Fill benchmark/bench.py's 4 TODOs: recall,
 concurrent load, throughput, resilience (component 9)".
+
+---
+
+## 2026-07-27 — Component 10: seed the triplet corpus (`src/seeding.py`, `src/samples.py`)
+
+**Scope** (DESIGN.md §3, row 10): "Seed the triplet corpus | `src/seeding.py`,
+`src/samples.py` | extend the boot-time seed gate to ingest
+`benchmark/corpus.json` (8 papers + 8 decks + 8 talks) alongside the sample
+videos — a fresh deploy is cross-source queryable on first load, idempotent
+like today."
+
+**Design decisions**:
+- **"Alongside," not "instead of."** The base app's original 4 sample videos
+  (3Blue1Brown/Karpathy — unrelated to our research corpus) are left
+  completely untouched; the 8 corpus triplets seed in the SAME pass via a
+  combined `_all_videos()` list, matching DESIGN.md's literal wording.
+- **Deterministic seed IDs for documents** — `_seed_doc_id(corpus_id, kind)`
+  → `doc_seed_<id>_<kind>` (e.g. `doc_seed_attention_paper`), NOT the admin
+  API's random `uuid4` used for one-off user registrations. This is the
+  idempotency-critical decision: without a stable ID, every container
+  restart would insert a brand-new row and re-seed from scratch forever,
+  violating "idempotent like today."
+- **New `SEED_CORPUS` flag** (default `true`), independent of the existing
+  `SEED_SAMPLE_VIDEOS` — 24 sources is heavier than the original 4, so local
+  dev can disable just the corpus without losing the base app's own seeding.
+- **`samples.py` extended, not rewritten**: added `_load_corpus()` (reads
+  `benchmark/corpus.json` — the SAME file the benchmark uses, so seeding and
+  grading never drift apart) and folded the 8 corpus video ids into
+  `SAMPLE_IDS`/`is_sample()` — they get the same delete-protection the
+  original 4 already have, for the same reason (the seed gate would just
+  re-add them).
+- **Honest failure semantics**: `seed_to_completion()` returns `True` only if
+  EVERYTHING ends up indexed. A single permanently-broken source returns
+  `False` — proven by a test where 15 of 16 documents succeed and one is
+  poisoned; the function correctly reports failure rather than a false pass,
+  while still seeding everything else (no source silently blocks its peers).
+
+**Testing boundary**: this tests ORCHESTRATION (not-indexed detection, retry
+passes across `_MAX_PASSES`, deterministic idempotency, "alongside"
+combining, the flag) — not the ingestion pipelines themselves, already
+tested (`ingest_video` is PROVIDED; `ingest_document` was tested in component
+4). `ingest_video`/`ingest_document` are mocked at the `seeding` module
+boundary: a real call downloads real videos/PDFs from the internet, which a
+unit test must never do.
+
+**RED** (`uv run pytest tests/test_seeding.py -v`, before implementation):
+```
+AttributeError: module 'src.seeding' has no attribute '_not_indexed_documents'
+AttributeError: module 'src.seeding' has no attribute '_seed_doc_id'
+AttributeError: module 'src.seeding' has no attribute '_not_indexed_videos'
+AttributeError: module 'src.seeding' has no attribute 'ingest_document'
+AttributeError: module 'src.config' has no attribute 'SEED_CORPUS'
+8 failed in 9.09s
+```
+
+**GREEN** — all 8 passed on the first implementation attempt:
+```
+$ uv run pytest tests/test_seeding.py -v
+8 passed, 6 warnings in 8.45s
+```
+Covers: deterministic seed-id generation (same triplet+kind → same id, always);
+fresh-DB not-indexed listing (16 documents, 12 videos = 4 base + 8 corpus);
+excluding already-indexed sources; a full successful seed indexing everything
+(sample videos AND corpus triplets together); a transient failure retried and
+recovered within `_MAX_PASSES`; a permanent failure honestly reported as
+`False` while every other source still gets seeded; and the `SEED_CORPUS=false`
+flag skipping documents *and* corpus videos while still seeding the base 4.
+
+**Full suite**:
+```
+$ uv run pytest tests/ -q
+79 passed, 7 warnings in 79.25s
+```
+(8 new + 71 from components 1–9, no regressions.) Confirmed `examples/quickstart.py`
+(PROVIDED, imports `SAMPLE_VIDEOS`/`sample_video_id` from `samples.py`) is
+unaffected — both names are unchanged in content, only new names were added.
+
+**sla-gate**: N/A at the unit level (no live stack). This component is what
+makes component 9's `recall@10` and the demo's cross-source query actually
+possible once Part 0 runs — still deferred, per the user's explicit choice
+to finish all 11 components before standing up the real stack.
+
+**Still red / not yet built**: component 11 (self-serve ingest tab). Actually
+seeding 24 real sources (8 videos via yt-dlp+CLIP, 16 documents via
+fetch+parse+embed) has never been run — that's real network/compute work
+appropriately deferred to Part 0, not something to fabricate here.
+
+**spec-guardian**: pending.
+
+**Commit**: _pending._
