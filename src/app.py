@@ -58,13 +58,21 @@ async def _metrics_middleware(request, call_next):
     so /api/videos/{video_id} stays one bucket regardless of how many
     distinct video_ids are ever requested.
 
-    StreamingResponse (i.e. /ask_stream's SSE) needs special handling: found
-    live (EVIDENCE.md) — call_next() returns as soon as the response object
-    exists, well BEFORE the body has actually been sent, so timing only
-    around call_next massively under-reports latency for any streaming
+    call_next() itself is not a reliable place to stop the timer: found live
+    (EVIDENCE.md) — for /ask_stream's SSE, call_next() returns as soon as the
+    response object exists, well BEFORE the body has actually been sent, so
+    timing only around call_next massively under-reported latency for that
     route (observed: 9.8ms recorded for calls that actually took 14-21s).
-    Fix: wrap the response's body_iterator so the timer only fires once the
-    real, full body has finished draining."""
+
+    Fix: wrap response.body_iterator and record once the real, full body has
+    finished draining. Starlette's BaseHTTPMiddleware always hands back an
+    internal _StreamingResponse with a body_iterator, for EVERY response —
+    JSON handlers included, not just genuine StreamingResponse routes — so
+    every request goes through this same wrap-and-record path uniformly (no
+    separate "fast path" for plain responses actually exists; verified
+    against Starlette's own source, not assumed). The None-check below is a
+    defensive fallback for a future/older Starlette shape, not a path this
+    codebase's current dependency version ever takes."""
     start = time.perf_counter()
     response = await call_next(request)
     route = request.scope.get("route")

@@ -2482,19 +2482,21 @@ Root cause: `/ask_stream` returns a `StreamingResponse`. Starlette's
 `call_next()` (used by `@app.middleware("http")`) returns as soon as the
 response object is constructed — the actual SSE body streams out AFTER that
 point, invisible to a middleware that only times around `call_next`. Every
-streaming route was silently under-reported; every plain JSON route was fine.
+streaming route was silently under-reported; plain JSON routes weren't visibly
+wrong only because their bodies are already fully computed by the time
+`call_next` returns, so the gap between "response ready" and "body drained" is
+microseconds, not because they somehow took a different, unaffected code path.
 
 RED: added `test_middleware_measures_full_streaming_body_duration_not_just_setup`
 (`tests/test_metrics_api.py`) — mocks `rag_search.ask` with a 200ms sleep,
 asserts the recorded `/ask_stream` latency reflects it. Failed exactly as
 predicted: **32.1ms recorded vs. the real ~200ms delay**.
 
-IMPLEMENT: `src/app.py`'s middleware now checks for `response.body_iterator`
-(present only on `StreamingResponse`); when present, wraps it in an async
-generator that records the latency in a `finally` block once the real body is
-fully drained, and reassigns `response.body_iterator` before returning — the
-standard fix for this well-known Starlette gotcha. Non-streaming responses
-keep the original (already-correct) immediate-timing behavior.
+IMPLEMENT: `src/app.py`'s middleware now checks for `response.body_iterator`;
+when present, wraps it in an async generator that records the latency in a
+`finally` block once the real body is fully drained, and reassigns
+`response.body_iterator` before returning — the standard fix for this
+well-known Starlette gotcha.
 
 GREEN: `uv run pytest tests/test_metrics_api.py -q` → 7 passed.
 Full suite: `uv run pytest tests/ -q` → **197 passed** (was 196; +1, 0
@@ -2503,3 +2505,34 @@ now reports **13609.7ms** — matching directly observed reality, not a
 fabricated number.
 
 **Commit**: pending — `src/app.py`, `tests/test_metrics_api.py`.
+
+---
+
+### 2026-07-28 — Streaming-latency fix closeout: spec-guardian review
+
+`spec-guardian` reviewed commit `18cb4a3`: **PASS-with-warnings**.
+Independently re-ran `uv run pytest tests/ -q` → 197 passed, matching this
+file's claimed number. Confirmed no functional bug: `_timed_body()` only
+re-yields chunks unmodified (no content/header/status mutation), no
+double-counting (exactly 2 `record_request` call sites, mutually exclusive
+branches), and the `finally` block reliably fires in every practical
+CPython+asyncio case even under client mid-stream disconnect (Starlette's
+cancellation lands inside the `async for`, where `finally` runs before the
+exception propagates) — "reliably runs in every practical case on this
+stack" is the accurate framing, not an unconditional language guarantee.
+
+**Real finding, since fixed**: the entry above (and `src/app.py`'s original
+comment) claimed non-streaming responses "keep the original immediate-timing
+behavior" via a separate, actually-taken code path. `spec-guardian` verified
+against Starlette's own installed source that this is false —
+`BaseHTTPMiddleware.call_next()` *always* returns an internal
+`_StreamingResponse` with a non-`None` `body_iterator`, for every response
+type, so literally every request — JSON included — goes through the same
+wrap-and-record path; the `if body_iterator is None` branch is dead code on
+this dependency version, kept only as a defensive fallback. No behavior
+difference resulted (verified: still 197/197 green, and the wrap adds only
+microseconds for an already-fully-computed body) — this was a documentation
+accuracy issue, not a functional one, and both `src/app.py`'s comment and this
+file's account above were corrected to say so.
+
+**Commit**: pending — `src/app.py` (comment fix), `EVIDENCE.md`.
