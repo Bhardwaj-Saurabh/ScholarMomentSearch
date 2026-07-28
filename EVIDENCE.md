@@ -2127,3 +2127,29 @@ not a hypothetical: the natural-looking, more obvious way to write this call
 hybrid implementation sets `filter=` on every `Prefetch` explicitly; a dedicated
 regression test (`test_search_text_hybrid_scopes_by_tenant` against real embedded
 Qdrant) locks this down before any other component-15 work proceeds.
+
+---
+
+### 2026-07-28 — Test-isolation gap found (pre-existing, logged not fixed per user decision)
+
+While writing component 15's tests, discovered every "real Qdrant" test in this
+suite (including pre-existing ones in `tests/test_cross_source_search.py`, not
+introduced by this session) has actually been running against the **live
+production Qdrant Cloud `moments_text` collection**, not an isolated local
+instance. `tests/conftest.py` sets `QDRANT_LOCAL_PATH` as a fallback intending an
+embedded/throwaway instance, but `src/config.py` calls `load_dotenv()`
+unconditionally at import time, which loads the real `.env`'s `QDRANT_URL` from
+disk regardless of test context — and `vector_store.client()` always prefers
+`QDRANT_URL` over `QDRANT_LOCAL_PATH` when set. Confirmed live:
+`config.QDRANT_URL` resolves to the real Qdrant Cloud URL even with no shell env
+vars set, purely from the `.env` file on disk.
+
+Practical consequence: every test tenant (`u_xsearch_<uuid>`, `u_hybrid_<uuid>`,
+etc.) has been real traffic against the production instance, cleaned up by each
+test's own teardown calls — not catastrophic (unique per-run ids, self-cleaning),
+but not isolated either, and a crash before teardown would leave orphaned tenant
+data in production.
+
+Per user decision: logged here as a disclosed, pre-existing gap, not fixed in
+this pass — a separate test-infrastructure hardening task, out of scope for
+components 15-17.
