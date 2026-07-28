@@ -247,6 +247,21 @@ RERANK_MODEL = os.getenv("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 # become the baseline latency graders/reviewers see unless explicitly turned on.
 QUERY_ENHANCEMENT_ENABLED = _envbool("QUERY_ENHANCEMENT_ENABLED", False)
 
+# --- Redis cache (DESIGN.md §3d, component 19) --------------------------------
+# REDIS_URL unset -> caching is disabled entirely (src/cache.py's enabled() is
+# False, every function becomes a no-op) rather than attempting -- and
+# failing -- to reach localhost. Mirrors CLIP_SERVICE_URL's own unset-means-
+# "run without it" convention. docker-compose sets this for local dev
+# (redis://redis:6379/0, a redis-stack-server container — component 22 needs
+# RediSearch's vector index, so Stack is the one image used everywhere rather
+# than running two different Redis images); a deployed .env points it at a
+# managed instance (Upstash/Fly Redis/etc) whenever one is provisioned.
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+# Short on purpose: a Redis that's up but hanging must not stall a request —
+# src/cache.py fails open on ANY error, but a slow-not-down Redis needs a
+# timeout to even COUNT as an error within request-latency budget.
+REDIS_SOCKET_TIMEOUT_S = _float("REDIS_SOCKET_TIMEOUT_S", 0.3)
+
 # --- YouTube download hardening ---------------------------------------------------
 # YouTube increasingly answers yt-dlp's default web client with "Sign in to
 # confirm you're not a bot". Mitigations, in order of reliability:

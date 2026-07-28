@@ -2536,3 +2536,58 @@ accuracy issue, not a functional one, and both `src/app.py`'s comment and this
 file's account above were corrected to say so.
 
 **Commit**: pending — `src/app.py` (comment fix), `EVIDENCE.md`.
+
+---
+
+### 2026-07-28 — Component 19: Redis Stack infra + fail-open cache client
+
+Scoped in `DESIGN.md` §3d / `CLAUDE.md` §7 (commit `191e329`), foundation for
+components 20-22 (a Redis caching layer, requested after a tutoring-session
+walkthrough of the read path's uncached costs — see prior entries this
+session). Decided with the user via AskUserQuestion: build all four
+components in one pass; Redis failures fail OPEN everywhere; local dev gets
+Redis now via docker-compose, production Redis is the user's own
+provisioning later; the semantic answer cache (component 22) uses RediSearch
+vector search, so the image is `redis/redis-stack-server`, not vanilla redis.
+
+**RED**: `tests/test_cache.py` written first (24 tests) — collection failed
+immediately (`ImportError: cannot import name 'cache' from 'src'`), confirming
+the eval was real before any implementation existed.
+
+**IMPLEMENT**: `src/cache.py` (new) — the ONLY module that imports `redis`.
+Six functions (`get_json`/`set_json`/`get_bytes`/`set_bytes`/`incr`/`delete`),
+every one catching any exception and degrading to a no-op/miss, never
+raising; `enabled()` gates all of them on `config.REDIS_URL` being set, so a
+disabled cache never even constructs a client. `_client()` is a lazy
+`lru_cache` singleton built with short `socket_connect_timeout`/
+`socket_timeout` (`REDIS_SOCKET_TIMEOUT_S`, default 0.3s) — a hung-but-
+reachable Redis can't stall a request either, not just a down one.
+`src/config.py` gained `REDIS_URL` (unset ⇒ disabled, mirrors
+`CLIP_SERVICE_URL`'s own convention) and `REDIS_SOCKET_TIMEOUT_S`.
+`docker-compose.yml` gained a `redis` service (`redis/redis-stack-server`,
+no volume — ephemeral cache, not durable state) and `REDIS_URL:
+${REDIS_URL:-redis://redis:6379/0}` in `seed`/`api`/`worker`'s environment
+blocks (same override-friendly pattern as `CLIP_SERVICE_URL`).
+`requirements.txt` documents the `redis` dependency (already present
+transitively via `pydocket`, version 8.0.1 — no new install needed locally).
+`.env.example` documents `REDIS_URL`/`REDIS_SOCKET_TIMEOUT_S`.
+
+**GREEN**:
+- `uv run pytest tests/test_cache.py -q` → **24 passed**.
+- Full suite: `uv run pytest tests/ -q` → **221 passed** (was 197; +24, 0
+  regressions).
+- Live, real stack (`docker compose up -d --build redis api worker`): all
+  containers started clean, `seed` exited 0. `GET /api/health` → `{"ok":
+  true}`. Inside the `api` container: `cache.enabled()` → `True`,
+  `cache._client().ping()` → `True`.
+- **Fail-open, live-proven, not just unit-tested**: `docker compose stop
+  redis`, then a real `POST /api/ask` ("What is attention in transformers?")
+  — full pipeline (retrieval, RRF fusion, rerank, LLM synthesis) completed
+  normally, returning a correctly-grounded answer citing both a video
+  timestamp and deck slides, `llm_used: true`. No error, no degraded
+  response shape — genuinely indistinguishable from Redis being up, exactly
+  as designed. `docker compose start redis` afterward → `ping()` → `True`
+  again, confirming a clean recovery too.
+
+**Commit**: pending — `src/cache.py`, `src/config.py`, `docker-compose.yml`,
+`requirements.txt`, `.env.example`, `tests/test_cache.py`.

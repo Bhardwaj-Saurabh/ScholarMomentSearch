@@ -7,6 +7,15 @@
 # Vector store is Qdrant Cloud via QDRANT_URL in .env. To run a local Qdrant
 # instead, add a qdrant service here and blank QDRANT_URL.
 services:
+  # Cache (DESIGN.md §3d, components 19-22). redis-stack-server (not vanilla
+  # redis) because component 22's semantic answer cache needs RediSearch's
+  # vector-similarity index — one image for everything rather than two Redis
+  # variants. Ephemeral by design: it's a cache, not durable state, so no
+  # volume — a restart just means a cold cache, never data loss.
+  redis:
+    image: redis/redis-stack-server:latest
+    restart: unless-stopped
+
   # The inference service: ONE warm CLIP model behind a URL. api + worker send
   # batches here instead of each flow run paying a fresh ~15-30s model load.
   # Scaling embedding = scaling THIS service (CPU here; same container on a
@@ -31,11 +40,13 @@ services:
     env_file: .env
     environment:
       CLIP_SERVICE_URL: ${CLIP_SERVICE_URL:-http://clip:8001}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     volumes:
       - ./data:/app/data
       - hf_cache:/root/.cache
     depends_on:
       - clip
+      - redis
     restart: "no"
 
   api:
@@ -45,11 +56,14 @@ services:
     env_file: .env
     environment:
       CLIP_SERVICE_URL: ${CLIP_SERVICE_URL:-http://clip:8001}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     volumes:
       - ./data:/app/data          # STORAGE_PROVIDER=local only (dev)
       - hf_cache:/root/.cache
     depends_on:
       clip:
+        condition: service_started
+      redis:
         condition: service_started
       seed:
         condition: service_completed_successfully   # UI up only after samples ready
@@ -61,6 +75,7 @@ services:
     env_file: .env
     environment:
       CLIP_SERVICE_URL: ${CLIP_SERVICE_URL:-http://clip:8001}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       # One worker process executes up to WORKER_CONCURRENCY runs at once.
       # With the clip service doing the embedding, each run is light
       # (download + ffmpeg only) — raise this without adding RAM for models.
@@ -70,6 +85,8 @@ services:
       - hf_cache:/root/.cache
     depends_on:
       clip:
+        condition: service_started
+      redis:
         condition: service_started
       seed:
         condition: service_completed_successfully
