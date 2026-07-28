@@ -1859,3 +1859,49 @@ sky/violet/teal kind tags. Full plan reviewed and approved via plan mode.
 - Backend untouched: `uv run pytest tests/ -x -q` → **115 passed**.
 
 **Commit**: pending — `ui/index.html`, this entry.
+
+---
+
+### 2026-07-28 — Component 14: paper table & figure extraction (DESIGN.md §3a)
+
+Scope: `paper.py` was text-only (`page.get_text()`), so a table's structure was
+flattened into jumbled prose and embedded figures were invisible entirely — the
+deck path already captioned images, papers never did. Own scope-change commit
+(`218936e`) added DESIGN.md components 12-14 and mirrored them into CLAUDE.md §7
+before any implementation, per CLAUDE.md §1.
+
+RED: added 4 tests to `tests/test_paper_ingest.py` against fixture PDFs built with
+real ruling-line tables (`fitz.draw_line`) and embedded images (`fitz.insert_image`).
+`uv run pytest tests/test_paper_ingest.py -x -q` → `1 failed, 6 passed` (table test
+failed: `assert 0 == 1`) — confirmed the eval was meaningful before implementing.
+
+IMPLEMENT: `paper.py` — `_extract_tables()` (via `page.find_tables()`, PyMuPDF's
+default line-ruling strategy, which does not fire on ordinary paragraph text —
+verified no false positives on the existing prose-only fixtures) emits one chunk
+per table with row/column structure preserved (`" | "`-joined cells, newline-joined
+rows), tagged `section="Table"`; table-area lines are excluded from the ordinary
+prose scan (bbox overlap ≥50%) so cell values are never duplicated as noise.
+`_extract_figures()` (via `page.get_images()` + `get_image_rects()` area filter,
+`_FIGURE_MIN_AREA = 120×120px`, skips small logos/icons) flags substantive images
+`needs_caption=True` — the *existing* `doc_pipeline.py::t_caption` task is
+kind-agnostic and already vision-captions any chunk shaped that way, so papers now
+get figure captions through the same path decks use, with zero changes to that
+task. `doc_pipeline.py`'s paper branch of `t_parse` updated to pass through
+`c.needs_caption`/`c.image_jpeg` instead of the old hardcoded `False`/`None`.
+
+GREEN:
+- `uv run pytest tests/test_paper_ingest.py tests/test_doc_pipeline.py -q` →
+  **24 passed**.
+- Full suite: `uv run pytest tests/ -q` → **119 passed** (was 115; +4 new, 0
+  regressions).
+
+Disclosed limitation: `find_tables()`'s default strategy needs actual vector
+ruling lines — a table drawn with whitespace-alignment only (no visible grid
+lines) will not be detected and still falls through to the ordinary prose scan,
+same as before this change. Not evaluated against real-world corpus PDFs in this
+pass (no live stack ingestion run) — only against hand-built fixtures, matching
+DESIGN.md component 14's stated primary eval (unit-level, fixture-PDF structure
+survival), not a live probe.
+
+**Commit**: pending — `src/ingest/paper.py`, `src/ingest/doc_pipeline.py`,
+`tests/test_paper_ingest.py`.

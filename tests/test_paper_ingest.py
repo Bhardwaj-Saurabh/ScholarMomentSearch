@@ -102,3 +102,89 @@ def test_blank_page_produces_no_chunks_and_does_not_crash(tmp_path):
     pages_seen = {c.page for c in chunks}
     assert 2 not in pages_seen
     assert {1, 3} <= pages_seen
+
+
+# ── Component 14 (DESIGN.md §3a): table & figure extraction ──────────────────
+
+def _build_table_pdf(path):
+    """A page with an intro line, then a real ruling-line table (find_tables'
+    default strategy needs actual vector lines — it doesn't fire on ordinary
+    paragraph text, so this is a faithful 'real table' fixture, not a false
+    positive risk for the plain-prose tests above)."""
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Table 1 summarizes model results below.", fontsize=BODY)
+    xs = [72, 172, 272, 372]
+    ys = [110, 140, 170, 200]
+    for x in xs:
+        page.draw_line((x, ys[0]), (x, ys[-1]))
+    for y in ys:
+        page.draw_line((xs[0], y), (xs[-1], y))
+    rows = [["Model", "Accuracy", "F1"], ["BERT", "92.1", "91.4"], ["GPT-3", "94.6", "93.9"]]
+    for r, row in enumerate(rows):
+        for c, val in enumerate(row):
+            page.insert_text((xs[c] + 5, ys[r] + 20), val, fontsize=9)
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_table_becomes_its_own_structured_chunk(tmp_path):
+    pdf = _build_table_pdf(tmp_path / "table.pdf")
+    chunks = paper.parse_pdf(pdf)
+    table_chunks = [c for c in chunks if c.section == "Table"]
+    assert len(table_chunks) == 1
+    text = table_chunks[0].text
+    assert table_chunks[0].page == 1
+    # row/column structure survives (cells of one row stay grouped together)
+    assert "Model | Accuracy | F1" in text
+    assert "BERT | 92.1 | 91.4" in text
+    assert "GPT-3 | 94.6 | 93.9" in text
+
+
+def test_table_cell_text_excluded_from_ordinary_prose_chunk(tmp_path):
+    pdf = _build_table_pdf(tmp_path / "table2.pdf")
+    chunks = paper.parse_pdf(pdf)
+    prose_chunks = [c for c in chunks if c.section != "Table"]
+    assert any("summarizes model results" in c.text for c in prose_chunks)
+    # the table's own cell values never leak into the flattened prose chunk
+    assert all("92.1" not in c.text for c in prose_chunks)
+
+
+def _make_jpeg_bytes(size, color):
+    from io import BytesIO
+
+    from PIL import Image
+    im = Image.new("RGB", size, color=color)
+    buf = BytesIO()
+    im.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_large_embedded_image_becomes_a_caption_ready_chunk(tmp_path):
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 60), "Figure 1 shows the model architecture.", fontsize=BODY)
+    page.insert_image(fitz.Rect(72, 100, 472, 400), stream=_make_jpeg_bytes((400, 300), "white"))
+    pdf = tmp_path / "figure.pdf"
+    doc.save(str(pdf))
+    doc.close()
+
+    chunks = paper.parse_pdf(pdf)
+    figure_chunks = [c for c in chunks if c.needs_caption]
+    assert len(figure_chunks) == 1
+    assert figure_chunks[0].page == 1
+    assert figure_chunks[0].image_jpeg  # non-empty bytes, ready for llm.caption_image
+
+
+def test_small_embedded_image_is_ignored_as_a_logo_not_a_figure(tmp_path):
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 60), "Body text with a tiny logo icon nearby.", fontsize=BODY)
+    page.insert_image(fitz.Rect(500, 700, 520, 720), stream=_make_jpeg_bytes((20, 20), "black"))
+    pdf = tmp_path / "logo.pdf"
+    doc.save(str(pdf))
+    doc.close()
+
+    chunks = paper.parse_pdf(pdf)
+    assert not any(c.needs_caption for c in chunks)

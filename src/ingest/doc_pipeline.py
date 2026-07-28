@@ -100,7 +100,8 @@ def t_parse(doc_id: str, user_id: str, path: str, kind: str) -> list[dict]:
     if kind == "paper":
         raw = paper_mod.parse_pdf(Path(path))
         chunks = [{"locator_key": "page", "locator": c.page, "text": c.text,
-                  "section": c.section, "needs_caption": False, "image_jpeg": None}
+                  "section": c.section, "needs_caption": c.needs_caption,
+                  "image_jpeg": c.image_jpeg}
                  for c in raw]
         db.set_document_status(doc_id, "parsing", page_count=raw[-1].page if raw else 0,
                                progress=1.0)
