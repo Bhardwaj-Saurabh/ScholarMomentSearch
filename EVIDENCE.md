@@ -1795,5 +1795,67 @@ Verified none of this touched the two pure-logic `<script>` blocks
 check, no typos/mismatches). Verified `/`, `/get-started` both still return
 200 with balanced HTML tags.
 
-**Commit**: pending — `src/rag/vector_store.py`, `src/api/search.py`,
-`tests/test_cross_source_search.py`, `ui/index.html`, this entry.
+**Commit**: `abde982` — "Fix video_ids filter excluding documents and
+redesign UI for cross-source search".
+
+---
+
+## 2026-07-28 — Enterprise UI rebuild (sidebar console)
+
+The user judged the UI still read as a PoC and asked for a full redesign to
+enterprise grade, explicitly approving a delete-and-rebuild. Direction was
+pinned with the user before coding (AskUserQuestion): light SaaS console
+aesthetic (white surfaces, slate text, Inter only, SVG icons, no emoji),
+sidebar app-shell layout (Search / Library / Add sources as client-side
+views), indigo-600 accent with emerald/amber/red status colors and
+sky/violet/teal kind tags. Full plan reviewed and approved via plan mode.
+
+**What was rebuilt** (`ui/index.html`, complete rewrite, 663 → ~700 lines):
+- App shell: fixed left sidebar (brand, three-view nav, corpus stats + LLM
+  status footer), top bar (view title, "N processing" pill, mode link),
+  scrollable main area with three `data-view` sections toggled by a tiny
+  client-side router — no new routes, still one self-contained file.
+- Library is now a real data table (Source / Kind / Status / Chunks /
+  Actions + a scope checkbox column in workspace mode) with a unified row
+  model normalizing videos and documents, sticky header, per-status progress
+  bars, and one delegated click listener for select/retry/delete — replacing
+  the old chip-pill rows. Scope summary bar + Select all/Clear; the Search
+  view shows a scope hint linking into the Library.
+- Add sources: three cards (YouTube / Upload / Paper+Deck) each with its own
+  status line (`#ytStatus`/`#upStatus`/`#docStatus`) replacing the single
+  shared status element.
+- Sample mode (`/`) keeps the same shell: "Add sources" nav hidden,
+  Library relabeled "Corpus" and rendered read-only (no checkboxes/actions).
+  One deliberate, disclosed improvement over the old behavior: the demo
+  Corpus now also lists the seeded papers/decks (filtered to `doc_seed_*`
+  ids — the document mirror of the `is_sample` video filter) instead of
+  showing talks only.
+- All emoji chrome replaced by an inline Lucide SVG icon set (`ICONS` map +
+  `icon()` helper + boot-time `data-icon` hydration). The test-locked
+  `docBadge()` text icons (✓ ⚠ ◷ …) are bridged to SVGs at render time via
+  a `BADGE_ICON` map — the locked block itself is unchanged in behavior.
+
+**Constraints held** (each independently verified after the rewrite):
+- The two test-locked script blocks survived: `citation-logic` byte-
+  identical; `ingest-logic` identical except the `c:` class values (updated
+  to the new palette — explicitly not asserted by the tests).
+  `node --test ui/citation.test.js ui/ingest.test.js` → **13/13 pass**.
+- `<!--MS_MODE-->` placeholder present exactly once, in `<head>`; live
+  check: `curl /` injects `window.MS_MODE="sample"`, `/get-started` injects
+  `"full"`, both HTTP 200.
+- Ported-verbatim logic kept its contracts: `askViaStream` SSE parser,
+  markdown/[n]-pill renderer, 2.5s refresher (still requires
+  `loadVideos`/`loadDocuments` to return arrays — kept), presign upload
+  flow, `playCitation` modal (same element ids), `openCitation` kind
+  dispatch, SELECTED/KNOWN/SAMPLE_INDEXED scope sync.
+- Scripted checks: all **43** `$("#id")` references resolve to exactly one
+  `id="…"` each (0 missing, 0 duplicated); every `<script>` block parses
+  under `node --check`; section/div/table/aside/main/button tag counts
+  balanced; legacy design tokens (`coral|paper2|Fraunces|text-muted|
+  border-line|bg-paper`) — zero hits.
+- Live cross-source proof against the rebuilt container, using the exact
+  `video_ids` query shape the browser sends:
+  `citation kinds: ['video', 'video', 'paper', 'video', 'video', 'paper']`.
+- Backend untouched: `uv run pytest tests/ -x -q` → **115 passed**.
+
+**Commit**: pending — `ui/index.html`, this entry.

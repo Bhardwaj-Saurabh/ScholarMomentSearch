@@ -3,175 +3,217 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>ScholarMomentSearch — one search across every talk, paper, and slide</title>
-<meta name="description" content="Ask a research question once and get an answer grounded in the exact talk timestamp, paper page, and slide — cited, playable, and clickable.">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23FF5A3C'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='19' font-weight='700' fill='white' text-anchor='middle'%3ES%3C/text%3E%3C/svg%3E">
+<title>ScholarMomentSearch — Research Knowledge Console</title>
+<meta name="description" content="One search across every talk, paper, and slide — answers cited to the exact timestamp, page, and slide.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234F46E5'/%3E%3Ctext x='16' y='22' font-family='Inter,system-ui,sans-serif' font-size='18' font-weight='700' fill='white' text-anchor='middle'%3ES%3C/text%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
   tailwind.config = { theme: { extend: {
-    colors: { paper:"#FBF7F0", paper2:"#F3ECE0", card:"#FFFFFF", ink:"#1E1B16",
-              muted:"#6B6357", line:"#E7DECF", coral:"#FF5A3C", coral2:"#E8472B" },
-    fontFamily: { serif:['Fraunces','Georgia','serif'], sans:['Inter','system-ui','sans-serif'] },
+    fontFamily: { sans:['Inter','system-ui','sans-serif'] },
   }}}
 </script>
 <style>
-  html,body{background:#FBF7F0;color:#1E1B16;font-family:Inter,system-ui,sans-serif}
-  .display{font-family:Fraunces,Georgia,serif}
-  .prose-body{font-size:16px;line-height:1.75;color:#2a261f}
-  .prose-body b,.prose-body strong{font-weight:700;color:#1E1B16}
+  html,body{font-family:Inter,system-ui,sans-serif}
+  .prose-body{font-size:15px;line-height:1.7;color:#334155}
+  .prose-body b,.prose-body strong{font-weight:600;color:#0f172a}
   .prose-body ul{margin:8px 0}.prose-body li{position:relative;padding-left:18px;margin:5px 0}
-  .prose-body li:before{content:"";position:absolute;left:2px;top:10px;width:6px;height:6px;border-radius:50%;background:#FF5A3C}
-  .cite{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 5px;margin:0 2px;
-    background:rgba(255,90,60,.14);color:#E8472B;border:1px solid rgba(255,90,60,.35);border-radius:6px;
-    font-size:11px;font-weight:700;cursor:pointer;vertical-align:1px}
-  .cite:hover{background:#FF5A3C;color:#fff}
-  .chip{font-size:12.5px;padding:7px 13px;border:1px solid #E7DECF;border-radius:999px;background:#fff;color:#4f4738;cursor:pointer}
-  .chip:hover{border-color:#FF5A3C;color:#1E1B16}
-  .shimmer{background:linear-gradient(90deg,#F3ECE0 25%,#FBF7F0 37%,#F3ECE0 63%);background-size:400% 100%;animation:sh 1.3s infinite}
+  .prose-body li:before{content:"";position:absolute;left:2px;top:9px;width:5px;height:5px;border-radius:50%;background:#4f46e5}
+  .prose-body code{padding:1px 5px;border-radius:5px;background:#f1f5f9;font-size:13px;color:#334155}
+  .cite{display:inline-flex;align-items:center;justify-content:center;min-width:19px;height:19px;padding:0 5px;margin:0 2px;
+    background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe;border-radius:5px;
+    font-size:11px;font-weight:600;cursor:pointer;vertical-align:1px}
+  .cite:hover{background:#4f46e5;border-color:#4f46e5;color:#fff}
+  .shimmer{background:linear-gradient(90deg,#f1f5f9 25%,#f8fafc 37%,#f1f5f9 63%);background-size:400% 100%;animation:sh 1.3s infinite}
   @keyframes sh{0%{background-position:100% 0}100%{background-position:0 0}}
-  .fade-in{animation:fi .45s ease both}@keyframes fi{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
-  .tab{padding:6px 14px;border-radius:999px;cursor:pointer;font-size:13px;border:1px solid #E7DECF;background:#fff;color:#6B6357}
-  .tab.active{border-color:#FF5A3C;color:#E8472B;background:rgba(255,90,60,.07)}
-  ::selection{background:rgba(255,90,60,.22)}
+  .fade-in{animation:fi .35s ease both}@keyframes fi{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  ::selection{background:rgba(79,70,229,.18)}
+  *{scrollbar-width:thin;scrollbar-color:#cbd5e1 transparent}
+  ::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:4px}
 </style>
 <!--MS_MODE-->
 </head>
-<body class="min-h-screen">
+<body class="h-screen overflow-hidden bg-slate-50 text-slate-900 text-sm antialiased">
 
-<!-- HEADER -->
-<header class="border-b border-line">
-  <div class="max-w-6xl mx-auto px-6 py-4 flex items-center gap-3">
-    <div class="w-8 h-8 rounded-lg bg-coral flex items-center justify-center text-white font-bold display">S</div>
-    <span class="font-bold tracking-tight">ScholarMomentSearch</span>
-    <span class="text-muted text-sm hidden sm:inline">· research knowledge base</span>
-    <span id="llmBadge" class="ml-auto text-xs px-3 py-1 rounded-full border border-line text-muted">checking…</span>
-  </div>
-</header>
+<div class="flex h-full">
 
-<!-- HERO / ASK (Perplexity-style centered search) -->
-<section class="max-w-2xl mx-auto px-6 pt-20 pb-6 text-center">
-  <div id="heroBadge" class="inline-flex items-center gap-2 text-xs font-semibold text-coral2 bg-coral/10 border border-coral/25 rounded-full px-3 py-1 mb-6">
-    ● AI Research Knowledge Base · 8 talks, papers &amp; decks, pre-indexed
-  </div>
-  <h1 id="heroTitle" class="display text-4xl sm:text-5xl font-bold leading-[1.05] tracking-tight">
-    One search across every <span class="text-coral">talk, paper, and slide</span>.
-  </h1>
-  <p id="heroSub" class="mt-4 text-[17px] text-muted leading-relaxed mx-auto max-w-lg">
-    Ask a research question once. ScholarMomentSearch finds the exact talk moment,
-    paper page, and slide that answer it — cited, and playable side by side.
-  </p>
-
-  <!-- trust strip: makes "one shared index across three kinds" visible at a glance -->
-  <div class="mt-6 flex items-center justify-center gap-2 text-xs text-muted">
-    <span class="inline-flex items-center gap-1.5 bg-white border border-line rounded-full px-3 py-1.5">🎥 Talks</span>
-    <span class="text-line">+</span>
-    <span class="inline-flex items-center gap-1.5 bg-white border border-line rounded-full px-3 py-1.5">📄 Papers</span>
-    <span class="text-line">+</span>
-    <span class="inline-flex items-center gap-1.5 bg-white border border-line rounded-full px-3 py-1.5">🖼 Decks</span>
-    <span class="text-line hidden sm:inline">—</span>
-    <span class="hidden sm:inline">one shared index, one answer</span>
-  </div>
-
-  <!-- big centered search bar -->
-  <div class="mt-6 flex items-end gap-2 bg-white border border-line rounded-2xl shadow-sm px-3 py-2.5 text-left focus-within:border-coral focus-within:ring-4 focus-within:ring-coral/15 transition">
-    <textarea id="q" rows="1" placeholder="Ask a research question — e.g. how does attention avoid recurrence?"
-      class="flex-1 bg-transparent outline-none resize-none text-[16px] leading-relaxed px-2 py-2"></textarea>
-    <button id="go" aria-label="Ask"
-      class="shrink-0 w-10 h-10 rounded-xl bg-coral hover:bg-coral2 text-white text-lg flex items-center justify-center transition">→</button>
-  </div>
-  <div id="examples" class="mt-5 flex flex-wrap gap-2 justify-center"></div>
-  <a id="modeLink" href="/get-started" class="inline-block mt-6 text-sm font-semibold text-coral2 hover:text-coral"></a>
-</section>
-
-<main class="max-w-6xl mx-auto px-6 pb-16">
-
-  <!-- LIBRARY -->
-  <section class="bg-card border border-line rounded-2xl p-5 mt-6">
-    <div class="flex items-center justify-between flex-wrap gap-3 mb-4">
-      <h2 id="libTitle" class="display text-xl font-600">Your videos</h2>
-      <div id="addTabs" class="flex gap-2">
-        <span class="tab active" data-tab="yt">YouTube URL</span>
-        <span class="tab" data-tab="up">Upload</span>
-        <span class="tab" data-tab="doc">Paper / Deck</span>
+  <!-- SIDEBAR -->
+  <aside class="w-60 shrink-0 border-r border-slate-200 bg-white flex flex-col">
+    <div class="flex items-center gap-2.5 px-4 h-14 border-b border-slate-100 shrink-0">
+      <div class="w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center text-white text-[13px] font-bold shrink-0">S</div>
+      <div class="min-w-0">
+        <div class="font-semibold text-[13px] leading-tight truncate">ScholarMomentSearch</div>
+        <div id="modeTag" class="text-[11px] text-slate-400 leading-tight">Research console</div>
       </div>
     </div>
-    <div id="addControls">
-      <div id="tab-yt" class="flex gap-2 flex-wrap">
-        <input id="ytUrl" type="text" placeholder="https://youtube.com/watch?v=…"
-          class="flex-1 min-w-[220px] bg-white border border-line rounded-xl px-4 py-2.5 text-sm outline-none focus:border-coral">
-        <button id="ytBtn" class="bg-ink hover:bg-black text-white text-sm font-semibold rounded-xl px-5">Ingest</button>
-      </div>
-      <div id="tab-up" class="hidden flex gap-2 flex-wrap items-center">
-        <input id="upFile" type="file" accept="video/*" class="flex-1 min-w-[220px] text-sm">
-        <button id="upBtn" class="bg-ink hover:bg-black text-white text-sm font-semibold rounded-xl px-5 py-2.5">Upload &amp; ingest</button>
-      </div>
-      <div id="tab-doc" class="hidden flex gap-2 flex-wrap items-center">
-        <select id="docKind" class="bg-white border border-line rounded-xl px-3 py-2.5 text-sm outline-none focus:border-coral">
-          <option value="paper">Paper (PDF)</option>
-          <option value="deck">Deck (PDF/PPTX)</option>
-        </select>
-        <input id="docUri" type="text" placeholder="https://arxiv.org/pdf/1706.03762"
-          class="flex-1 min-w-[220px] bg-white border border-line rounded-xl px-4 py-2.5 text-sm outline-none focus:border-coral">
-        <input id="docTitle" type="text" placeholder="Title (optional)"
-          class="min-w-[160px] bg-white border border-line rounded-xl px-4 py-2.5 text-sm outline-none focus:border-coral">
-        <button id="docBtn" class="bg-ink hover:bg-black text-white text-sm font-semibold rounded-xl px-5 py-2.5">Ingest</button>
-      </div>
-      <div id="ingestStatus" class="text-sm text-muted mt-3 min-h-[20px]"></div>
+    <nav id="nav" class="flex-1 px-3 py-4 space-y-1">
+      <button data-nav="search" class="w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition">
+        <span data-icon="search"></span>Search
+      </button>
+      <button data-nav="library" class="w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition">
+        <span data-icon="database"></span><span id="navLibraryLabel">Library</span>
+      </button>
+      <button data-nav="add" data-full-only class="w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition">
+        <span data-icon="plus"></span>Add sources
+      </button>
+    </nav>
+    <div class="px-4 py-4 border-t border-slate-100 space-y-2.5 shrink-0">
+      <div id="corpusStats" class="text-xs text-slate-500">—</div>
+      <span id="llmBadge" class="inline-flex items-center gap-1 rounded-full border border-slate-200 px-2 py-0.5 text-xs font-medium text-slate-500">checking…</span>
     </div>
-    <div id="videosGroup">
-      <h3 class="text-[11px] font-semibold uppercase tracking-wide text-muted mt-4 mb-1.5">🎥 Talks</h3>
-      <div id="videos" class="flex flex-wrap gap-2"></div>
-    </div>
-    <div id="documentsGroup" class="hidden">
-      <h3 class="text-[11px] font-semibold uppercase tracking-wide text-muted mt-4 mb-1.5">📄 Papers &amp; decks</h3>
-      <div id="documents" class="flex flex-wrap gap-2"></div>
-    </div>
-    <div id="scopeLine" class="hidden text-xs text-muted mt-3"></div>
-    <p id="libNote" class="text-xs text-muted mt-3">YouTube is searched by picture (frames) and transcript; uploads by picture only for now. First ingest downloads the models.</p>
-  </section>
+  </aside>
 
-  <!-- RESULTS -->
-  <section id="resultsWrap" class="hidden mt-10">
-    <article id="article" class="max-w-3xl"></article>
-    <div class="flex items-center justify-between mt-10 mb-4">
-      <h3 class="display text-2xl font-600">Moments</h3>
-      <span class="text-muted text-sm">Talks play here · papers &amp; decks open at the right page.</span>
-    </div>
-    <div id="sources" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
-  </section>
-</main>
+  <!-- MAIN COLUMN -->
+  <div class="flex-1 flex flex-col min-w-0">
+    <header class="h-14 shrink-0 border-b border-slate-200 bg-white flex items-center justify-between px-6">
+      <h1 id="viewTitle" class="text-[15px] font-semibold">Search</h1>
+      <div class="flex items-center gap-4">
+        <span id="procPill" class="hidden inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700"></span>
+        <a id="modeLink" href="/get-started" class="text-[13px] font-medium text-indigo-600 hover:text-indigo-700"></a>
+      </div>
+    </header>
+
+    <main class="flex-1 overflow-y-auto">
+
+      <!-- SEARCH VIEW -->
+      <section data-view="search" class="max-w-5xl mx-auto px-6 py-8">
+        <div class="mb-5">
+          <h2 id="heroTitle" class="text-xl font-semibold tracking-tight">One search across every talk, paper, and slide</h2>
+          <p id="heroSub" class="mt-1 text-[13px] text-slate-500 max-w-2xl">Ask a research question once — the answer cites the exact talk moment, paper page, and slide, side by side.</p>
+        </div>
+
+        <div class="rounded-xl border border-slate-200 bg-white shadow-sm p-2.5 flex items-end gap-2 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-100 transition">
+          <textarea id="q" rows="1" placeholder="Ask a research question — e.g. how does attention avoid recurrence?"
+            class="flex-1 bg-transparent outline-none resize-none text-[15px] leading-relaxed px-2.5 py-1.5 placeholder:text-slate-400"></textarea>
+          <button id="go" aria-label="Ask"
+            class="shrink-0 h-9 w-9 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white flex items-center justify-center transition disabled:opacity-50">
+            <span data-icon="arrow" data-icon-cls="h-4 w-4"></span>
+          </button>
+        </div>
+
+        <div class="mt-3 flex flex-wrap items-center gap-2">
+          <span class="text-xs text-slate-400">Try:</span>
+          <span id="examples" class="contents"></span>
+        </div>
+        <div id="scopeHint" class="mt-2 text-xs text-slate-400"></div>
+
+        <div id="resultsWrap" class="hidden mt-8">
+          <div class="rounded-xl border border-slate-200 bg-white shadow-sm p-6">
+            <div class="text-xs font-medium uppercase tracking-wider text-slate-400 mb-3">Answer</div>
+            <article id="article" class="prose-body max-w-3xl"></article>
+          </div>
+          <div class="flex items-center justify-between mt-8 mb-3">
+            <h3 class="text-[15px] font-semibold">Sources</h3>
+            <span class="text-xs text-slate-400">Talks play in place · papers &amp; decks open at the cited page.</span>
+          </div>
+          <div id="sources" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+        </div>
+      </section>
+
+      <!-- LIBRARY VIEW -->
+      <section data-view="library" class="hidden max-w-6xl mx-auto px-6 py-8">
+        <div class="flex items-center justify-between flex-wrap gap-3 mb-4">
+          <div id="scopeLine" class="text-[13px] text-slate-500"></div>
+          <div id="scopeActions" class="hidden items-center gap-1 text-xs">
+            <button id="selAll" class="rounded-md px-2.5 py-1.5 font-medium text-indigo-600 hover:bg-indigo-50">Select all</button>
+            <span class="text-slate-300">·</span>
+            <button id="selNone" class="rounded-md px-2.5 py-1.5 font-medium text-indigo-600 hover:bg-indigo-50">Clear</button>
+          </div>
+        </div>
+        <div class="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+          <div class="overflow-x-auto overflow-y-auto max-h-[calc(100vh-230px)]">
+            <table class="w-full text-sm">
+              <thead id="libHead" class="bg-slate-50 sticky top-0 z-10"></thead>
+              <tbody id="libraryBody" class="divide-y divide-slate-100"></tbody>
+            </table>
+          </div>
+        </div>
+        <p id="libNote" class="mt-3 text-xs text-slate-400"></p>
+      </section>
+
+      <!-- ADD SOURCES VIEW -->
+      <section data-view="add" class="hidden max-w-6xl mx-auto px-6 py-8">
+        <div class="mb-5">
+          <h2 class="text-xl font-semibold tracking-tight">Add sources</h2>
+          <p class="mt-1 text-[13px] text-slate-500 max-w-2xl">Register a source and it's queued immediately — parsing, captioning, and embedding run on background workers. Watch progress in the Library.</p>
+        </div>
+        <div class="grid gap-4 lg:grid-cols-3">
+
+          <div class="rounded-xl border border-slate-200 bg-white shadow-sm p-5 flex flex-col">
+            <div class="flex items-center gap-2.5 mb-1">
+              <div class="h-8 w-8 rounded-lg bg-sky-50 text-sky-600 flex items-center justify-center"><span data-icon="video"></span></div>
+              <h3 class="font-semibold text-[13px]">YouTube talk</h3>
+            </div>
+            <p class="text-xs text-slate-500 mt-1.5 mb-4">Indexed by what's shown on screen (frames) and what's said (transcript).</p>
+            <input id="ytUrl" type="text" placeholder="https://youtube.com/watch?v=…"
+              class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm placeholder:text-slate-400 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100">
+            <button id="ytBtn" class="mt-3 inline-flex items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 transition">Queue for indexing</button>
+            <div id="ytStatus" class="text-xs text-slate-500 mt-2.5 min-h-[16px]"></div>
+          </div>
+
+          <div class="rounded-xl border border-slate-200 bg-white shadow-sm p-5 flex flex-col">
+            <div class="flex items-center gap-2.5 mb-1">
+              <div class="h-8 w-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center"><span data-icon="upload"></span></div>
+              <h3 class="font-semibold text-[13px]">Upload a recording</h3>
+            </div>
+            <p class="text-xs text-slate-500 mt-1.5 mb-4">Uploads go straight to object storage, then index by what's shown on screen.</p>
+            <input id="upFile" type="file" accept="video/*"
+              class="w-full text-xs text-slate-500 file:mr-3 file:rounded-lg file:border-0 file:bg-slate-100 file:px-3 file:py-2 file:text-xs file:font-medium file:text-slate-700 hover:file:bg-slate-200 file:cursor-pointer">
+            <button id="upBtn" class="mt-3 inline-flex items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 transition">Upload &amp; queue</button>
+            <div id="upStatus" class="text-xs text-slate-500 mt-2.5 min-h-[16px]"></div>
+          </div>
+
+          <div class="rounded-xl border border-slate-200 bg-white shadow-sm p-5 flex flex-col">
+            <div class="flex items-center gap-2.5 mb-1">
+              <div class="h-8 w-8 rounded-lg bg-violet-50 text-violet-600 flex items-center justify-center"><span data-icon="file-text"></span></div>
+              <h3 class="font-semibold text-[13px]">Paper or slide deck</h3>
+            </div>
+            <p class="text-xs text-slate-500 mt-1.5 mb-4">Papers cite by page; decks by slide, with image-heavy slides auto-captioned.</p>
+            <div class="space-y-2.5">
+              <select id="docKind" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100">
+                <option value="paper">Paper (PDF)</option>
+                <option value="deck">Deck (PDF/PPTX)</option>
+              </select>
+              <input id="docUri" type="text" placeholder="https://arxiv.org/pdf/1706.03762"
+                class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm placeholder:text-slate-400 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100">
+              <input id="docTitle" type="text" placeholder="Title (optional)"
+                class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm placeholder:text-slate-400 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100">
+            </div>
+            <button id="docBtn" class="mt-3 inline-flex items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 transition">Queue for indexing</button>
+            <div id="docStatus" class="text-xs text-slate-500 mt-2.5 min-h-[16px]"></div>
+          </div>
+
+        </div>
+        <p class="mt-4 text-xs text-slate-400">Every registration returns immediately (HTTP 202) — heavy work never runs in the request path. A source is searchable the moment its status reaches <b class="font-medium text-slate-500">indexed</b>.</p>
+      </section>
+
+    </main>
+  </div>
+</div>
 
 <!-- PLAYER MODAL -->
-<div id="modal" class="hidden fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-  <div class="bg-card w-full max-w-3xl rounded-2xl overflow-hidden shadow-2xl max-h-[92vh] flex flex-col fade-in">
-    <div class="flex items-start justify-between gap-3 px-4 py-2.5 border-b border-line">
+<div id="modal" class="hidden fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+  <div class="bg-white w-full max-w-3xl rounded-xl overflow-hidden shadow-xl max-h-[92vh] flex flex-col fade-in">
+    <div class="flex items-start justify-between gap-3 px-4 py-3 border-b border-slate-100">
       <div class="min-w-0">
         <div id="mTitle" class="text-sm font-semibold leading-snug truncate">Moment</div>
-        <div id="mMeta" class="text-xs text-muted mt-0.5"></div>
+        <div id="mMeta" class="text-xs text-slate-500 mt-0.5"></div>
       </div>
-      <button id="mClose" class="shrink-0 w-8 h-8 rounded-full hover:bg-paper2 flex items-center justify-center text-muted text-lg">✕</button>
+      <button id="mClose" class="shrink-0 h-8 w-8 rounded-lg hover:bg-slate-100 flex items-center justify-center text-slate-400 hover:text-slate-700 transition"><span data-icon="x"></span></button>
     </div>
     <div id="playerBox" class="bg-black aspect-video shrink-0"></div>
-    <div class="flex items-center gap-3 px-4 py-3 border-t border-line">
-      <img id="mFrame" class="w-28 aspect-video object-cover rounded-lg border border-line bg-paper2" alt="matched frame">
-      <div class="text-xs text-muted">
-        <div id="mFrameLabel" class="font-semibold text-ink mb-0.5">Matched frame</div>
-        <span id="mFrameDesc">This is what CLIP matched your question against — the still it judged closest to what you asked.</span>
-        <a id="mOut" href="#" target="_blank" class="text-coral2 font-semibold hover:text-coral block mt-1">Open on source ↗</a>
+    <div class="flex items-center gap-3 px-4 py-3 border-t border-slate-100">
+      <img id="mFrame" class="w-28 aspect-video object-cover rounded-lg border border-slate-200 bg-slate-100" alt="matched frame">
+      <div class="text-xs text-slate-500">
+        <div id="mFrameLabel" class="font-semibold text-slate-800 mb-0.5">Matched frame</div>
+        <span id="mFrameDesc">This is what the visual index matched your question against.</span>
+        <a id="mOut" href="#" target="_blank" class="text-indigo-600 font-medium hover:text-indigo-700 block mt-1">Open on source ↗</a>
       </div>
     </div>
   </div>
 </div>
-
-<footer class="border-t border-line">
-  <div class="max-w-6xl mx-auto px-6 py-6 text-xs text-muted flex justify-between flex-wrap gap-2">
-    <span>One index, three source types · CLIP + bge + Qdrant + bring-your-own-LLM</span>
-    <span><a class="hover:text-ink" href="https://github.com/Bhardwaj-Saurabh/ScholarMomentSearch">GitHub</a></span>
-  </div>
-</footer>
 
 <script id="citation-logic">
 /* Pure, DOM-free citation-locator helpers (DESIGN.md component 8 — cross-
@@ -203,22 +245,22 @@ function citeOpenUrl(c){
 }
 </script>
 <script id="ingest-logic">
-/* Pure, DOM-free helpers for the Paper/Deck self-serve tab (DESIGN.md
+/* Pure, DOM-free helpers for the Paper/Deck self-serve registration (DESIGN.md
    component 11). Kept separate from the main script (same reasoning as
    citation-logic, component 8): ui/ingest.test.js regex-extracts and runs
    just this block with plain Node — no browser needed. */
 const _DOC_KINDS = ["paper", "deck"];
 function docBadge(status){
   switch(status){
-    case "indexed":   return {icon:"✓", label:"indexed", c:"text-[#1f7a43]"};
-    case "pending":   return {icon:"◷", label:"waiting (fair queue)", c:"text-[#8a6d1a]"};
-    case "queued":    return {icon:"◷", label:"queued", c:"text-[#8a6d1a]"};
-    case "fetching":  return {icon:"⏬", label:"fetching…", c:"text-[#8a6d1a]"};
-    case "parsing":   return {icon:"⏳", label:"parsing…", c:"text-[#8a6d1a]"};
-    case "embedding": return {icon:"⏳", label:"embedding…", c:"text-[#8a6d1a]"};
-    case "failed":    return {icon:"⚠", label:"failed", c:"text-coral2"};
-    case "skipped":   return {icon:"⊘", label:"duplicate", c:"text-muted"};
-    default:          return {icon:"•", label:status, c:"text-muted"};
+    case "indexed":   return {icon:"✓", label:"indexed", c:"text-emerald-600"};
+    case "pending":   return {icon:"◷", label:"waiting (fair queue)", c:"text-amber-600"};
+    case "queued":    return {icon:"◷", label:"queued", c:"text-amber-600"};
+    case "fetching":  return {icon:"⏬", label:"fetching…", c:"text-amber-600"};
+    case "parsing":   return {icon:"⏳", label:"parsing…", c:"text-amber-600"};
+    case "embedding": return {icon:"⏳", label:"embedding…", c:"text-amber-600"};
+    case "failed":    return {icon:"⚠", label:"failed", c:"text-red-600"};
+    case "skipped":   return {icon:"⊘", label:"duplicate", c:"text-slate-400"};
+    default:          return {icon:"•", label:status, c:"text-slate-400"};
   }
 }
 // Client-side mirror of src/api/admin.py's validation, so a bad form never
@@ -235,190 +277,249 @@ function buildDocumentPayload(kind, uri, title){
 const $=s=>document.querySelector(s);
 const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let CITES=[];
-const MODE = window.MS_MODE || "sample";   // "sample" (curated, read-only) | "full" (add your own)
+const MODE = window.MS_MODE || "sample";   // "sample" (curated, read-only) | "full" (self-serve workspace)
+const FULL = MODE==="full";
+
+/* ---------- icons (Lucide 24x24 paths, one definition each) ---------- */
+const ICONS={
+  search:'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+  database:'<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/>',
+  plus:'<path d="M5 12h14"/><path d="M12 5v14"/>',
+  play:'<polygon points="6 3 20 12 6 21 6 3"/>',
+  "file-text":'<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>',
+  presentation:'<path d="M2 3h20"/><path d="M21 3v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V3"/><path d="m7 21 5-5 5 5"/>',
+  video:'<path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/>',
+  check:'<path d="M20 6 9 17l-5-5"/>',
+  alert:'<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+  rotate:'<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>',
+  trash:'<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>',
+  external:'<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+  x:'<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  clock:'<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+  download:'<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>',
+  upload:'<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/>',
+  ban:'<circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/>',
+  dot:'<circle cx="12" cy="12" r="2.5" fill="currentColor" stroke="none"/>',
+  minus:'<path d="M5 12h14"/>',
+  arrow:'<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
+};
+function icon(name, cls="h-4 w-4"){
+  return `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]||ICONS.dot}</svg>`;
+}
+document.querySelectorAll("[data-icon]").forEach(el=>{ el.outerHTML=icon(el.dataset.icon, el.dataset.iconCls||"h-4 w-4"); });
+// Bridge the test-locked text icons in docBadge()/vBadge() to SVGs at render time.
+const BADGE_ICON={"✓":"check","⚠":"alert","◷":"clock","⏳":"clock","⏬":"download","⊘":"ban","•":"dot"};
+
+/* ---------- views ---------- */
+const VIEW_TITLES={search:"Search", library: FULL?"Library":"Corpus", add:"Add sources"};
+function showView(name){
+  document.querySelectorAll("[data-view]").forEach(s=>s.classList.toggle("hidden", s.dataset.view!==name));
+  document.querySelectorAll("[data-nav]").forEach(b=>{
+    const on=b.dataset.nav===name;
+    b.classList.toggle("bg-indigo-50",on); b.classList.toggle("text-indigo-700",on);
+    b.classList.toggle("text-slate-600",!on);
+  });
+  $("#viewTitle").textContent=VIEW_TITLES[name];
+}
+document.querySelectorAll("[data-nav]").forEach(b=>b.onclick=()=>showView(b.dataset.nav));
+document.addEventListener("click", e=>{ const g=e.target.closest("[data-goto]"); if(g) showView(g.dataset.goto); });
 
 /* ---------- mode-specific framing ---------- */
 function applyMode(){
-  if(MODE==="full"){
-    document.title='Add your sources — ScholarMomentSearch';
-    $("#heroBadge").innerHTML='● Bring your own talks, papers &amp; decks';
-    $("#heroTitle").innerHTML='Build your own <span class="text-coral">research knowledge base</span>.';
-    $("#heroSub").textContent='Add a YouTube talk, a paper, or a slide deck. ScholarMomentSearch indexes all three into one shared library and answers from whichever actually has the answer.';
-    $("#modeLink").textContent='← Back to the sample';     $("#modeLink").href='/';
-    $("#libTitle").textContent='Your library';
-    $("#libNote").innerHTML='Talks are searched by <b>both</b> what\'s shown (frames) and what\'s said (transcript); papers and decks by their text, page by page. Tip: unselect a source to search only what you actually want.';
+  if(FULL){
+    document.title='Workspace — ScholarMomentSearch';
+    $("#modeTag").textContent='Workspace';
+    $("#heroTitle").textContent='Ask your research library';
+    $("#heroSub").textContent='Search everything you’ve indexed — talks, papers, and decks — in one question. The answer cites the exact moment, page, or slide.';
+    $("#modeLink").textContent='← Back to the demo corpus'; $("#modeLink").href='/';
+    $("#libNote").textContent='Talks are searched by what’s shown (frames) and what’s said (transcript); papers and decks by their text, page by page. Untick a talk to exclude it from search scope — papers and decks are always searched.';
   } else {
-    document.title='ScholarMomentSearch — one search across every talk, paper, and slide';
-    $("#heroBadge").innerHTML='● AI Research Knowledge Base · 8 talks, papers &amp; decks, pre-indexed';
-    $("#heroTitle").innerHTML='One search across every <span class="text-coral">talk, paper, and slide</span>.';
-    $("#heroSub").textContent='Ask a research question once. ScholarMomentSearch finds the exact talk moment, paper page, and slide that answer it — cited, and playable side by side.';
-    $("#modeLink").textContent='Want your own research library? Get started →';   $("#modeLink").href='/get-started';
-    $("#libTitle").textContent='In this knowledge base';
-    $("#addTabs").classList.add("hidden");
-    $("#addControls").classList.add("hidden");
-    $("#libNote").textContent='Eight landmark ML papers, each paired with its talk and slide deck — one shared index, cited down to the exact page, slide, or second.';
+    document.title='ScholarMomentSearch — Research Knowledge Console';
+    $("#modeTag").textContent='Demo corpus';
+    $("#modeLink").textContent='Set up your own workspace →'; $("#modeLink").href='/get-started';
+    $("#navLibraryLabel").textContent='Corpus';
+    document.querySelectorAll("[data-full-only]").forEach(el=>el.classList.add("hidden"));
+    $("#libNote").textContent='Eight landmark ML papers, each paired with its conference talk and slide deck — a read-only demo corpus, cited down to the exact page, slide, or second.';
   }
 }
 
-/* ---------- markdown (bold, bullets, [n] pills) ---------- */
-function mdInline(t){
-  t=esc(t).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/`([^`]+?)`/g,'<code class="px-1 rounded bg-paper2 text-[13px]">$1</code>');
-  return t.replace(/\[(\d+(?:\s*,\s*\d+)*)\]/g,(_,g)=>g.split(/\s*,\s*/).map(n=>
-    `<span class="cite" data-n="${n.trim()}" title="Play this moment">${n.trim()}</span>`).join(''));
-}
-function renderMarkdown(md){
-  const lines=(md||"").split(/\n/); let html="",inUl=false;
-  const closeUl=()=>{if(inUl){html+="</ul>";inUl=false;}};
-  for(const raw of lines){ const l=raw.trim();
-    if(/^[-*]\s+/.test(l)){ if(!inUl){html+="<ul>";inUl=true;} html+=`<li>${mdInline(l.replace(/^[-*]\s+/,''))}</li>`; }
-    else { closeUl(); if(l) html+=`<p class="mb-3">${mdInline(l)}</p>`; } }
-  closeUl(); return html;
-}
-
-/* ---------- config + library ---------- */
+/* ---------- config + corpus data ---------- */
 async function loadConfig(){
   try{ const c=await (await fetch("/api/config")).json(); const b=$("#llmBadge");
-    if(c.llm_configured){ b.textContent="LLM: "+(c.llm_model||c.llm_provider); b.className="ml-auto text-xs px-3 py-1 rounded-full border border-[#cfe8d6] text-[#1f7a43]"; }
-    else { b.textContent="No LLM — moments only"; b.className="ml-auto text-xs px-3 py-1 rounded-full border border-[#e7c46a] text-[#8a6d1a] bg-[#fbf2d8]"; }
-  }catch{ $("#llmBadge").textContent="API offline"; }
+    if(c.llm_configured){ b.textContent="LLM · "+(c.llm_model||c.llm_provider);
+      b.className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700"; }
+    else { b.textContent="No LLM — retrieval only";
+      b.className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700"; }
+  }catch{ const b=$("#llmBadge"); b.textContent="API offline";
+    b.className="inline-flex items-center gap-1 rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700"; }
 }
-/* Query scoping: which indexed videos a question searches. Default = all
-   selected; click a chip to include/exclude (e.g. unselect the samples to
-   search only your own uploads). Full mode (/get-started) only. */
+
+/* Query scoping: which indexed talks a question searches. Default = all
+   selected; untick in the Library to exclude. Papers/decks are always in
+   scope (they carry no video_id, so the video_ids filter never constrains
+   them). Selection is a full-mode feature; the demo corpus queries only the
+   curated samples. */
 let SELECTED=new Set(), KNOWN=new Set(), SAMPLE_INDEXED=[];
-const SELECTABLE = ()=> MODE==="full";
+let VIDEOS=[], DOCS=[];
+const _INFLIGHT=["pending","queued","fetching","sampling","embedding","parsing"];
+
 async function loadVideos(){
   const {videos}=await (await fetch("/api/videos")).json();
-  const box=$("#videos");
-  // Front page (/) shows & queries ONLY the 4 samples; /get-started shows all.
-  const shown = (MODE==="full") ? videos : videos.filter(v=>v.is_sample);
+  VIDEOS = FULL ? videos : videos.filter(v=>v.is_sample);
   SAMPLE_INDEXED = videos.filter(v=>v.is_sample && v.status==="indexed").map(v=>v.id);
-  if(!shown.length){
-    box.innerHTML = MODE==="full"
-      ? '<span class="text-muted text-sm">No videos yet — add one above.</span>'
-      : '<span class="text-muted text-sm">The four sample talks index themselves on first start — they’ll appear here in a few minutes.</span>';
-    return shown;
-  }
-  const del = MODE==="full";
   // sync selection: new indexed videos default to selected; drop vanished ones
-  const indexedIds=new Set(shown.filter(v=>v.status==="indexed").map(v=>v.id));
+  const indexedIds=new Set(VIDEOS.filter(v=>v.status==="indexed").map(v=>v.id));
   indexedIds.forEach(id=>{ if(!KNOWN.has(id)){ KNOWN.add(id); SELECTED.add(id); }});
   [...KNOWN].forEach(id=>{ if(!indexedIds.has(id)){ KNOWN.delete(id); SELECTED.delete(id); }});
-
-  const srcLabel=v=>v.is_sample?"sample":(v.source==="youtube"?"YouTube":"upload");
-  const pct=v=>v.progress?` ${Math.round(v.progress*100)}%`:"";
-  // A leading status indicator so each video's state is obvious at a glance.
-  function badge(v){
-    switch(v.status){
-      case "indexed":   return {icon:"✓", label:`${v.frame_count||0}f · ${srcLabel(v)}`, c:"text-[#1f7a43]"};
-      case "pending":   return {icon:"◷", label:"waiting (fair queue)", c:"text-[#8a6d1a]"};
-      case "queued":    return {icon:"◷", label:"queued",           c:"text-[#8a6d1a]"};
-      case "fetching":  return {icon:"⏬", label:"fetching video…",  c:"text-[#8a6d1a]"};
-      case "sampling":  return {icon:"⏳", label:"sampling"+pct(v),  c:"text-[#8a6d1a]"};
-      case "embedding": return {icon:"⏳", label:"embedding"+pct(v), c:"text-[#8a6d1a]"};
-      case "failed":    return {icon:"⚠", label:"failed",           c:"text-coral2"};
-      case "skipped":   return {icon:"⊘", label:"duplicate",        c:"text-muted"};
-      default:          return {icon:"•", label:v.status,           c:"text-muted"};
-    }
-  }
-  box.innerHTML=shown.map(v=>{
-    const indexed=v.status==="indexed";
-    const b=badge(v);
-    const sel=SELECTED.has(v.id);
-    const toggle=SELECTABLE()&&indexed;
-    // For queryable (indexed) videos the front slot is the include/exclude
-    // checkbox; for everything else it's the live status icon.
-    const lead=toggle
-      ? `<span class="mr-1.5">${sel?"☑":"☐"}</span>`
-      : `<span class="mr-1.5 ${b.c}" title="${esc(b.label)}">${b.icon}</span>`;
-    const cls="chip"+(toggle&&!sel?" opacity-40":"");
-    const retry=(del&&v.status==="failed")
-      ? `<button class="ml-2 text-muted hover:text-coral2" data-retry="${esc(v.id)}" title="Retry ingest">↻</button>` : "";
-    const trash=(del&&!v.is_sample)
-      ? `<button class="ml-2 text-muted hover:text-coral2" data-del="${esc(v.id)}" data-title="${esc(v.title||v.id)}" title="Delete permanently">🗑</button>` : "";
-    const attrs=toggle?`data-sel="${esc(v.id)}" title="Click to include or exclude from your search"`:'style="cursor:default"';
-    return `<span class="${cls}" ${attrs}>${lead}${esc(v.title||v.id)} <span class="${b.c}">· ${esc(b.label)}</span>${retry}${trash}</span>`;
-  }).join("");
-
-  // clicking a chip toggles include/exclude (but not when a button was clicked)
-  box.querySelectorAll("[data-sel]").forEach(el=>el.onclick=(e)=>{
-    if(e.target.closest("[data-del],[data-retry]"))return;
-    const id=el.dataset.sel;
-    SELECTED.has(id)?SELECTED.delete(id):SELECTED.add(id);
-    loadVideos();
-  });
-  // retry a failed ingest — re-queues it on the worker
-  if(del) box.querySelectorAll("[data-retry]").forEach(btn=>btn.onclick=async(e)=>{
-    e.stopPropagation();
-    await fetch("/api/videos/"+encodeURIComponent(btn.dataset.retry)+"/retry",{method:"POST"});
-    loadVideos(); startRefresher();
-  });
-  // trash = permanent delete, with a confirm so it's never an accident
-  if(del) box.querySelectorAll("[data-del]").forEach(btn=>btn.onclick=async(e)=>{
-    e.stopPropagation();
-    if(!confirm(`Delete “${btn.dataset.title}”?\n\nThis permanently removes its frames and search vectors. This can’t be undone.`)) return;
-    const r=await fetch("/api/videos/"+encodeURIComponent(btn.dataset.del),{method:"DELETE"});
-    if(!r.ok){ const d=await r.json().catch(()=>({})); alert(d.detail||"Delete failed."); return; }
-    KNOWN.delete(btn.dataset.del); SELECTED.delete(btn.dataset.del); loadVideos();
-  });
-
-  // make the user aware of what's actually being searched
-  const scope=$("#scopeLine");
-  if(SELECTABLE()){
-    const total=indexedIds.size, on=[...SELECTED].filter(id=>indexedIds.has(id)).length;
-    scope.classList.remove("hidden");
-    scope.innerHTML = total
-      ? `<b>Searching ${on} of ${total} videos.</b> ☑ click a video to include/exclude it · 🗑 delete permanently (samples can’t be deleted).`
-      : "";
-  } else { scope.classList.add("hidden"); }
+  renderLibrary(); updateStats();
   return videos;
 }
-
-/* tabs */
-document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{
-  document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active")); t.classList.add("active");
-  $("#tab-yt").classList.toggle("hidden",t.dataset.tab!=="yt");
-  $("#tab-up").classList.toggle("hidden",t.dataset.tab!=="up");
-  $("#tab-doc").classList.toggle("hidden",t.dataset.tab!=="doc");
-});
-
-/* ---------- documents (papers/decks — component 11) ----------
-   Sample mode (/) shows only the 4 curated talks, same as loadVideos(); the
-   self-serve library (/get-started) additionally lists papers/decks via the
-   unified GET /admin/sources (already {id,kind,status,title,pct,chunk_count}
-   for both videos and documents — filtered here to the non-video rows so
-   loadVideos()'s own video rendering/is_sample logic stays untouched). */
 async function loadDocuments(){
-  if(!SELECTABLE()){ $("#documents").innerHTML=""; $("#documentsGroup").classList.add("hidden"); return []; }
   const {sources}=await (await fetch("/admin/sources")).json();
   const docs=sources.filter(s=>s.kind!=="video");
-  const box=$("#documents");
-  $("#documentsGroup").classList.toggle("hidden", docs.length===0);
-  if(!docs.length){ box.innerHTML=""; return docs; }
-  const kindLabel=k=>k==="paper"?"📄 paper":"🖼 deck";
-  box.innerHTML=docs.map(d=>{
-    const b=docBadge(d.status);
-    const pct=(d.pct!=null)?` ${Math.round(d.pct*100)}%`:"";
-    const retry=(d.status==="failed")
-      ? `<button class="ml-2 text-muted hover:text-coral2" data-doc-retry="${esc(d.id)}" title="Retry ingest">↻</button>` : "";
-    return `<span class="chip" style="cursor:default">`
-      + `<span class="mr-1.5 ${b.c}" title="${esc(b.label)}">${b.icon}</span>`
-      + `${esc(d.title||d.id)} <span class="${b.c}">· ${kindLabel(d.kind)} · ${esc(b.label)}${pct}</span>${retry}</span>`;
-  }).join("");
-  box.querySelectorAll("[data-doc-retry]").forEach(btn=>btn.onclick=async(e)=>{
-    e.stopPropagation();
-    await fetch("/admin/documents/"+encodeURIComponent(btn.dataset.docRetry)+"/retry",{method:"POST"});
-    loadDocuments(); startRefresher();
-  });
-  return docs;
+  // Demo corpus shows only the curated seed documents (the papers/decks that
+  // pair with the sample talks), mirroring the is_sample filter for videos.
+  DOCS = FULL ? docs : docs.filter(d=>String(d.id).startsWith("doc_seed_"));
+  renderLibrary(); updateStats();
+  return DOCS;
 }
 
+/* video status badge — same shape as the test-locked docBadge() */
+function vBadge(v){
+  const pct=v.progress?` ${Math.round(v.progress*100)}%`:"";
+  switch(v.status){
+    case "indexed":   return {icon:"✓", label:"indexed", c:"text-emerald-600"};
+    case "pending":   return {icon:"◷", label:"waiting (fair queue)", c:"text-amber-600"};
+    case "queued":    return {icon:"◷", label:"queued", c:"text-amber-600"};
+    case "fetching":  return {icon:"⏬", label:"fetching…", c:"text-amber-600"};
+    case "sampling":  return {icon:"⏳", label:"sampling"+pct, c:"text-amber-600"};
+    case "embedding": return {icon:"⏳", label:"embedding"+pct, c:"text-amber-600"};
+    case "failed":    return {icon:"⚠", label:"failed", c:"text-red-600"};
+    case "skipped":   return {icon:"⊘", label:"duplicate", c:"text-slate-400"};
+    default:          return {icon:"•", label:v.status, c:"text-slate-400"};
+  }
+}
+
+const KIND_STYLE={
+  video:"bg-sky-50 text-sky-700 border-sky-200",
+  paper:"bg-violet-50 text-violet-700 border-violet-200",
+  deck:"bg-teal-50 text-teal-700 border-teal-200",
+  document:"bg-slate-100 text-slate-600 border-slate-200",
+};
+const KIND_ICON={video:"video", paper:"file-text", deck:"presentation", document:"file-text"};
+
+function statusCell(b, pct01, status){
+  const bar=(_INFLIGHT.includes(status)&&pct01!=null)
+    ? `<div class="mt-1 h-1.5 w-24 rounded-full bg-slate-100 overflow-hidden"><div class="h-full bg-indigo-500 transition-all" style="width:${Math.round(pct01*100)}%"></div></div>`
+    : "";
+  return `<div class="flex items-center gap-1.5 ${b.c}">${icon(BADGE_ICON[b.icon]||"dot","h-3.5 w-3.5 shrink-0")}<span>${esc(b.label)}</span></div>${bar}`;
+}
+
+function rowModel(){
+  const vids=VIDEOS.map(v=>({
+    id:v.id, kind:"video", title:v.title||v.id,
+    sub: v.is_sample?"sample":(v.source==="youtube"?"YouTube":"upload"),
+    status:v.status, pct01: v.progress!=null?v.progress:null,
+    count: v.frame_count, b: vBadge(v),
+    selectable: FULL && v.status==="indexed",
+    deletable: FULL && !v.is_sample,
+    retryUrl: `/api/videos/${encodeURIComponent(v.id)}/retry`,
+  }));
+  const docs=DOCS.map(d=>({
+    id:d.id, kind:d.kind, title:d.title||d.id, sub:"",
+    status:d.status, pct01: d.pct!=null?d.pct/100:null,
+    count: d.chunk_count, b: docBadge(d.status),
+    selectable:false, deletable:false,
+    retryUrl:`/admin/documents/${encodeURIComponent(d.id)}/retry`,
+  }));
+  return vids.concat(docs);
+}
+
+const TH='px-4 py-2.5 text-left text-[11px] font-medium uppercase tracking-wider text-slate-500';
+const TD='px-4 py-3 align-middle';
+const ICON_BTN='inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition';
+
+function renderLibrary(){
+  const rows=rowModel();
+  $("#libHead").innerHTML=`<tr>
+    ${FULL?`<th class="${TH} w-10"><span class="sr-only">In scope</span></th>`:""}
+    <th class="${TH}">Source</th>
+    <th class="${TH} w-24">Kind</th>
+    <th class="${TH} w-48">Status</th>
+    <th class="px-4 py-2.5 text-right text-[11px] font-medium uppercase tracking-wider text-slate-500 w-24">Chunks</th>
+    ${FULL?`<th class="px-4 py-2.5 text-right text-[11px] font-medium uppercase tracking-wider text-slate-500 w-24">Actions</th>`:""}
+  </tr>`;
+  if(!rows.length){
+    $("#libraryBody").innerHTML=`<tr><td colspan="6" class="px-4 py-12 text-center text-slate-400">${FULL
+      ? "No sources yet — add a talk, paper, or deck from <b class='font-medium'>Add sources</b>."
+      : "The demo corpus indexes itself on first start — sources appear here within a few minutes."}</td></tr>`;
+  } else {
+    $("#libraryBody").innerHTML=rows.map(r=>{
+      const sel=SELECTED.has(r.id);
+      const selCell = !FULL ? "" : ( r.kind==="video"
+        ? (r.selectable
+            ? `<td class="${TD}"><input type="checkbox" data-act="sel" data-id="${esc(r.id)}" ${sel?"checked":""} title="Include in search scope" class="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"></td>`
+            : `<td class="${TD}"></td>`)
+        : `<td class="${TD} text-slate-300" title="Papers &amp; decks are always in scope">${icon("minus","h-3.5 w-3.5")}</td>`);
+      const actions=[];
+      if(FULL && r.status==="failed") actions.push(`<button class="${ICON_BTN}" data-act="retry" data-id="${esc(r.id)}" data-url="${esc(r.retryUrl)}" title="Retry ingest">${icon("rotate")}</button>`);
+      if(r.deletable) actions.push(`<button class="${ICON_BTN}" data-act="del" data-id="${esc(r.id)}" data-title="${esc(r.title)}" title="Delete permanently">${icon("trash")}</button>`);
+      return `<tr class="hover:bg-slate-50 transition">
+        ${selCell}
+        <td class="${TD}"><div class="font-medium text-slate-800 max-w-md truncate" title="${esc(r.title)}">${esc(r.title)}</div>${r.sub?`<div class="text-xs text-slate-400 mt-0.5">${esc(r.sub)}</div>`:""}</td>
+        <td class="${TD}"><span class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium ${KIND_STYLE[r.kind]||KIND_STYLE.document}">${icon(KIND_ICON[r.kind]||"file-text","h-3 w-3")}${esc(r.kind)}</span></td>
+        <td class="${TD} text-[13px]">${statusCell(r.b, r.pct01, r.status)}</td>
+        <td class="${TD} text-right tabular-nums text-slate-600">${r.count!=null?r.count:"—"}</td>
+        ${FULL?`<td class="${TD}"><div class="flex justify-end gap-0.5">${actions.join("")}</div></td>`:""}
+      </tr>`;
+    }).join("");
+  }
+  // scope summary + search-view hint
+  const idxVideos=rows.filter(r=>r.kind==="video"&&r.status==="indexed");
+  const on=idxVideos.filter(r=>SELECTED.has(r.id)).length;
+  if(FULL){
+    $("#scopeLine").innerHTML=idxVideos.length
+      ? `Searching <b class="font-semibold text-slate-700">${on} of ${idxVideos.length}</b> talks · papers &amp; decks always included`
+      : "";
+    $("#scopeActions").classList.toggle("hidden", !idxVideos.length);
+    $("#scopeActions").classList.toggle("flex", !!idxVideos.length);
+    $("#scopeHint").innerHTML=idxVideos.length
+      ? `Scope: ${on} of ${idxVideos.length} talks — <button class="font-medium text-indigo-600 hover:text-indigo-700" data-goto="library">manage in Library</button>`
+      : "";
+  } else {
+    $("#scopeLine").textContent=rows.length?`${rows.length} sources in the demo corpus`:"";
+    $("#scopeHint").textContent="";
+  }
+}
+
+function updateStats(){
+  const vIdx=VIDEOS.filter(v=>v.status==="indexed").length;
+  const dIdx=DOCS.filter(d=>d.status==="indexed").length;
+  $("#corpusStats").innerHTML=`<b class="font-semibold text-slate-700">${vIdx}</b> talks · <b class="font-semibold text-slate-700">${dIdx}</b> papers &amp; decks`;
+  const busy=VIDEOS.filter(v=>_INFLIGHT.includes(v.status)).length + DOCS.filter(d=>_INFLIGHT.includes(d.status)).length;
+  $("#procPill").classList.toggle("hidden", !busy);
+  if(busy) $("#procPill").textContent=`${busy} processing`;
+}
+
+/* library actions — one delegated listener, no per-row rebinding */
+$("#libraryBody").addEventListener("click", async e=>{
+  const el=e.target.closest("[data-act]"); if(!el) return;
+  const act=el.dataset.act, id=el.dataset.id;
+  if(act==="sel"){ SELECTED.has(id)?SELECTED.delete(id):SELECTED.add(id); renderLibrary(); }
+  else if(act==="retry"){ await fetch(el.dataset.url,{method:"POST"}); loadVideos(); loadDocuments(); startRefresher(); }
+  else if(act==="del"){
+    if(!confirm(`Delete “${el.dataset.title}”?\n\nThis permanently removes its frames and search vectors. This can’t be undone.`)) return;
+    const r=await fetch("/api/videos/"+encodeURIComponent(id),{method:"DELETE"});
+    if(!r.ok){ const d=await r.json().catch(()=>({})); alert(d.detail||"Delete failed."); return; }
+    KNOWN.delete(id); SELECTED.delete(id); loadVideos();
+  }
+});
+$("#selAll").onclick=()=>{ VIDEOS.filter(v=>v.status==="indexed").forEach(v=>SELECTED.add(v.id)); renderLibrary(); };
+$("#selNone").onclick=()=>{ SELECTED.clear(); renderLibrary(); };
+
 /* Ingestion is a QUEUE — register returns 202 instantly and the worker(s)
-   process videos concurrently. So we free the button the moment a video is
-   queued (you can add more right away) and let a single background refresher
-   update the chips until nothing is processing. Per-video progress shows on
-   the chips themselves (sampling… / embedding 40%). */
-const _INFLIGHT=["pending","queued","fetching","sampling","embedding","parsing"];
+   process sources concurrently. Buttons free the moment a source is queued;
+   one background refresher updates the table until nothing is processing. */
 let _refresher=null;
 function startRefresher(){
   if(_refresher) return;
@@ -426,11 +527,10 @@ function startRefresher(){
     const [videos,docs]=await Promise.all([loadVideos(),loadDocuments()]);
     const busy=(videos&&videos.some(v=>_INFLIGHT.includes(v.status)))
       || (docs&&docs.some(d=>_INFLIGHT.includes(d.status)));
-    if(!busy){ clearInterval(_refresher); _refresher=null; $("#ingestStatus").textContent=""; }
+    if(!busy){ clearInterval(_refresher); _refresher=null; }
   }, 2500);
 }
-async function registerIngest(body, btns){
-  const st=$("#ingestStatus");
+async function registerIngest(body, btn, st){
   try{
     const resp=await fetch("/api/videos",{method:"POST",
       headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
@@ -439,13 +539,13 @@ async function registerIngest(body, btns){
     st.textContent="Queued — processing in the background. Add another anytime.";
     loadVideos(); startRefresher();
   }catch(e){ st.textContent="Error: "+e.message; }
-  finally{ btns.forEach(b=>b.disabled=false); }  // free the button immediately
+  finally{ btn.disabled=false; }  // free the button immediately
 }
 $("#ytBtn").onclick=()=>{ const u=$("#ytUrl").value.trim(); if(!u)return;
   $("#ytBtn").disabled=true; $("#ytUrl").value="";   // clear so the field is ready for the next URL
-  registerIngest({url:u},[$("#ytBtn")]); };
+  registerIngest({url:u}, $("#ytBtn"), $("#ytStatus")); };
 $("#upBtn").onclick=async()=>{ const f=$("#upFile").files[0]; if(!f)return;
-  const st=$("#ingestStatus"); $("#upBtn").disabled=true;
+  const st=$("#upStatus"); $("#upBtn").disabled=true;
   try{
     st.textContent="Uploading…";
     const pre=await fetch("/api/videos/presign",{method:"POST",
@@ -455,12 +555,12 @@ $("#upBtn").onclick=async()=>{ const f=$("#upFile").files[0]; if(!f)return;
     const p=await pre.json();
     const put=await fetch(p.url,{method:"PUT",headers:p.headers,body:f});
     if(!put.ok) throw new Error("upload failed ("+put.status+")");
-    registerIngest({video_id:p.video_id,key:p.key,title:f.name.replace(/\.[^.]+$/,"")},[$("#upBtn")]);
+    registerIngest({video_id:p.video_id,key:p.key,title:f.name.replace(/\.[^.]+$/,"")}, $("#upBtn"), st);
     $("#upFile").value="";   // clear so you can pick the next file right away
   }catch(e){ st.textContent="Error: "+e.message; $("#upBtn").disabled=false; }
 };
 $("#docBtn").onclick=async()=>{
-  const st=$("#ingestStatus");
+  const st=$("#docStatus");
   const r=buildDocumentPayload($("#docKind").value, $("#docUri").value, $("#docTitle").value);
   if(!r.ok){ st.textContent="Error: "+r.error; return; }
   $("#docBtn").disabled=true;
@@ -476,22 +576,29 @@ $("#docBtn").onclick=async()=>{
   finally{ $("#docBtn").disabled=false; }
 };
 
+/* ---------- markdown (bold, bullets, [n] pills) ---------- */
+function mdInline(t){
+  t=esc(t).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/`([^`]+?)`/g,'<code>$1</code>');
+  return t.replace(/\[(\d+(?:\s*,\s*\d+)*)\]/g,(_,g)=>g.split(/\s*,\s*/).map(n=>
+    `<span class="cite" data-n="${n.trim()}" title="Open this source">${n.trim()}</span>`).join(''));
+}
+function renderMarkdown(md){
+  const lines=(md||"").split(/\n/); let html="",inUl=false;
+  const closeUl=()=>{if(inUl){html+="</ul>";inUl=false;}};
+  for(const raw of lines){ const l=raw.trim();
+    if(/^[-*]\s+/.test(l)){ if(!inUl){html+="<ul>";inUl=true;} html+=`<li>${mdInline(l.replace(/^[-*]\s+/,''))}</li>`; }
+    else { closeUl(); if(l) html+=`<p class="mb-3">${mdInline(l)}</p>`; } }
+  closeUl(); return html;
+}
+
 /* ---------- ask ---------- */
 const qEl=$("#q");
 function autogrow(){ qEl.style.height="auto"; qEl.style.height=Math.min(qEl.scrollHeight,160)+"px"; }
 qEl.addEventListener("input",autogrow);
 qEl.addEventListener("keydown",e=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); $("#go").click(); }});
 
-/* GET /ask_stream (SSE), not POST /api/ask: the latter's video_ids scope
-   used to silently exclude every paper/deck citation from Qdrant's filter
-   (video chunks carry video_id, document chunks never do) — fixed in
-   src/rag/vector_store.py's _user_filter, but /api/ask has no way to also
-   ask for document-only content once documents get their own selection UI
-   later, whereas /ask_stream is the endpoint DESIGN.md built specifically
-   for cross-source answers. Parsed by hand (event:/data: blocks split on a
-   blank line) rather than EventSource — same trust boundary, more control
-   over error handling, and it mirrors the SSE parsing already proven out
-   in this session's own diagnostics. */
+/* GET /ask_stream (SSE) — the cross-source answer endpoint. Parsed by hand
+   (event:/data: blocks split on a blank line) via fetch + ReadableStream. */
 async function askViaStream(q, video_ids){
   const params=new URLSearchParams({q});
   (video_ids||[]).forEach(id=>params.append("video_ids", id));
@@ -520,87 +627,87 @@ async function askViaStream(q, video_ids){
 $("#go").onclick=async()=>{
   const q=qEl.value.trim(); if(!q)return;
   $("#resultsWrap").classList.remove("hidden");
-  $("#article").innerHTML=`<div class="space-y-3"><div class="shimmer h-6 w-2/3 rounded"></div><div class="shimmer h-4 w-full rounded"></div><div class="shimmer h-4 w-5/6 rounded"></div></div>`;
-  $("#sources").innerHTML=""; $("#go").disabled=true; $("#go").textContent="…";
+  $("#article").innerHTML=`<div class="space-y-3"><div class="shimmer h-5 w-2/3 rounded"></div><div class="shimmer h-4 w-full rounded"></div><div class="shimmer h-4 w-5/6 rounded"></div></div>`;
+  $("#sources").innerHTML=""; $("#go").disabled=true;
   try{
-    // Front page (/) queries ONLY the samples; /get-started queries the selected set.
-    const video_ids = SELECTABLE() ? [...SELECTED] : SAMPLE_INDEXED;
+    // Demo corpus (/) queries only the curated samples; the workspace queries the selected set.
+    const video_ids = FULL ? [...SELECTED] : SAMPLE_INDEXED;
     const r=await askViaStream(q, video_ids);
     CITES=r.citations||[];
     let html="";
-    if(r.answer) html+=`<div class="prose-body fade-in">${renderMarkdown(r.answer)}</div>`;
-    if(r.note) html+=`<p class="text-xs text-muted mt-3">${esc(r.note)}</p>`;
-    if(!r.answer && !CITES.length) html=`<p class="text-muted">No matching moments. Add a source first.</p>`;
+    if(r.answer) html+=`<div class="fade-in">${renderMarkdown(r.answer)}</div>`;
+    if(r.note) html+=`<p class="text-xs text-slate-400 mt-3">${esc(r.note)}</p>`;
+    if(!r.answer && !CITES.length) html=`<p class="text-slate-400">No matching moments. Add a source first.</p>`;
     $("#article").innerHTML=html;
     renderSources();
-  }catch(e){ $("#article").innerHTML=`<p class="text-coral2">Error: ${esc(e.message)}</p>`; }
-  finally{ $("#go").disabled=false; $("#go").textContent="→"; }
+  }catch(e){ $("#article").innerHTML=`<p class="text-red-600">Error: ${esc(e.message)}</p>`; }
+  finally{ $("#go").disabled=false; }
 };
 
-function renderDocumentCard(c){
-  // Paper/deck (Assignment 3): no video thumbnail exists for these — a
-  // designed gradient panel (color-coded by kind, same visual weight as a
-  // video thumbnail) stands in for one, so cross-source results read as one
-  // consistent grid, not "videos, plus some other stuff".
-  const isDeck = c.kind==="deck";
-  const icon = isDeck ? "🖼" : "📄";
-  const grad = isDeck ? "from-[#e0d9f7] to-[#cfc2ef]" : "from-[#ffe2d8] to-[#ffd0c0]";
-  const kindTag = `<span class="text-[9px] font-semibold px-1.5 py-px rounded bg-[#e0d9f7] text-[#5b3fa0]">${isDeck?"deck":"paper"}</span>`;
-  const quote = c.text
-    ? `<div class="text-[11px] text-muted italic mt-1 line-clamp-2">“${esc(c.text)}”</div>` : "";
+/* ---------- source cards ---------- */
+function docCard(c){
+  const isDeck=c.kind==="deck";
+  const tile=isDeck?"bg-teal-50 text-teal-500":"bg-violet-50 text-violet-500";
+  const badge=isDeck?"bg-teal-50 text-teal-700 border-teal-200":"bg-violet-50 text-violet-700 border-violet-200";
+  const quote=c.text?`<div class="text-xs text-slate-500 italic mt-1.5 line-clamp-2">“${esc(c.text)}”</div>`:"";
   return `
-  <button class="source text-left bg-card border border-line rounded-2xl overflow-hidden shadow-sm hover:border-coral hover:shadow-md transition" data-n="${c.n}">
-    <div class="aspect-video bg-gradient-to-br ${grad} overflow-hidden flex items-center justify-center text-3xl">${icon}</div>
+  <button class="source text-left rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden hover:border-indigo-300 hover:shadow-md transition" data-n="${c.n}">
+    <div class="aspect-video ${tile} flex items-center justify-center relative">
+      ${icon(isDeck?"presentation":"file-text","h-9 w-9")}
+      <span class="absolute top-2.5 right-2.5 text-slate-300">${icon("external","h-3.5 w-3.5")}</span>
+    </div>
     <div class="p-3">
-      <div class="flex items-center gap-2 mb-1">
-        <span class="text-[10px] font-bold text-white bg-coral rounded px-1.5 py-0.5">${c.n}</span>
-        <span class="text-[11px] text-muted">${esc(citeLabel(c))}</span>
-        ${kindTag}
-        <span class="text-[11px] text-muted ml-auto">score ${c.score}</span>
+      <div class="flex items-center gap-1.5 mb-1.5">
+        <span class="inline-flex h-5 min-w-[20px] items-center justify-center rounded bg-indigo-600 px-1 text-[11px] font-bold text-white">${c.n}</span>
+        <span class="text-xs text-slate-500">${esc(citeLabel(c))}</span>
+        <span class="inline-flex items-center gap-1 rounded-full border px-1.5 py-px text-[10px] font-medium ${badge}">${esc(c.kind)}</span>
+        <span class="ml-auto text-[11px] text-slate-400 tabular-nums">${c.score}</span>
       </div>
-      <div class="text-[12px] font-600 leading-snug line-clamp-2">${esc(c.title||c.source_id)}</div>
+      <div class="text-[13px] font-medium leading-snug line-clamp-2 text-slate-800">${esc(c.title||c.source_id)}</div>
       ${quote}
     </div>
   </button>`;
 }
-
 function renderSources(){
   $("#sources").innerHTML=CITES.map(c=>{
-    if(citeIsDocument(c)) return renderDocumentCard(c);
+    if(citeIsDocument(c)) return docCard(c);
     const mods=(c.modalities||[]);
     const tags=mods.map(m=>m==="frame"
-      ? '<span class="text-[9px] px-1 rounded bg-coral/15 text-coral2">seen</span>'
-      : '<span class="text-[9px] px-1 rounded bg-[#cfe8d6] text-[#1f7a43]">said</span>').join(" ");
+      ? '<span class="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-1.5 py-px text-[10px] font-medium text-indigo-700">seen</span>'
+      : '<span class="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-1.5 py-px text-[10px] font-medium text-emerald-700">said</span>').join(" ");
     // Text-only moments have no frame; they're always YouTube, so fall back to
-    // the video's thumbnail instead of an empty "(no frame)" placeholder.
+    // the video's thumbnail instead of an empty placeholder.
     const yid = ytId(c);
     const img = c.thumbnail || (yid ? `https://img.youtube.com/vi/${yid}/hqdefault.jpg` : null);
     const thumb = img
       ? `<img loading="lazy" src="${esc(img)}" class="w-full h-full object-cover" onerror="this.style.opacity=0">`
-      : `<div class="w-full h-full flex items-center justify-center text-muted text-xs p-2 text-center">transcript moment<br>(no frame)</div>`;
+      : `<div class="w-full h-full flex items-center justify-center text-slate-400 text-xs p-2 text-center">transcript moment</div>`;
     const quote = c.transcript
-      ? `<div class="text-[11px] text-muted italic mt-1 line-clamp-2">“${esc(c.transcript)}”</div>` : "";
+      ? `<div class="text-xs text-slate-500 italic mt-1.5 line-clamp-2">“${esc(c.transcript)}”</div>` : "";
     return `
-    <button class="source text-left bg-card border border-line rounded-2xl overflow-hidden shadow-sm hover:border-coral transition" data-n="${c.n}">
-      <div class="aspect-video bg-paper2 overflow-hidden">${thumb}</div>
-      <div class="p-3">
-        <div class="flex items-center gap-2 mb-1">
-          <span class="text-[10px] font-bold text-white bg-coral rounded px-1.5 py-0.5">${c.n}</span>
-          <span class="text-[11px] text-muted">${esc(c.timestamp)}</span>
-          ${tags}
-          <span class="text-[11px] text-muted ml-auto">score ${c.score}</span>
+    <button class="source group text-left rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden hover:border-indigo-300 hover:shadow-md transition" data-n="${c.n}">
+      <div class="aspect-video bg-slate-100 overflow-hidden relative">
+        ${thumb}
+        <div class="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition bg-slate-900/10">
+          <div class="h-9 w-9 rounded-full bg-white/95 shadow flex items-center justify-center text-indigo-600">${icon("play","h-4 w-4 ml-0.5")}</div>
         </div>
-        <div class="text-[12px] font-600 leading-snug line-clamp-2">${esc(c.title||c.video_id)}</div>
+      </div>
+      <div class="p-3">
+        <div class="flex items-center gap-1.5 mb-1.5">
+          <span class="inline-flex h-5 min-w-[20px] items-center justify-center rounded bg-indigo-600 px-1 text-[11px] font-bold text-white">${c.n}</span>
+          <span class="text-xs text-slate-500 tabular-nums">${esc(c.timestamp)}</span>
+          ${tags}
+          <span class="ml-auto text-[11px] text-slate-400 tabular-nums">${c.score}</span>
+        </div>
+        <div class="text-[13px] font-medium leading-snug line-clamp-2 text-slate-800">${esc(c.title||c.video_id)}</div>
         ${quote}
       </div>
     </button>`;}).join("");
   $("#sources").querySelectorAll(".source").forEach(el=>el.onclick=()=>openCitation(+el.dataset.n));
 }
 
-/* Dispatch by kind: video keeps the existing modal player untouched; a
-   paper/deck citation opens its source at the right page in a new tab —
-   there's no in-app slide/page viewer, and DESIGN.md's row asks for a link,
-   not a rendering pipeline. */
+/* Dispatch by kind: video plays in the modal; a paper/deck citation opens
+   its source at the right page in a new tab. */
 function openCitation(n){
   const c=CITES.find(x=>x.n===n); if(!c)return;
   if(citeIsDocument(c)){
@@ -620,15 +727,13 @@ function playCitation(n){
   $("#mTitle").textContent=c.title||c.video_id;
   $("#mMeta").textContent = c.transcript ? `“${c.transcript}”` : `Moment at ${c.timestamp}`;
   const box=$("#playerBox"); const yid=ytId(c);
-  // Frame preview if we have one; otherwise (text-only YouTube moment) the
-  // video's thumbnail, so the modal never shows an empty preview.
   const preview = c.thumbnail || (yid ? `https://img.youtube.com/vi/${yid}/hqdefault.jpg` : null);
   $("#mFrame").style.display = preview ? "" : "none";
   if(preview) $("#mFrame").src = preview;
   const isFrame = !!c.thumbnail;
   $("#mFrameLabel").textContent = isFrame ? "Matched frame" : "Matched on transcript";
   $("#mFrameDesc").textContent = isFrame
-    ? "This is what CLIP matched your question against — the still it judged closest to what you asked."
+    ? "This is what the visual index matched your question against — the still judged closest to what you asked."
     : "This moment matched on what was said (transcript). Shown is the video’s thumbnail — press play to jump to the exact spot.";
   $("#mOut").href=c.deeplink||"#";
   if(yid){
@@ -648,16 +753,15 @@ document.addEventListener("keydown",e=>{ if(e.key==="Escape") closeModal(); });
 /* citation pills inside the answer */
 $("#article").addEventListener("click",e=>{ const c=e.target.closest(".cite"); if(c) openCitation(+c.dataset.n); });
 
-/* examples — real cross-source questions the seeded corpus can actually
-   answer (grounded in benchmark/corpus.json's 8 paper+deck+talk triplets),
-   not generic visual-search prompts. First one is DESIGN.md's own demo
-   moment: one answer citing a talk timestamp, a paper page, and a slide. */
+/* examples — real cross-source questions the seeded corpus can answer */
 const EXAMPLES=["how does attention avoid recurrence?","what does the LoRA paper say about trainable parameters?",
   "how does ReAct combine reasoning and acting?","what makes BERT bidirectional?"];
-$("#examples").innerHTML=EXAMPLES.map(q=>`<span class="chip">${esc(q)}</span>`).join("");
-$("#examples").querySelectorAll(".chip").forEach(c=>c.onclick=()=>{ qEl.value=c.textContent; autogrow(); qEl.focus(); });
+$("#examples").innerHTML=EXAMPLES.map(q=>
+  `<button class="example rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600 hover:border-indigo-300 hover:text-slate-900 transition">${esc(q)}</button>`).join("");
+document.querySelectorAll(".example").forEach(c=>c.onclick=()=>{ qEl.value=c.textContent; autogrow(); qEl.focus(); });
 
-applyMode(); loadConfig(); loadVideos(); loadDocuments();
+/* ---------- boot ---------- */
+applyMode(); loadConfig(); loadVideos(); loadDocuments(); showView("search");
 </script>
 </body>
 </html>
