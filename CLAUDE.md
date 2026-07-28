@@ -128,6 +128,9 @@ A component is DONE only when: its tests are green, relevant SLA rows pass,
 | 12 | retrieval precision@10 (topical) | `bench.py --quality`: `precision_at_10` ≥ `benchmark/quality_gates.json` threshold |
 | 13 | answer relevancy + faithfulness (LLM-judge) | `benchmark/answer_quality.py`: mean relevancy + faithfulness pass-rate ≥ `quality_gates.json` thresholds |
 | 14 | paper table/figure extraction | unit: fixture-PDF table chunk keeps structure; fixture-PDF figure produces a captioned chunk |
+| 15 | hybrid dense+sparse text search | unit: lexical-only match surfaces; live: precision@10 + answer_quality before/after |
+| 16 | cross-encoder reranker | unit: reorders toward relevance, frame-only windows don't crash; live: before/after + search_p95 on/off |
+| 17 | query enhancement (decomposition/expansion) | unit: prompt/parse/dedup logic; live: recall@10 flag on/off |
 
 Cross-cutting, always: `grounding-auditor` after 7/8/10; search-during-ingest ratio
 ≤ 1.3× after 4/5; provided-endpoint regression (probe 6) after everything.
@@ -135,6 +138,11 @@ Cross-cutting, always: `grounding-auditor` after 7/8/10; search-during-ingest ra
 Components 12–14 (DESIGN.md §3a, added 2026-07-28) are quality-eval hardening, not
 grading-rubric requirements — they get their own `benchmark/quality_gates.json`,
 never `sla.json`/`rubric.json` (those stay frozen, per §2 E5).
+
+Components 15–17 (DESIGN.md §3b, added 2026-07-28) are retrieval-quality upgrades
+following up on component 12's precision@10 diagnosis. Component 17 is opt-in
+(`QUERY_ENHANCEMENT_ENABLED`, default false) — never let it change the baseline
+latency/recall numbers reviewers see unless explicitly turned on.
 
 ## 8. Definition of done for the whole assignment
 

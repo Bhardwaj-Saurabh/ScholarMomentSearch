@@ -85,6 +85,26 @@ Primary eval per component, mirrored into `CLAUDE.md` §7:
 - **13** — `answer_quality.py`: mean relevancy ≥ threshold, faithfulness pass-rate ≥ threshold.
 - **14** — unit: fixture-PDF table chunk keeps cell/row structure; fixture-PDF figure produces a captioned chunk.
 
+### 3b. Retrieval-quality upgrades (added 2026-07-28, DECIDED — own scope, own gates)
+
+Follow-up to §3a's precision@10 diagnosis (EVIDENCE.md 2026-07-28): the text
+branch is pure dense (bge) with no lexical matching, retrieval scores are
+rank-only (RRF has no way to tell "barely qualified" from "best possible
+match" apart), and every query is embedded verbatim with no rewriting. Three
+components, verified against the live Qdrant Cloud instance before being
+committed to here (see EVIDENCE.md for the verification transcript):
+
+| # | Component | File | Notes |
+|---|-----------|------|-------|
+| 15 | Hybrid dense+sparse text search | `src/rag/vector_store.py`, `src/rag/embeddings.py` | Qdrant's OWN native hybrid search (not hand-rolled BM25): `TEXT_COLLECTION` gains a named sparse vector (`bm25`, via fastembed's `Qdrant/bm25` `SparseTextEmbedding` — already a fastembed dependency, no new library) alongside the existing unnamed dense vector. Query-time: `qm.Prefetch` (dense + sparse) fused server-side via `qm.FusionQuery(fusion=qm.Fusion.RRF)` — one Qdrant round-trip, not two. **Verified constraint**: this Qdrant server version (1.18.3) rejects adding a NEW sparse vector config to an already-populated collection (`400: Not existing vector name error`) — sparse config must exist at collection *creation*. Migration: drop + recreate `TEXT_COLLECTION` (sparse config included from the start) + reseed — the exact same operational step `config.py`'s own comment already documents for a `TEXT_EMBED_PROVIDER` switch, not a new kind of migration burden. Pushed into `vector_store.py`'s upsert/search functions only — `src/ingest/pipeline.py` (protected) still just calls `upsert_chunks(...)` with the exact same signature/behavior from its own perspective. |
+| 16 | Cross-encoder reranker | `src/rag/rerank.py` (new) | After `_fuse()`'s RRF fusion, before truncating to `TOP_K`: re-score every window that carries text (transcript or paper/deck chunk) against the raw question with a small CPU cross-encoder (`cross-encoder/ms-marco-MiniLM-L-6-v2`, via `sentence_transformers.CrossEncoder` — same library CLIP already depends on, no new heavy dependency), sort by that score. Frame-only windows (pure visual match, nothing to feed a text cross-encoder) keep their original RRF order and rank after every text-scored window — a cross-encoder can't score what it can't read. Env-flagged (`RERANK_ENABLED`, default true) so `bench.py`'s search-latency gates can be measured with it on vs. off. |
+| 17 | Query enhancement (decomposition + expansion) | `src/rag/query_enhance.py` (new) | **Opt-in**, `QUERY_ENHANCEMENT_ENABLED` env flag, default **false** — an extra LLM call before retrieval starts adds real latency to every search, and `accept_latency_p95_ms` is already red; graders/reviewers see the unmodified baseline unless they turn this on. One LLM call (server-wide `llm.env_config()` only, not a tenant's BYO model — keeps `retrieve()`'s signature simple) classifies the question and returns 1 (unchanged) to 3 query strings: sub-questions for a compound question ("How does X combine A and B?" → 2 sub-queries), paraphrases for a single-topic one. Each string is retrieved independently per branch, hits are deduped by point key and re-sorted by score before `_fuse()` runs — `_fuse()`'s own RRF logic is untouched. Best-effort: any failure (no LLM configured, parse error, network error) falls back to `[question]` unchanged, never blocks retrieval. |
+
+Primary eval per component, mirrored into `CLAUDE.md` §7:
+- **15** — unit: hybrid query surfaces a lexical-only match (e.g. an exact acronym) that a dense-only query misses; live: re-run `bench.py --quality` (precision@10) and `answer_quality.py` before/after, verbatim numbers, no cherry-picking.
+- **16** — unit: reranker reorders a candidate list toward the more textually-relevant one, frame-only windows never crash the reranker; live: same before/after re-run as component 15, plus `search_p95` with `RERANK_ENABLED` on vs. off (latency cost must be disclosed, not hidden).
+- **17** — unit: prompt/response parsing, dedup-and-resort logic; a query classified as simple returns `[question]` unchanged; live: recall@10 with the flag on vs. off (this is the one most likely to move recall, since it's the only one that changes what gets retrieved rather than how it's ranked).
+
 **How content gets in (product model):** (1) seeded shared corpus at boot — day-one
 value; (2) self-serve at runtime — any user pastes a YouTube/arXiv/deck URL in the
 UI, tenant-scoped to them; (3) bulk backfill via the admin API. All three ride the

@@ -2073,3 +2073,35 @@ queries:
 
 Not fixed (per the user's disclosed-open decision) — recorded here so the number
 is diagnosed, not just reported.
+
+---
+
+### 2026-07-28 — DESIGN.md §3b scoped: hybrid search, reranker, query enhancement
+
+User asked for a cross-encoder reranker, query enhancement, and hybrid search,
+following up directly on component 12's precision@10 diagnosis. Clarified scope via
+3 questions before touching DESIGN.md: query enhancement = both decomposition AND
+expansion, opt-in via env flag (accept_latency is already red, an extra LLM call on
+every search must not become the new baseline reviewers see); "hybrid search" =
+Qdrant's own native sparse+dense fusion (the user's own answer), not hand-rolled
+BM25.
+
+Verified against the LIVE Qdrant Cloud instance (throwaway probe collections,
+cleaned up after) before writing any production code:
+- Dense (unnamed `""`) + sparse (named `"bm25"`, via fastembed's `Qdrant/bm25`
+  `SparseTextEmbedding`) coexist on one point: `vector={"": dense.tolist(), "bm25":
+  SparseVector(indices=.., values=..)}`.
+- Native hybrid query works end-to-end: `qm.Prefetch` (dense + sparse) fused via
+  `qm.FusionQuery(fusion=qm.Fusion.RRF)` in one `query_points` call — a LoRA-worded
+  query correctly ranked the LoRA text (score 1.0) above the CLIP text (score 0.33)
+  in a 2-point probe collection.
+- **Load-bearing constraint found**: `update_collection(sparse_vectors_config=...)`
+  on an EXISTING populated collection returns `400: "Not existing vector name
+  error: bm25"` on this server (`qdrant version 1.18.3`) — a sparse vector config
+  can only be added at collection *creation* time, not retrofitted. Migration path:
+  drop + recreate `TEXT_COLLECTION` with sparse config from the start, then reseed —
+  the same operational step `config.py`'s own comment already documents for a
+  `TEXT_EMBED_PROVIDER` switch (RE-SEEDING required), not a new kind of burden.
+
+DESIGN.md §3b (components 15-17) + CLAUDE.md §7 updated to match, before any
+implementation, per CLAUDE.md §1.
