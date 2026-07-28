@@ -2349,3 +2349,118 @@ taken per the earlier logged decision.
 
 **Commit**: `8dfb428` — "Add hybrid dense+sparse search, cross-encoder reranker,
 and opt-in query enhancement (components 15-17)".
+
+---
+
+### 2026-07-28 — Component 18: live metrics / observability dashboard (DESIGN.md §3c)
+
+Not part of the assignment's grading — an operator-facing addition requested
+directly. Scoped with the user first: (a) both new endpoints require the admin
+bearer token (`require_auth`, same as other admin-sensitive routes); (b) added
+"grounding/abstain rate" as an extra panel beyond the pasted spec. Research (via
+Explore agent) confirmed this is entirely greenfield — no existing request
+timing, no LLM token capture (all 4 `llm.py` call sites discarded `.usage`),
+`list_sources()` is tenant-scoped (wrong shape for a global ops view), and
+nothing in `eval/rubric.json`/`benchmark/sla.json` depends on it.
+
+**Pre-implementation check**: verified live that the browser UI has never sent
+an Authorization header for anything (confirmed via a raw `curl -X POST
+/admin/documents` with no auth header → real `401`, with `ADMIN_TOKEN=change-me`
+actually set) — a pre-existing gap, disclosed but not fixed here. Solved for the
+new Metrics page specifically with its own small admin-token entry
+(`localStorage`), rather than retrofitting auth into the unrelated existing
+register/retry calls.
+
+RED→GREEN, in order:
+- `tests/test_metrics.py` (16 tests): pure logic — cost estimation (known
+  model, unknown/self-hosted model → $0 fallback, zero tokens), percentile
+  helper, route bucketing + status counts, LLM usage accumulation (`kind=
+  "answer"` only counts toward "LLM answers"; every kind's tokens/cost still
+  accumulate), abstain-rate tracking, Prometheus text format. Confirmed RED
+  (`ImportError: cannot import name 'metrics'`) before writing `src/metrics.py`.
+- `tests/test_db_documents.py` (+1): `queue_status_counts()` — a NEW, GLOBAL
+  (all-tenant) `GROUP BY kind, status` rollup across `ms_videos` UNION
+  `ms_documents`, distinct from the existing tenant-scoped `list_sources()`.
+- `tests/test_llm.py` (+3): `_answer_openai`/`caption_image`/`complete` each
+  read `resp.usage` (previously discarded at all 4 call sites) and tag the
+  metrics call with the right `kind` — real fake-`openai.OpenAI`-client mocks,
+  not just assertions on prompt text. `openai` was declared in
+  `requirements.txt` but missing from this local dev venv (same gap as
+  `sentence-transformers` earlier this session) — installed to catch it up.
+- `tests/test_cross_source_search.py` (+2): `ask()` split into `_ask_impl` +
+  a thin `ask()` wrapper that calls `metrics.record_ask(result)` exactly once,
+  regardless of which of `_ask_impl`'s several early-return paths fired —
+  no restructuring of the existing control flow.
+- `tests/test_metrics_api.py` (6, new): `GET /metrics` and `GET /admin/metrics`
+  both 401 without the bearer token, 200 with it; the new
+  `@app.middleware("http")` in `src/app.py` buckets by ROUTE TEMPLATE
+  (`request.scope["route"].path`) — verified live in-test that 3 different
+  fake `video_id`s all land in ONE `/api/videos/{video_id}` bucket, not three.
+
+GREEN: `uv run pytest tests/ -q` → **196 passed** (was 168; +28 new, 0
+regressions).
+
+**Live verification** against the running stack (real rebuild + restart):
+- `/` → `sample`, `/get-started` → `full`, both 200.
+- `GET /metrics` / `GET /admin/metrics`: 401 without the token, 200 with
+  `Authorization: Bearer change-me`.
+- Two real `/ask_stream` calls, then `GET /admin/metrics` showed genuine,
+  non-fabricated numbers: `cost_usd: 0.0009`, `input_tokens: 3931`,
+  `output_tokens: 466`, `llm_answers: 2`, `requests: 8`, routes correctly
+  bucketed (`/metrics`×2, `/ask_stream`×2, `/`×1, `/get-started`×1,
+  `/api/health`×1, `/admin/metrics`×1 — no per-request-id explosion),
+  `status_counts: {200: 6, 401: 2}` (the 2 unauthed probes from the RED-phase
+  curl checks), `ask_total: 2, ask_abstained: 0, abstain_rate: 0.0`, and a
+  GLOBAL (all-tenant) `queue` rollup showing real counts accumulated from this
+  session's earlier bench/precision runs (44 indexed decks, 44 indexed papers,
+  12 indexed videos, 5 failed papers, 2 skipped each) — proving the
+  all-tenant scope decision works, not just a single-tenant view.
+
+UI: `node --test ui/citation.test.js ui/ingest.test.js` → 13/13 (locked
+script blocks untouched). `<!--MS_MODE-->` still exactly 2 hits (placeholder +
+the legitimate `window.MS_MODE` read). All 51 distinct `$("#id")` references
+resolve to a real element (was 43 before this component). Tag balance and
+legacy-token checks clean. Main script `node --check`s clean.
+
+Disclosed, not fixed: the pre-existing "browser UI never sends auth" gap
+(separate from this component); actual browser rendering of the new Metrics
+page wasn't screenshotted (no browser available in this environment) — the
+live JSON endpoint proof above is the closest available verification that the
+data the page renders is real.
+
+**Commit**: pending — `src/metrics.py` (new), `src/api/metrics.py` (new),
+`src/app.py`, `src/llm.py`, `src/db.py`, `src/rag/search.py`, `ui/index.html`,
+`tests/test_metrics.py` (new), `tests/test_metrics_api.py` (new),
+`tests/test_db_documents.py`, `tests/test_llm.py`,
+`tests/test_cross_source_search.py`.
+
+---
+
+### 2026-07-28 — Component 18 closeout: spec-guardian review
+
+`spec-guardian` reviewed the full diff (`ed52a60`..`048d7a5`): **PASS**, no
+blocking findings. Independently re-ran `uv run pytest tests/ -q` → 196 passed,
+matching this file's claimed number exactly. Verified directly against the
+code (not taking EVIDENCE.md's claims on faith):
+- Both `/metrics` and `/admin/metrics` carry a real `Depends(require_auth)` —
+  confirmed via the actual 401/200 tests, not just the route decorator text.
+- The request middleware buckets by route TEMPLATE (proven empirically: three
+  different fake video_ids all landed in one `/api/videos/{video_id}` bucket),
+  doesn't swallow exceptions, and returns the response untouched.
+- `ask()`'s wrapper is pure instrumentation — `_ask_impl`'s body is
+  byte-identical to the old `ask()`, only the `def` line changed.
+- `llm.py`'s new `kind` parameter is backward-compatible (keyword-only,
+  defaulted) and all 4 usage-capture call sites use `getattr(resp, "usage",
+  None)` defensively, never crashing on a provider response missing usage.
+- No protected/provided files touched; no doc/code drift versus the
+  pre-implementation DESIGN.md/CLAUDE.md entries; hygiene clean.
+
+One minor, non-blocking note: the middleware has no `try/finally`, so a
+request whose handler raises an uncaught exception (bypassing FastAPI's own
+handlers) would skip that one `record_request` call — the client-facing
+response is unaffected either way, it just wouldn't appear in the dashboard.
+Not fixed in this pass; a genuinely rare path (FastAPI's exception handling
+already covers the ordinary error cases).
+
+**Commit**: `048d7a5` — "Add live metrics/observability dashboard: request
+timing, LLM cost/tokens, grounding rate, ingest queue (component 18)".
