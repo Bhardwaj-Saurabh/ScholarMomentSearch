@@ -2319,3 +2319,33 @@ honestly-reported result, left off by default as scoped.
 **Commit**: pending — `src/config.py`, `src/llm.py`, `src/rag/query_enhance.py`,
 `src/rag/search.py`, `tests/test_query_enhance.py`,
 `tests/test_cross_source_search.py`.
+
+---
+
+### 2026-07-28 — Components 15-17 closeout: spec-guardian review
+
+`spec-guardian` reviewed the full diff (`bbe8d11`..`8dfb428`): **PASS-with-
+warnings**. Independently re-ran `uv run pytest tests/ -q` → 168 passed, matching
+this file's claimed number exactly. Verified directly against the code (not
+taking EVIDENCE.md's claims on faith):
+- Tenant filter: both `Prefetch` objects in `vector_store.py::search_text`
+  carry `filter=qfilter` explicitly — the critical leak-prevention fix is real.
+- `QUERY_ENHANCEMENT_ENABLED` defaults `False` in `src/config.py` (checked the
+  code, not just the comment).
+- The confidence gate's `best_text` call omits `query_text`, so it always takes
+  the dense-only path regardless of hybrid/multi-query retrieval elsewhere.
+- No protected/provided files touched (`src/ingest/pipeline.py`, `fetch.py`,
+  `frames.py`, `dedup.py`, `transcript.py`, `src/api/videos.py`,
+  `src/dispatcher.py`, `benchmark/sla.json`, `eval/rubric.json` all absent from
+  the diff).
+- DESIGN.md/CLAUDE.md's component 15-17 entries (written before implementation)
+  match what actually shipped — no drift.
+- Hygiene clean, no secrets/media in the diff.
+
+Warning (not a blocker, already known): the pre-existing test-isolation gap
+means the new tenant-scoping regression test itself runs against production
+Qdrant, not an isolated fixture — flagged again for visibility, no new action
+taken per the earlier logged decision.
+
+**Commit**: `8dfb428` — "Add hybrid dense+sparse search, cross-encoder reranker,
+and opt-in query enhancement (components 15-17)".
