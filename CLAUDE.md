@@ -125,9 +125,16 @@ A component is DONE only when: its tests are green, relevant SLA rows pass,
 | 9 | benchmark TODOs filled | `bench.py` exit 0 end-to-end |
 | 10 | corpus seeding | fresh-boot test: seed exits 0, cross-source query answers |
 | 11 | self-serve tab | probe: register via UI path → indexed → queryable |
+| 12 | retrieval precision@10 (topical) | `bench.py --quality`: `precision_at_10` ≥ `benchmark/quality_gates.json` threshold |
+| 13 | answer relevancy + faithfulness (LLM-judge) | `benchmark/answer_quality.py`: mean relevancy + faithfulness pass-rate ≥ `quality_gates.json` thresholds |
+| 14 | paper table/figure extraction | unit: fixture-PDF table chunk keeps structure; fixture-PDF figure produces a captioned chunk |
 
 Cross-cutting, always: `grounding-auditor` after 7/8/10; search-during-ingest ratio
 ≤ 1.3× after 4/5; provided-endpoint regression (probe 6) after everything.
+
+Components 12–14 (DESIGN.md §3a, added 2026-07-28) are quality-eval hardening, not
+grading-rubric requirements — they get their own `benchmark/quality_gates.json`,
+never `sla.json`/`rubric.json` (those stay frozen, per §2 E5).
 
 ## 8. Definition of done for the whole assignment
 
