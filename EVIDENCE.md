@@ -1579,5 +1579,114 @@ compose up -d --scale worker=N` again). Scoped to documents only, matching
 `src/dispatcher.py`/`src/api/videos.py` are CLAUDE.md-protected and the
 graded gate only exercises documents.
 
-**Commit**: pending — `src/reconciler.py`, `src/db.py`, `src/config.py`,
-`src/api/admin.py`, `src/worker.py`, `tests/test_reconciler.py`, this entry.
+**Commit**: `0f7d961` — "Automate crash recovery for orphaned document
+ingests (fix no_loss_under_crash)".
+
+---
+
+## 2026-07-28 — Grounding, round 2: mechanical (not just prompt-level) defense
+
+The round-1 grounding fix (source titles + prompt rules) closed the 2
+originally-reported violations, but its OWN independent adversarial re-check
+(previous entry) found it didn't generalize — 3 new cases reproduced the
+same pattern under different names. This entry replaces "ask the model to
+cross-check a named source" (an abstract reasoning task it doesn't reliably
+do) with a structural constraint plus a mechanical, code-level backstop that
+doesn't depend on the model's compliance at all — then adversarially
+re-verifies TWICE more, finding and fixing one more real gap before landing.
+
+**1. Prompt change** (`src/llm.py::SYSTEM`, rule 4): instead of "only
+attribute if titles match" (reasoning-based, proven unreliable), the model
+is now told to **never write a source's name in prose at all** — cite ONLY
+by `[n]`. Simpler, more mechanical instruction to follow; removes the
+linguistic opportunity for "the X paper says..." to exist at all when
+followed.
+
+**2. Code-level backstop** (`src/rag/search.py::_check_named_source_attribution`,
+new, called after `_validate_citations` in `ask()`): scans the generated
+answer for the literal "the X paper/deck/talk/video" pattern (regex,
+case-insensitive) and checks whether X is actually a DIFFERENT source that
+exists elsewhere in the tenant's corpus (`db.list_sources`) but wasn't cited
+for this query. If so, withholds the answer with an explicit explanation
+instead of returning the fabrication — this does NOT depend on the LLM
+following instruction #1; it catches the violation even when the prompt
+rule fails.
+
+**Evals**: `tests/test_llm.py` (new prompt-guard test) +
+`tests/test_grounding_guard.py` (new file, 7 pure-logic tests: `_short_name`
+normalization; flags an uncited named source; allows naming an actually-
+cited one; ignores names absent from the corpus entirely; ignores plain
+prose with no naming pattern; fails open on a `db.list_sources` error).
+
+**RED → GREEN**: 7 new tests RED (`_check_named_source_attribution` didn't
+exist) → GREEN. Full suite: **113 passed** (105 + 8: 7 new +
+`test_system_prompt_forbids_naming_sources_in_prose`; one round-1 test's
+exact-phrase assertion was updated to match the stronger new rule, not
+loosened — noted explicitly since CLAUDE.md forbids weakening an eval).
+
+**Live re-verification #1** (rebuilt + restarted `api`): re-ran the exact
+CLIP/LoRA repro from round 1's adversarial check. Before: fabricated "The
+CLIP paper recommends a low-rank adaptation value..." Before this session's
+fix even existed, that would have gone straight to the user; now: *"I
+couldn't find that in your videos... (The generated answer named "CLIP" as
+a source, but 'CLIP (Radford et al. 2021)' was not actually among what was
+retrieved for this question — withheld...)"* — the fabrication is caught
+and replaced, live, verified via curl against the running stack.
+
+**Independent adversarial re-check #2** (fresh agent, NEW queries, not just
+re-running the fixed one) found: (a) the disclosed false-premise gap
+confirmed still open as expected (a BERT question baited into affirming
+"BERT uses an autoregressive left-to-right decoder" got an answer that
+contradicts its own correctly-cited sources, which state BERT is
+bidirectional — a self-contradiction between prose and citation, a
+structurally different failure this fix doesn't address); (b) tenant
+isolation and a normal grounded query both clean; (c) **one real, non-
+adversarial gap found**: "How does the chain-of-thought paper combine a
+dense passage retriever..." (an ordinary-sounding question, not a trick)
+got zero CoT citations (all 6 were RAG content) yet a fully fabricated
+answer — the mechanical check should have caught this but didn't. Root
+cause: `_check_named_source_attribution` compared the model's colloquial
+"chain-of-thought" against `_short_name("Chain-of-Thought Prompting (Wei et
+al. 2022)")` == `"Chain-of-Thought Prompting"` via **exact string equality**
+— a real mismatch the model's natural phrasing produces, not an edge case.
+
+**Fix for the exact-match gap**: replaced dict-key equality with
+prefix/substring containment (`named in short or short in named`) on both
+sides of the comparison — `"chain-of-thought"` is a substring of
+`"chain-of-thought prompting"`, so this now matches. New regression test
+`test_check_named_source_catches_a_colloquial_short_name_mismatch` locks
+this in. RED confirmed (`assert result != answer` failed before the fix) →
+GREEN after. Full suite: **113 passed**, no regressions. Rebuilt + restarted
+`api` again; re-ran the exact CoT query live — now correctly withheld:
+*"...named 'chain-of-thought' as a source, but 'Chain-of-Thought Prompting
+(Wei et al. 2022)' was not actually among what was retrieved..."*.
+
+**Regression checks**: a normal, correctly-grounded query ("how does
+attention avoid recurrence") still answers normally, unaffected. Clean,
+uncontended recall@10 diagnostic (16 labeled queries): **0.729**, identical
+to the pre-fix measurement — this change touches only post-generation
+answer text, never retrieval, as intended.
+
+**Residual, disclosed, NOT fixed this round** (both found by the round-2
+adversarial re-check, both structurally different from what this fix
+addresses):
+- **False-premise self-contradiction** — an answer that misreads or
+  contradicts its OWN correctly-cited source (the BERT/autoregressive
+  case). `_check_named_source_attribution` only catches naming an
+  *uncited* source; it does nothing when the citation is correct but the
+  model's claim about it is wrong. Would need a genuine faithfulness check
+  (comparing the specific claim against the cited text's actual content),
+  a materially different and harder mechanism than this session's fix.
+- **Matching precision**: the substring-containment fix reduces but does
+  not eliminate false-negative risk from further, more unusual colloquial
+  phrasings (e.g. an acronym or nickname with no textual overlap with the
+  real title at all) — the regex pattern itself also only catches "the X
+  paper/deck/talk/video" phrasing specifically, not every possible way to
+  name a source in prose (e.g. "Vaswani's paper", "the 2021 CLIP work").
+  This is a real, mechanical, generalizing improvement over prompt-only
+  hardening, verified against 3 independent adversarial rounds — not a
+  formal guarantee of zero hallucination, which remains out of reach for
+  any prompt- or regex-based defense.
+
+**Commit**: pending — `src/llm.py`, `src/rag/search.py`, `tests/test_llm.py`,
+`tests/test_grounding_guard.py`, this entry.

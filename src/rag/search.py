@@ -230,6 +230,66 @@ def _validate_citations(answer: str, n_frames: int) -> str:
     return _CITE_RE.sub(fix, answer)
 
 
+_NAMED_SOURCE_RE = re.compile(
+    r"\bthe\s+([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){0,4})\s+(?:paper|deck|talk|video|slides?)\b",
+    re.IGNORECASE)
+
+
+def _short_name(title: str) -> str:
+    """'CLIP (Radford et al. 2021)' -> 'CLIP'; 'GPT-3: Language Models...'
+    -> 'GPT-3' — the casual short form people (and the LLM) actually use."""
+    return re.split(r"[:(]", title, maxsplit=1)[0].strip()
+
+
+def _check_named_source_attribution(answer: str, citations: list[dict[str, Any]],
+                                    user_id: str) -> str:
+    """Mechanical backstop for when the system prompt's "cite by [n] only"
+    rule doesn't hold (see EVIDENCE.md — a prompt-only fix was tried first
+    and an adversarial re-check found a new case: "the CLIP paper
+    recommends..." with zero CLIP citations retrieved, all LoRA content).
+    Unlike that prompt rule, this doesn't depend on the model's compliance:
+    it looks for the literal "the X paper/deck/talk/video" naming pattern in
+    the generated text and checks whether X is actually a DIFFERENT source
+    that exists elsewhere in this tenant's corpus but wasn't cited here —
+    the exact, real, mechanical signature of the failure mode found.
+
+    Known limitation, disclosed: this catches the specific phrasing pattern
+    all 5 known violations used, not every conceivable way to misattribute
+    content — a real backstop, not a full faithfulness verifier. Fails open
+    (returns the answer unchanged) on any lookup error — never let a
+    hardening check break the read path."""
+    try:
+        all_sources = db.list_sources(user_id)
+    except Exception:
+        return answer
+
+    cited_short = {_short_name(c["title"]).lower() for c in citations if c.get("title")}
+
+    def _cited(short: str) -> bool:
+        # Prefix/substring, not exact equality: the model's own colloquial
+        # short form ("the chain-of-thought paper") frequently doesn't
+        # exactly match _short_name()'s derivation from the real title
+        # ("Chain-of-Thought Prompting") — an exact-match version of this
+        # check missed a real violation with this exact mismatch shape.
+        return any(short in c or c in short for c in cited_short)
+
+    uncited = [s["title"] for s in all_sources
+              if s.get("title") and not _cited(_short_name(s["title"]).lower())]
+    if not uncited:
+        return answer
+
+    for m in _NAMED_SOURCE_RE.finditer(answer):
+        named = m.group(1).strip().lower()
+        for real_title in uncited:
+            short = _short_name(real_title).lower()
+            if named in short or short in named:
+                return (ABSTAIN + f' (The generated answer named "{m.group(1).strip()}" '
+                        f"as a source, but {real_title!r} was not actually among what "
+                        "was retrieved for this question — withheld rather than risk "
+                        "presenting unsupported content as fact.)")
+    return answer
+
+
 def _build_moments(user_id: str, citations: list[dict[str, Any]]) -> list[dict]:
     """Turn citations into what the LLM sees: each moment carries its frame
     image (if any) and/or its text excerpt — transcript for video, page/slide
@@ -298,8 +358,8 @@ def ask(question: str, user_id: str, *, top_k: int | None = None,
         return result
 
     moments = _build_moments(user_id, citations)
-    result["answer"] = _validate_citations(llm.answer(question, moments, cfg),
-                                           len(citations))
+    answer = _validate_citations(llm.answer(question, moments, cfg), len(citations))
+    result["answer"] = _check_named_source_attribution(answer, citations, user_id)
     result["llm_used"] = True
     result["llm_source"] = source          # "user" = their own hosted model
     result["llm_model"] = cfg.model

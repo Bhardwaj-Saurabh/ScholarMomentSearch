@@ -55,10 +55,13 @@ def test_label_does_not_crash_without_a_source():
 def test_system_prompt_forbids_attributing_content_to_an_uncited_source():
     """Regression guard: the exact failure mode was answering about a named
     source ('the Mamba paper') using a moment from a DIFFERENT, unrelated
-    source. Lock in that the prompt explicitly forbids this, so a future
-    edit can't silently drop the guardrail without a test failing."""
-    assert "never evidence about" in llm.SYSTEM or "not evidence about" in llm.SYSTEM
-    assert "source titles" in llm.SYSTEM or "source title" in llm.SYSTEM
+    source. Superseded by the stronger "cite by [n] only, never name a
+    source" rule (see test_system_prompt_forbids_naming_sources_in_prose) —
+    a prompt-only "cross-check the named source" instruction was tried
+    first and found NOT to generalize under adversarial re-check (the CLIP/
+    LoRA case). Still lock in that moments carry a source title at all,
+    since src/rag/search.py's mechanical backstop depends on it."""
+    assert "source title" in llm.SYSTEM
 
 
 def test_system_prompt_requires_genuine_topical_relevance_not_adjacency():
@@ -71,3 +74,15 @@ def test_system_prompt_still_allows_answering_from_a_genuine_partial_match():
     """Don't overcorrect into over-abstaining: a real, on-topic partial match
     must still get answered (this is what protects recall_at_10)."""
     assert "don't refuse" in llm.SYSTEM or "do not refuse" in llm.SYSTEM
+
+
+def test_system_prompt_forbids_naming_sources_in_prose():
+    """A second adversarial re-check found the source-title fix above
+    doesn't generalize: 'the CLIP paper recommends...' (0 CLIP citations
+    retrieved, all 6 were LoRA content) reproduced the identical bug under a
+    different name. Relying on the model to correctly cross-check a named
+    source against what it actually has is unreliable — the more mechanical,
+    easier-to-follow constraint is to forbid naming sources in prose at all,
+    citing by [n] only (src/rag/search.py's _check_named_source_attribution
+    is the code-level backstop for when even this doesn't hold)."""
+    assert "only by" in llm.SYSTEM.lower()
