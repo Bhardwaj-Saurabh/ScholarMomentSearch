@@ -13,7 +13,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from .. import config, db, llm, storage
+from .. import config, db, llm, metrics, storage
 from ..config import (BRANCH_TOP_K, CONFIDENCE_THRESHOLD, CROSS_MODAL_BOOST,
                       FUSION_WINDOW_S, RRF_K, TEXT_CONFIDENCE_THRESHOLD, TOP_K)
 from . import vector_store
@@ -396,6 +396,17 @@ def resolve_llm(user_id: str) -> tuple[llm.LLMConfig | None, str]:
 def ask(question: str, user_id: str, *, top_k: int | None = None,
         video_id: str | None = None,
         video_ids: list[str] | None = None) -> dict[str, Any]:
+    """Thin wrapper around _ask_impl (DESIGN.md §3c component 18): records
+    every call's grounding/abstain outcome in metrics exactly once, without
+    restructuring _ask_impl's several early-return paths."""
+    result = _ask_impl(question, user_id, top_k=top_k, video_id=video_id, video_ids=video_ids)
+    metrics.record_ask(result)
+    return result
+
+
+def _ask_impl(question: str, user_id: str, *, top_k: int | None = None,
+             video_id: str | None = None,
+             video_ids: list[str] | None = None) -> dict[str, Any]:
     r = retrieve(question, user_id, top_k=top_k, video_id=video_id, video_ids=video_ids)
     citations = r["citations"]
     result: dict[str, Any] = {"question": question, "citations": citations}

@@ -21,7 +21,7 @@ something a unit test can assert on non-deterministic model output.
 """
 from __future__ import annotations
 
-from src import llm
+from src import llm, metrics
 from src.rag import search
 
 
@@ -86,3 +86,101 @@ def test_system_prompt_forbids_naming_sources_in_prose():
     citing by [n] only (src/rag/search.py's _check_named_source_attribution
     is the code-level backstop for when even this doesn't hold)."""
     assert "only by" in llm.SYSTEM.lower()
+
+
+# ── Component 18 (DESIGN.md §3c): token usage capture, previously discarded ──
+
+class _FakeUsage:
+    def __init__(self, a, b):
+        self.prompt_tokens, self.completion_tokens = a, b
+        self.input_tokens, self.output_tokens = a, b
+
+
+class _FakeMessage:
+    def __init__(self, text):
+        self.content = text
+
+
+class _FakeChoice:
+    def __init__(self, text):
+        self.message = _FakeMessage(text)
+
+
+class _FakeOpenAIResponse:
+    def __init__(self, text, in_tok, out_tok):
+        self.choices = [_FakeChoice(text)]
+        self.usage = _FakeUsage(in_tok, out_tok)
+
+
+class _FakeCompletions:
+    def __init__(self, response):
+        self._response = response
+
+    def create(self, **kwargs):
+        return self._response
+
+
+class _FakeChat:
+    def __init__(self, response):
+        self.completions = _FakeCompletions(response)
+
+
+class _FakeOpenAIClient:
+    def __init__(self, response):
+        self.chat = _FakeChat(response)
+
+
+def _patch_openai(monkeypatch, text, in_tok, out_tok):
+    response = _FakeOpenAIResponse(text, in_tok, out_tok)
+    monkeypatch.setattr("openai.OpenAI", lambda **k: _FakeOpenAIClient(response))
+
+
+def test_answer_openai_records_llm_usage_as_answer_kind(monkeypatch):
+    metrics.reset()
+    # Large enough that the estimated cost survives snapshot()'s 4-decimal
+    # rounding (a real small call, e.g. 123/45 tokens, correctly rounds to
+    # $0.0000 -- that's not a bug, it matches the product's own "$0.0000"
+    # empty-state display; this test needs a volume that's visibly non-zero).
+    _patch_openai(monkeypatch, "a real answer [1].", 100_000, 50_000)
+
+    cfg = llm.LLMConfig(model="gpt-4o-mini")
+    out = llm.answer("q", [], cfg)
+    assert out == "a real answer [1]."
+    snap = metrics.snapshot()
+    assert snap["input_tokens"] == 100_000
+    assert snap["output_tokens"] == 50_000
+    assert snap["llm_answers"] == 1
+    assert snap["cost_usd"] > 0
+
+
+def _tiny_jpeg() -> bytes:
+    import io as _io
+
+    from PIL import Image
+    buf = _io.BytesIO()
+    Image.new("RGB", (8, 8), (0, 0, 0)).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def test_caption_image_records_llm_usage_as_caption_kind_not_answer(monkeypatch):
+    metrics.reset()
+    _patch_openai(monkeypatch, "a caption.", 10, 5)
+
+    cfg = llm.LLMConfig(model="gpt-4o-mini")
+    llm.caption_image(_tiny_jpeg(), cfg)
+    snap = metrics.snapshot()
+    assert snap["input_tokens"] == 10
+    assert snap["llm_answers"] == 0  # captions never count as an "LLM answer"
+
+
+def test_complete_records_llm_usage_as_complete_kind(monkeypatch):
+    metrics.reset()
+    _patch_openai(monkeypatch, '{"queries": ["q"]}', 20, 8)
+
+    cfg = llm.LLMConfig(model="gpt-4o-mini")
+    out = llm.complete("system", "prompt", cfg)
+    assert out == '{"queries": ["q"]}'
+    snap = metrics.snapshot()
+    assert snap["input_tokens"] == 20
+    assert snap["output_tokens"] == 8
+    assert snap["llm_answers"] == 0

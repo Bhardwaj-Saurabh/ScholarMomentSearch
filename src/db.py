@@ -367,6 +367,21 @@ def list_sources(user_id: str) -> list[dict]:
     return [r[1] for r in rows]
 
 
+def queue_status_counts() -> list[dict]:
+    """Global (ALL tenants) ingest queue/index rollup for the ops metrics
+    dashboard (DESIGN.md §3c component 18) — unlike list_sources(), NOT
+    tenant-scoped: GROUP BY kind, status across both tables."""
+    with pool().connection() as conn:
+        return conn.execute("""
+            SELECT 'video' AS kind, status, COUNT(*) AS count
+              FROM ms_videos GROUP BY status
+            UNION ALL
+            SELECT kind, status, COUNT(*) AS count
+              FROM ms_documents GROUP BY kind, status
+            ORDER BY kind, status
+        """).fetchall()
+
+
 # ── Fair scheduling (WFQ) ────────────────────────────────────────────────────
 
 def count_inflight() -> int:

@@ -26,7 +26,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from src import db
+from src import db, metrics
 from src.rag import search as rag_search
 from src.rag import vector_store
 from src.rag.search import _fuse
@@ -227,6 +227,30 @@ def test_ask_grounded_empty_retrieval_returns_empty_citations(monkeypatch):
     assert result["citations"] == []
     assert result["abstained"] is True
     assert result["llm_used"] is False
+
+
+# ── Component 18 (DESIGN.md §3c): ask() records grounding/abstain metrics ──
+
+def test_ask_records_abstain_in_metrics_on_empty_retrieval(monkeypatch):
+    metrics.reset()
+    monkeypatch.setattr(vector_store, "search", lambda *a, **k: [])
+    monkeypatch.setattr(vector_store, "search_text", lambda *a, **k: [])
+    rag_search.ask("anything at all", "u1")
+    snap = metrics.snapshot()
+    assert snap["ask_total"] == 1
+    assert snap["ask_abstained"] == 1
+
+
+def test_ask_records_non_abstain_when_llm_answers(monkeypatch):
+    metrics.reset()
+    monkeypatch.setattr(vector_store, "search", lambda *a, **k: [])
+    monkeypatch.setattr(vector_store, "search_text", lambda *a, **k: [
+        {"score": 0.9, "source_id": "doc_1", "kind": "paper", "page": 1, "text": "x"}])
+    monkeypatch.setattr(rag_search, "resolve_llm", lambda uid: (None, "none"))
+    rag_search.ask("anything at all", "u1")
+    snap = metrics.snapshot()
+    assert snap["ask_total"] == 1
+    assert snap["ask_abstained"] == 0  # retrieval-only fallback answer, not an abstain
 
 
 # ── Real end-to-end: one query, three kinds (the assignment's #1 criterion) ─

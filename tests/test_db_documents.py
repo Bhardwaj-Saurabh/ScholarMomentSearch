@@ -148,3 +148,24 @@ def test_list_sources_unifies_videos_and_documents(cleanup):
 
     ids_in_order = [s["id"] for s in sources]  # doc created after video -> newest first
     assert ids_in_order.index(doc_id) < ids_in_order.index(video_id)
+
+
+# ── Component 18 (DESIGN.md §3c): queue_status_counts — GLOBAL, not
+# tenant-scoped, unlike list_sources(). ─────────────────────────────────────
+
+def test_queue_status_counts_aggregates_across_tenants_and_both_tables(cleanup):
+    doc_id, video_id = _doc_id(), f"yt_{uuid.uuid4().hex[:11]}"
+    cleanup["documents"].append(doc_id)
+    cleanup["videos"].append(video_id)
+
+    db.upsert_pending(_mk_video(video_id, user_id="u_queue_a", title="t"))
+    db.set_status(video_id, "indexed")
+    db.upsert_pending_document(_mk_doc(doc_id, user_id="u_queue_b", kind="deck", title="d"))
+    db.set_document_status(doc_id, "embedding", progress=0.5)
+
+    rows = db.queue_status_counts()
+    by_key = {(r["kind"], r["status"]): r["count"] for r in rows}
+    assert by_key.get(("video", "indexed"), 0) >= 1
+    assert by_key.get(("deck", "embedding"), 0) >= 1
+    # every row shape is exactly {kind, status, count}
+    assert all(set(r.keys()) == {"kind", "status", "count"} for r in rows)

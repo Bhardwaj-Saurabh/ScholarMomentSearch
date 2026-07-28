@@ -19,12 +19,14 @@ Run:
 """
 from __future__ import annotations
 
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from . import config, db
+from . import config, db, metrics
 from .api.admin import router as admin_router
+from .api.metrics import router as metrics_router
 from .api.search import router as search_router
 from .api.videos import router as videos_router
 from .rag import vector_store
@@ -46,6 +48,24 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="MomentSearch", version="1.0.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def _metrics_middleware(request, call_next):
+    """DESIGN.md §3c component 18: times every request and buckets it by
+    ROUTE TEMPLATE, not the raw path — request.scope["route"] is populated
+    once Starlette's router has matched (i.e. by the time call_next returns),
+    so /api/videos/{video_id} stays one bucket regardless of how many
+    distinct video_ids are ever requested."""
+    start = time.perf_counter()
+    response = await call_next(request)
+    route = request.scope.get("route")
+    path = route.path if route is not None else request.url.path
+    metrics.record_request(path, response.status_code, (time.perf_counter() - start) * 1000)
+    return response
+
+
 app.include_router(videos_router)
 app.include_router(admin_router)
 app.include_router(search_router)
+app.include_router(metrics_router)

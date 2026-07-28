@@ -26,7 +26,7 @@ import base64
 import io
 from dataclasses import dataclass
 
-from . import config
+from . import config, metrics
 
 # NVIDIA's hosted inference endpoint (OpenAI-compatible).
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
@@ -132,14 +132,20 @@ def _downscale(jpeg: bytes) -> bytes:
     return buf.getvalue()
 
 
-def answer(question: str, moments: list[dict], cfg: LLMConfig) -> str:
+def answer(question: str, moments: list[dict], cfg: LLMConfig, *, kind: str = "answer") -> str:
     """Synthesize a cited answer from retrieved moments with `cfg`'s model.
 
     moments: [{"image": bytes|None, "transcript": str|None, "timestamp": str}]
-    — each may carry a frame, a transcript excerpt, or both."""
+    — each may carry a frame, a transcript excerpt, or both.
+
+    kind (DESIGN.md §3c component 18): tags the metrics.record_llm_usage()
+    call this call site ends up making — "answer" (the default, a real cited
+    answer), or "caption"/"ping" for the other callers below that reuse this
+    same function for a different task. Only "answer" counts toward the
+    "LLM answers" stat; every kind's tokens/cost still accumulate."""
     if cfg.provider == "anthropic":
-        return _answer_anthropic(cfg, question, moments)
-    return _answer_openai(cfg, question, moments)
+        return _answer_anthropic(cfg, question, moments, kind)
+    return _answer_openai(cfg, question, moments, kind)
 
 
 def caption_image(image_jpeg: bytes, cfg: LLMConfig) -> str:
@@ -150,7 +156,7 @@ def caption_image(image_jpeg: bytes, cfg: LLMConfig) -> str:
         "Describe this presentation slide in one or two sentences: what claim, "
         "diagram, or result does it show? Be concrete and specific.",
         [{"image": image_jpeg, "transcript": None, "timestamp": ""}],
-        cfg,
+        cfg, kind="caption",
     )
 
 
@@ -162,7 +168,8 @@ def ping(cfg: LLMConfig) -> str:
     buf = io.BytesIO()
     Image.new("RGB", (32, 32), (220, 40, 40)).save(buf, format="JPEG")
     return answer("Reply with the dominant color of moment 1, one word.",
-                  [{"image": buf.getvalue(), "transcript": None, "timestamp": "00:00"}], cfg)
+                  [{"image": buf.getvalue(), "transcript": None, "timestamp": "00:00"}],
+                  cfg, kind="ping")
 
 
 def _base_url(cfg: LLMConfig) -> str | None:
@@ -184,7 +191,7 @@ def _label(i: int, m: dict) -> str:
     return line
 
 
-def _answer_openai(cfg: LLMConfig, question: str, moments: list[dict]) -> str:
+def _answer_openai(cfg: LLMConfig, question: str, moments: list[dict], kind: str) -> str:
     from openai import OpenAI
 
     client = OpenAI(api_key=cfg.api_key or "not-needed", base_url=_base_url(cfg))
@@ -201,10 +208,14 @@ def _answer_openai(cfg: LLMConfig, question: str, moments: list[dict]) -> str:
         temperature=0.2,
         max_tokens=cfg.max_tokens,
     )
+    usage = getattr(resp, "usage", None)
+    if usage:
+        metrics.record_llm_usage(cfg.model, usage.prompt_tokens or 0,
+                                 usage.completion_tokens or 0, kind=kind)
     return (resp.choices[0].message.content or "").strip()
 
 
-def _answer_anthropic(cfg: LLMConfig, question: str, moments: list[dict]) -> str:
+def _answer_anthropic(cfg: LLMConfig, question: str, moments: list[dict], kind: str) -> str:
     import anthropic
 
     client = anthropic.Anthropic(api_key=cfg.api_key, base_url=cfg.base_url or None)
@@ -221,6 +232,10 @@ def _answer_anthropic(cfg: LLMConfig, question: str, moments: list[dict]) -> str
         system=SYSTEM,
         messages=[{"role": "user", "content": blocks}],
     )
+    usage = getattr(resp, "usage", None)
+    if usage:
+        metrics.record_llm_usage(cfg.model, usage.input_tokens or 0,
+                                 usage.output_tokens or 0, kind=kind)
     return "".join(b.text for b in resp.content if b.type == "text").strip()
 
 
@@ -234,6 +249,10 @@ def _complete_openai(cfg: LLMConfig, system: str, prompt: str) -> str:
         temperature=0,
         max_tokens=cfg.max_tokens,
     )
+    usage = getattr(resp, "usage", None)
+    if usage:
+        metrics.record_llm_usage(cfg.model, usage.prompt_tokens or 0,
+                                 usage.completion_tokens or 0, kind="complete")
     return (resp.choices[0].message.content or "").strip()
 
 
@@ -245,6 +264,10 @@ def _complete_anthropic(cfg: LLMConfig, system: str, prompt: str) -> str:
         model=cfg.model, max_tokens=cfg.max_tokens, system=system,
         messages=[{"role": "user", "content": prompt}],
     )
+    usage = getattr(resp, "usage", None)
+    if usage:
+        metrics.record_llm_usage(cfg.model, usage.input_tokens or 0,
+                                 usage.output_tokens or 0, kind="complete")
     return "".join(b.text for b in resp.content if b.type == "text").strip()
 
 

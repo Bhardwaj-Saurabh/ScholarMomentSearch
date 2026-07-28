@@ -58,6 +58,9 @@
       <button data-nav="add" data-full-only class="w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition">
         <span data-icon="plus"></span>Add sources
       </button>
+      <button data-nav="metrics" data-full-only class="w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition">
+        <span data-icon="activity"></span>Metrics
+      </button>
     </nav>
     <div class="px-4 py-4 border-t border-slate-100 space-y-2.5 shrink-0">
       <div id="corpusStats" class="text-xs text-slate-500">—</div>
@@ -189,6 +192,75 @@
         <p class="mt-4 text-xs text-slate-400">Every registration returns immediately (HTTP 202) — heavy work never runs in the request path. A source is searchable the moment its status reaches <b class="font-medium text-slate-500">indexed</b>.</p>
       </section>
 
+      <!-- METRICS VIEW -->
+      <section data-view="metrics" class="hidden max-w-6xl mx-auto px-6 py-8">
+        <div class="flex items-center justify-between flex-wrap gap-3 mb-5">
+          <div>
+            <h2 class="text-xl font-semibold tracking-tight">Live metrics</h2>
+            <p id="metricsUpdated" class="mt-1 text-[13px] text-slate-500">—</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <input id="metricsToken" type="password" placeholder="Admin token"
+              class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs placeholder:text-slate-400 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 w-40">
+            <button id="metricsTokenSave" class="rounded-lg bg-slate-800 hover:bg-slate-900 px-3 py-1.5 text-xs font-medium text-white transition">Save</button>
+          </div>
+        </div>
+
+        <div id="metricsAuthHint" class="hidden mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+          Enter the admin bearer token above to load live metrics — this dashboard reads operational/cost data, so it's gated the same as the other admin routes.
+        </div>
+
+        <div id="metricsCards" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 mb-6"></div>
+
+        <div class="mb-6">
+          <h3 class="text-[13px] font-semibold mb-2">Request latency (per route)</h3>
+          <div class="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead class="bg-slate-50"><tr>
+                  <th class="px-4 py-2.5 text-left text-[11px] font-medium uppercase tracking-wider text-slate-500">Route</th>
+                  <th class="px-4 py-2.5 text-right text-[11px] font-medium uppercase tracking-wider text-slate-500">Count</th>
+                  <th class="px-4 py-2.5 text-right text-[11px] font-medium uppercase tracking-wider text-slate-500">Avg</th>
+                  <th class="px-4 py-2.5 text-right text-[11px] font-medium uppercase tracking-wider text-slate-500">p50</th>
+                  <th class="px-4 py-2.5 text-right text-[11px] font-medium uppercase tracking-wider text-slate-500">p95</th>
+                </tr></thead>
+                <tbody id="metricsRoutesBody" class="divide-y divide-slate-100"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid lg:grid-cols-2 gap-6 mb-6">
+          <div>
+            <h3 class="text-[13px] font-semibold mb-2">Ingest queue &amp; index (live from Postgres)</h3>
+            <div class="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+              <table class="w-full text-sm">
+                <thead class="bg-slate-50"><tr>
+                  <th class="px-4 py-2.5 text-left text-[11px] font-medium uppercase tracking-wider text-slate-500">Kind</th>
+                  <th class="px-4 py-2.5 text-left text-[11px] font-medium uppercase tracking-wider text-slate-500">Status</th>
+                  <th class="px-4 py-2.5 text-right text-[11px] font-medium uppercase tracking-wider text-slate-500">Count</th>
+                </tr></thead>
+                <tbody id="metricsQueueBody" class="divide-y divide-slate-100"></tbody>
+              </table>
+            </div>
+          </div>
+          <div>
+            <h3 class="text-[13px] font-semibold mb-2">Responses by HTTP status</h3>
+            <div class="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+              <table class="w-full text-sm">
+                <thead class="bg-slate-50"><tr>
+                  <th class="px-4 py-2.5 text-left text-[11px] font-medium uppercase tracking-wider text-slate-500">Status</th>
+                  <th class="px-4 py-2.5 text-right text-[11px] font-medium uppercase tracking-wider text-slate-500">Count</th>
+                </tr></thead>
+                <tbody id="metricsStatusBody" class="divide-y divide-slate-100"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <p class="text-xs text-slate-400">Auto-refreshes every 3s. Raw Prometheus format at <code class="px-1.5 py-0.5 rounded bg-slate-100">/metrics</code>. Cost is estimated from published per-model token pricing.</p>
+      </section>
+
     </main>
   </div>
 </div>
@@ -302,6 +374,7 @@ const ICONS={
   dot:'<circle cx="12" cy="12" r="2.5" fill="currentColor" stroke="none"/>',
   minus:'<path d="M5 12h14"/>',
   arrow:'<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
+  activity:'<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>',
 };
 function icon(name, cls="h-4 w-4"){
   return `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]||ICONS.dot}</svg>`;
@@ -311,7 +384,7 @@ document.querySelectorAll("[data-icon]").forEach(el=>{ el.outerHTML=icon(el.data
 const BADGE_ICON={"✓":"check","⚠":"alert","◷":"clock","⏳":"clock","⏬":"download","⊘":"ban","•":"dot"};
 
 /* ---------- views ---------- */
-const VIEW_TITLES={search:"Search", library: FULL?"Library":"Corpus", add:"Add sources"};
+const VIEW_TITLES={search:"Search", library: FULL?"Library":"Corpus", add:"Add sources", metrics:"Live metrics"};
 function showView(name){
   document.querySelectorAll("[data-view]").forEach(s=>s.classList.toggle("hidden", s.dataset.view!==name));
   document.querySelectorAll("[data-nav]").forEach(b=>{
@@ -320,6 +393,8 @@ function showView(name){
     b.classList.toggle("text-slate-600",!on);
   });
   $("#viewTitle").textContent=VIEW_TITLES[name];
+  // Only poll /admin/metrics while the Metrics view is actually visible.
+  if(name==="metrics") startMetricsPolling(); else stopMetricsPolling();
 }
 document.querySelectorAll("[data-nav]").forEach(b=>b.onclick=()=>showView(b.dataset.nav));
 document.addEventListener("click", e=>{ const g=e.target.closest("[data-goto]"); if(g) showView(g.dataset.goto); });
@@ -759,6 +834,82 @@ const EXAMPLES=["how does attention avoid recurrence?","what does the LoRA paper
 $("#examples").innerHTML=EXAMPLES.map(q=>
   `<button class="example rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600 hover:border-indigo-300 hover:text-slate-900 transition">${esc(q)}</button>`).join("");
 document.querySelectorAll(".example").forEach(c=>c.onclick=()=>{ qEl.value=c.textContent; autogrow(); qEl.focus(); });
+
+/* ---------- live metrics (DESIGN.md §3c component 18) ---------- */
+// GET /admin/metrics is gated by the admin bearer token like the other admin
+// routes (confirmed decision) — the browser UI has never sent one for
+// anything, so this page gets its own small token entry (localStorage),
+// rather than retrofitting auth into the unrelated existing register/retry
+// calls (a separate, pre-existing gap — see EVIDENCE.md).
+const METRICS_TOKEN_KEY="ms_admin_token";
+function metricsToken(){ return localStorage.getItem(METRICS_TOKEN_KEY)||""; }
+$("#metricsToken").value=metricsToken();
+$("#metricsTokenSave").onclick=()=>{
+  localStorage.setItem(METRICS_TOKEN_KEY, $("#metricsToken").value.trim());
+  loadMetrics();
+};
+
+let _metricsTimer=null;
+function startMetricsPolling(){
+  if(_metricsTimer) return;
+  loadMetrics();
+  _metricsTimer=setInterval(loadMetrics, 3000);
+}
+function stopMetricsPolling(){ if(_metricsTimer){ clearInterval(_metricsTimer); _metricsTimer=null; } }
+
+async function loadMetrics(){
+  const token=metricsToken();
+  if(!token){ $("#metricsAuthHint").classList.remove("hidden"); return; }
+  try{
+    const resp=await fetch("/admin/metrics", {headers:{Authorization:"Bearer "+token}});
+    if(resp.status===401){ $("#metricsAuthHint").classList.remove("hidden"); return; }
+    if(!resp.ok) return;
+    const d=await resp.json();
+    $("#metricsAuthHint").classList.add("hidden");
+    renderMetrics(d);
+    $("#metricsUpdated").textContent="updated "+new Date().toLocaleTimeString();
+  }catch(e){ /* transient network hiccup — the next 3s poll retries */ }
+}
+
+function statCard(label, value){
+  return `<div class="rounded-xl border border-slate-200 bg-white shadow-sm p-4">
+    <div class="text-[11px] font-medium uppercase tracking-wider text-slate-400">${esc(label)}</div>
+    <div class="text-xl font-semibold text-slate-900 mt-1 tabular-nums">${esc(value)}</div>
+  </div>`;
+}
+function renderMetrics(d){
+  $("#metricsCards").innerHTML=[
+    statCard("LLM cost (est.)", "$"+Number(d.cost_usd||0).toFixed(4)),
+    statCard("Input tokens", d.input_tokens||0),
+    statCard("Output tokens", d.output_tokens||0),
+    statCard("LLM answers", d.llm_answers||0),
+    statCard("Requests", d.requests||0),
+    statCard("Rate-limited", d.rate_limited||0),
+    statCard("Abstain rate", Math.round((d.abstain_rate||0)*100)+"%"),
+  ].join("");
+
+  const routes=(d.routes||[]);
+  $("#metricsRoutesBody").innerHTML = routes.length ? routes.map(r=>`<tr>
+    <td class="px-4 py-2.5 font-mono text-xs text-slate-700">${esc(r.route)}</td>
+    <td class="px-4 py-2.5 text-right tabular-nums">${r.count}</td>
+    <td class="px-4 py-2.5 text-right tabular-nums">${r.avg}ms</td>
+    <td class="px-4 py-2.5 text-right tabular-nums">${r.p50}ms</td>
+    <td class="px-4 py-2.5 text-right tabular-nums">${r.p95}ms</td>
+  </tr>`).join("") : `<tr><td colspan="5" class="px-4 py-6 text-center text-slate-400">no requests yet</td></tr>`;
+
+  const queue=(d.queue||[]);
+  $("#metricsQueueBody").innerHTML = queue.length ? queue.map(q=>`<tr>
+    <td class="px-4 py-2.5">${esc(q.kind)}</td>
+    <td class="px-4 py-2.5">${esc(q.status)}</td>
+    <td class="px-4 py-2.5 text-right tabular-nums">${q.count}</td>
+  </tr>`).join("") : `<tr><td colspan="3" class="px-4 py-6 text-center text-slate-400">no sources</td></tr>`;
+
+  const statuses=Object.entries(d.status_counts||{}).sort((a,b)=>Number(a[0])-Number(b[0]));
+  $("#metricsStatusBody").innerHTML = statuses.length ? statuses.map(([code,count])=>`<tr>
+    <td class="px-4 py-2.5">${esc(code)}</td>
+    <td class="px-4 py-2.5 text-right tabular-nums">${count}</td>
+  </tr>`).join("") : `<tr><td colspan="2" class="px-4 py-6 text-center text-slate-400">no requests yet</td></tr>`;
+}
 
 /* ---------- boot ---------- */
 applyMode(); loadConfig(); loadVideos(); loadDocuments(); showView("search");
