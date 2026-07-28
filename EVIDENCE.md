@@ -1905,3 +1905,52 @@ survival), not a live probe.
 
 **Commit**: pending — `src/ingest/paper.py`, `src/ingest/doc_pipeline.py`,
 `tests/test_paper_ingest.py`.
+
+---
+
+### 2026-07-28 — Component 12: retrieval precision@10 diagnostic (DESIGN.md §3a)
+
+Scope: `benchmark/labeled_queries.json`'s `expect_kinds` only proves recall (right
+*kind* present) — it never penalizes noise. An off-topic citation of an expected
+kind (e.g. a LoRA chunk showing up on an Attention-paper query) scored full recall
+credit. New metric: of a query's top-10 citations, what fraction resolve — via the
+seed corpus's deterministic ids (`doc_seed_<corpus_id>_<kind>`, `yt_<youtube-id>`,
+mirroring `src/seeding.py`'s own scheme without importing `src/`) — to that query's
+own triplet vs. a different one. Own gate file `benchmark/quality_gates.json`
+(`precision_at_10_min: 0.70`), never `sla.json` (frozen, CLAUDE.md §2 E5).
+
+RED: added 6 tests to `tests/test_bench.py` for `_seed_corpus_id_map` and
+`_score_precision`. `uv run pytest tests/test_bench.py -q` → `6 failed, 15 passed`
+(`AttributeError: module 'benchmark.bench' has no attribute '_score_precision'`).
+
+IMPLEMENT: `bench.py` gained `_seed_corpus_id_map()`, `_score_precision()`,
+`measure_precision()` (refactored `measure_recall`/`measure_precision` onto a
+shared `_fetch_labeled_citations()` — same live `/ask_stream` calls, scored two
+ways), and a `--quality` CLI mode (mirrors `--resilience`'s standalone-mode
+pattern) gating `precision_at_10` against `quality_gates.json`.
+
+GREEN:
+- `uv run pytest tests/test_bench.py -q` → **21 passed**.
+- Full suite: `uv run pytest tests/ -q` → **125 passed** (was 119; +6 new, 0
+  regressions).
+- Live run against the running stack (`BASE_URL=http://localhost:8000
+  ADMIN_TOKEN=... uv run python benchmark/bench.py --quality`), run twice for
+  stability, uncontended (no concurrent load in flight):
+  `[FAIL] precision_at_10: 0.635 (target 0.7)` — **identical both runs**
+  (deterministic, not a contention artifact like recall's official-run number).
+
+**Red, disclosed, not tuned away**: 0.635 fails the 0.70 gate I set for this new
+diagnostic. Per CLAUDE.md §2 E5 the fix is the system, not the threshold — and
+this is a newly-introduced quality gate, not a frozen assignment one, so the
+honest move is still to report the real number, not adjust the bar to make it
+pass. Plausible mechanism, not yet investigated further: the 8 seeded triplets
+are real, cross-referencing ML papers (LoRA fine-tunes GPT-family/LLaMA models;
+CoT and ReAct both discuss reasoning traces; Attention is background context cited
+by several of the others) — genuine topical/vocabulary overlap between adjacent
+papers in a coherent research corpus, not necessarily a retrieval defect, though a
+real defect (e.g. `TOP_K=6`'s cross-modal boost pulling in adjacent-topic filler
+once a video's own on-topic hits are exhausted) hasn't been ruled out either.
+Left open for follow-up, not silently patched.
+
+**Commit**: pending — `benchmark/bench.py`, `benchmark/quality_gates.json`,
+`tests/test_bench.py`.

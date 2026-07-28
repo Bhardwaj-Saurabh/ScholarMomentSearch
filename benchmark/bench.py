@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import statistics
 import sys
 import time
@@ -31,6 +32,10 @@ import uuid
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SLA = json.loads((ROOT / "benchmark" / "sla.json").read_text())
+# DESIGN.md §3a components 12-13: quality-eval gates, deliberately separate
+# from the frozen sla.json/rubric.json (CLAUDE.md §2 E5) — tuning these is
+# never a "loosen the grading gate" move.
+QUALITY = json.loads((ROOT / "benchmark" / "quality_gates.json").read_text())
 BASE = os.getenv("BASE_URL", "http://localhost:8100").rstrip("/")
 ADMIN = os.getenv("ADMIN_TOKEN", "")
 
@@ -125,6 +130,52 @@ def _score_recall(labeled: list[dict], citations_by_query: dict[str, list[dict]]
     return sum(scores) / len(scores) if scores else 0.0
 
 
+_YT_RE = re.compile(r"(?:youtu\.be/|v=)([\w-]{11})")
+
+
+def _seed_corpus_id_map() -> dict[str, str]:
+    """source_id/video_id -> the corpus_id it was seeded under, mirroring
+    src/seeding.py's deterministic id scheme (doc_seed_<corpus_id>_<kind>,
+    yt_<youtube-id>) without importing src/ -- bench.py stays a standalone
+    HTTP client. Only resolves the SEEDED corpus: precision@10 is measured
+    against the default tenant, the same assumption measure_recall() makes."""
+    corpus = json.loads((ROOT / "benchmark" / "corpus.json").read_text())
+    mapping: dict[str, str] = {}
+    for t in corpus["triplets"]:
+        cid = t["id"]
+        mapping[f"doc_seed_{cid}_paper"] = cid
+        mapping[f"doc_seed_{cid}_deck"] = cid
+        m = _YT_RE.search(t.get("video_url") or "")
+        if m:
+            mapping[f"yt_{m.group(1)}"] = cid
+    return mapping
+
+
+def _score_precision(labeled: list[dict], citations_by_query: dict[str, list[dict]],
+                     id_to_corpus: dict[str, str]) -> float:
+    """Of a query's top-10 citations, what fraction actually belong to that
+    query's own corpus_id triplet -- the complement _score_recall never
+    checks: recall only asks "is the right KIND present", so an off-topic
+    citation of an expected kind still scores full recall credit. A query
+    with zero citations returned is skipped here (recall already penalizes
+    that; this is a noise-among-what-was-returned measure, not a coverage
+    one), so it doesn't drag the average down twice for the same failure."""
+    if not labeled:
+        return 0.0
+    scores = []
+    for q in labeled:
+        cid = q.get("corpus_id")
+        if not cid:
+            continue
+        cites = citations_by_query.get(q["query"], [])[:10]
+        if not cites:
+            continue
+        on_topic = sum(1 for c in cites
+                      if id_to_corpus.get(c.get("source_id") or c.get("video_id")) == cid)
+        scores.append(on_topic / len(cites))
+    return sum(scores) / len(scores) if scores else 0.0
+
+
 def _load_corpus_uris() -> list[dict]:
     """Real, small arXiv paper + deck PDFs from benchmark/corpus.json — used
     as transient load/backfill content for this benchmark ONLY. Never the
@@ -154,16 +205,36 @@ def _cycle_to_n(items: list[dict], n: int) -> list[dict]:
 
 # ── Live-stack glue (needs a running server + worker; not unit-testable) ────
 
-def measure_recall() -> float:
-    path = ROOT / "benchmark" / "labeled_queries.json"
-    if not path.exists():
-        return 0.0
-    labeled = json.loads(path.read_text())["queries"]
+def _fetch_labeled_citations(labeled: list[dict]) -> dict[str, list[dict]]:
     by_query = {}
     for q in labeled:
         st, body, _ = _req("GET", "/ask_stream?q=" + urllib.parse.quote(q["query"]))
         by_query[q["query"]] = _citations_from_sse(body) if st == 200 else []
-    return _score_recall(labeled, by_query)
+    return by_query
+
+
+def _labeled_queries() -> list[dict]:
+    path = ROOT / "benchmark" / "labeled_queries.json"
+    return json.loads(path.read_text())["queries"] if path.exists() else []
+
+
+def measure_recall() -> float:
+    labeled = _labeled_queries()
+    if not labeled:
+        return 0.0
+    return _score_recall(labeled, _fetch_labeled_citations(labeled))
+
+
+def measure_precision() -> float:
+    """DESIGN.md §3a component 12 -- same labeled queries and live /ask_stream
+    calls as measure_recall, scored for topical noise instead of kind
+    coverage. Deliberately a SEPARATE live call (not reused from a recall run
+    in the same process) so `--quality` stays an independent, standalone
+    diagnostic mode, exactly like `--resilience`."""
+    labeled = _labeled_queries()
+    if not labeled:
+        return 0.0
+    return _score_precision(labeled, _fetch_labeled_citations(labeled), _seed_corpus_id_map())
 
 
 def _submit_documents(uris: list[dict], user: str | None = None) -> list[str]:
@@ -290,6 +361,10 @@ def run_resilience_check(n: int = 10, kill_after_s: float = 8.0,
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--resilience", action="store_true")
+    ap.add_argument("--quality", action="store_true",
+                    help="DESIGN.md §3a components 12-13: precision@10 + answer "
+                         "relevancy/faithfulness against quality_gates.json "
+                         "(separate from the frozen sla.json gate)")
     ap.add_argument("--json", dest="json_out", default="")
     args = ap.parse_args()
 
@@ -304,6 +379,12 @@ def main():
     if args.resilience:
         no_loss = run_resilience_check()
         gate("no_loss_under_crash", no_loss, no_loss and SLA["no_loss_required"], "0 dropped, all indexed")
+        return sys.exit(1 if failures else 0)
+
+    if args.quality:
+        precision = round(measure_precision(), 3)
+        gate("precision_at_10", precision, precision >= QUALITY["precision_at_10_min"],
+             QUALITY["precision_at_10_min"])
         return sys.exit(1 if failures else 0)
 
     # 1. accept latency

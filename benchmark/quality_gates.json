@@ -1,0 +1,6 @@
+{
+  "_comment": "Quality-eval gates for DESIGN.md §3a components 12-13 (added 2026-07-28). Deliberately separate from the frozen benchmark/sla.json and eval/rubric.json (CLAUDE.md §2 E5) -- these are self-imposed quality bars, not assignment grading criteria, so tuning them later is never a 'loosen the grading threshold' move. Run via `python benchmark/bench.py --quality`.",
+  "precision_at_10_min": 0.70,
+  "answer_relevancy_min": 4.0,
+  "answer_faithfulness_min": 0.85
+}

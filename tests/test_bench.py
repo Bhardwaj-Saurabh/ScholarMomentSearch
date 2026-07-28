@@ -82,6 +82,62 @@ def test_score_recall_empty_labeled_list_is_zero_not_a_crash():
     assert bench._score_recall([], {}) == 0.0
 
 
+# ── Component 12 (DESIGN.md §3a): precision@10 — the complement recall never
+# checks (kind-presence alone gives full credit to an off-topic citation of
+# the expected kind). ─────────────────────────────────────────────────────────
+
+def test_seed_corpus_id_map_covers_every_triplets_paper_deck_and_video():
+    mapping = bench._seed_corpus_id_map()
+    assert mapping["doc_seed_attention_paper"] == "attention"
+    assert mapping["doc_seed_attention_deck"] == "attention"
+    # 8 triplets * (paper + deck) + a yt_<id> entry per triplet with a video_url
+    assert sum(1 for v in mapping.values() if True) >= 16 + 8
+
+
+def test_score_precision_all_on_topic_scores_one():
+    labeled = [{"query": "q1", "corpus_id": "attention"}]
+    by_query = {"q1": [{"source_id": "doc_seed_attention_paper"},
+                       {"video_id": "yt_abc"}]}
+    id_to_corpus = {"doc_seed_attention_paper": "attention", "yt_abc": "attention"}
+    assert bench._score_precision(labeled, by_query, id_to_corpus) == 1.0
+
+
+def test_score_precision_penalizes_off_topic_noise():
+    labeled = [{"query": "q1", "corpus_id": "attention"}]
+    by_query = {"q1": [{"source_id": "doc_seed_attention_paper"},   # on-topic
+                       {"source_id": "doc_seed_lora_deck"},        # off-topic
+                       {"video_id": "yt_unrelated"}]}              # off-topic
+    id_to_corpus = {"doc_seed_attention_paper": "attention",
+                    "doc_seed_lora_deck": "lora"}
+    assert bench._score_precision(labeled, by_query, id_to_corpus) == 1 / 3
+
+
+def test_score_precision_unresolvable_citation_counts_as_off_topic():
+    """A citation whose id isn't in the seed map at all (e.g. a user's own
+    self-serve upload sharing the default tenant) is off-topic noise for this
+    diagnostic, not a crash or a free pass."""
+    labeled = [{"query": "q1", "corpus_id": "attention"}]
+    by_query = {"q1": [{"source_id": "doc_user_upload_123"}]}
+    assert bench._score_precision(labeled, by_query, {}) == 0.0
+
+
+def test_score_precision_empty_labeled_list_is_zero_not_a_crash():
+    assert bench._score_precision([], {}, {}) == 0.0
+
+
+def test_score_precision_no_citations_for_a_query_skips_it_not_zero_drag():
+    """Recall already penalizes zero-citation queries; precision (a
+    NOISE-among-what-was-returned measure) shouldn't double-count that as a
+    precision failure too — it just contributes nothing to the average."""
+    labeled = [
+        {"query": "q1", "corpus_id": "attention"},
+        {"query": "q2", "corpus_id": "bert"},
+    ]
+    by_query = {"q1": [], "q2": [{"source_id": "doc_seed_bert_paper"}]}
+    id_to_corpus = {"doc_seed_bert_paper": "bert"}
+    assert bench._score_precision(labeled, by_query, id_to_corpus) == 1.0
+
+
 def test_load_corpus_uris_returns_paper_and_deck_per_triplet():
     uris = bench._load_corpus_uris()
     kinds = {u["kind"] for u in uris}
