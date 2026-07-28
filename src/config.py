@@ -262,6 +262,15 @@ REDIS_URL = os.getenv("REDIS_URL", "").strip()
 # timeout to even COUNT as an error within request-latency budget.
 REDIS_SOCKET_TIMEOUT_S = _float("REDIS_SOCKET_TIMEOUT_S", 0.3)
 
+# --- Tier 2 mechanical cache TTLs (DESIGN.md §3d, component 20) ---------------
+# All deterministic/content-addressed -- TTL bounds Redis memory, not
+# correctness, EXCEPT the poll-read TTL, which is deliberately short (well
+# under the UI's own 2.5s poll interval) since it trades a little staleness
+# for collapsing repeated polls onto one Postgres query.
+EMBED_CACHE_TTL_S = _int("EMBED_CACHE_TTL_S", 7 * 24 * 3600)   # query embeddings: deterministic, long TTL
+FRAME_CACHE_TTL_S = _int("FRAME_CACHE_TTL_S", 3600)            # frame JPEGs: immutable once written
+POLL_CACHE_TTL_S = _int("POLL_CACHE_TTL_S", 2)                 # list_videos/list_sources
+
 # --- YouTube download hardening ---------------------------------------------------
 # YouTube increasingly answers yt-dlp's default web client with "Sign in to
 # confirm you're not a bot". Mitigations, in order of reliability:

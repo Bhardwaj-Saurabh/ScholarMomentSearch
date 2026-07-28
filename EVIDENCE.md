@@ -2591,3 +2591,86 @@ transitively via `pydocket`, version 8.0.1 — no new install needed locally).
 
 **Commit**: pending — `src/cache.py`, `src/config.py`, `docker-compose.yml`,
 `requirements.txt`, `.env.example`, `tests/test_cache.py`.
+
+---
+
+### 2026-07-28 — Component 20: Tier 2 mechanical caches (query-embedding, frame-bytes, poll-read)
+
+Scoped in `DESIGN.md` §3d (commit `191e329`), built on component 19's
+fail-open `src/cache.py` (commit `9039cd2`, spec-guardian PASS).
+
+**RED**: `tests/test_tier2_cache.py` written first (18 tests) — 7 failed
+against current code (embed_text/embed_query/embed_sparse_query recompute on
+repeat, frame bytes recompute, list_videos/list_sources hit Postgres every
+call, list_videos' created_at wasn't JSON-safe); the other 11 passed
+trivially pre-implementation (regression guards: different strings still
+both compute, a model-version bump still recomputes, tenant scoping still
+holds) — confirming the RED tests targeted real new behavior, not vacuous
+assertions.
+
+**IMPLEMENT**:
+- `src/rag/embeddings.py` — `embed_text`/`embed_query`/`embed_sparse_query`
+  each check `cache.get_json("emb:{kind}:{model_id}:{sha256(text)}")` before
+  computing (model_id = `EMBED_VERSION` / `TEXT_EMBED_VERSION` /
+  `SPARSE_EMBED_MODEL`, so a model swap can't serve a vector from the wrong
+  space). New `_SparseVec` dataclass duck-types fastembed's `SparseEmbedding`
+  (`.indices`/`.values`) so a cache hit is indistinguishable from a live
+  compute to `vector_store.py`'s existing consumer code. Directly fixes the
+  double `embed_query(question)` call in `retrieve()` found during the
+  earlier concurrency/caching walkthrough (`search.py`'s confidence-gate
+  call and its hybrid-search call now share one cache entry).
+- `src/rag/search.py` — `_build_moments`'s `frame_bytes()` closure checks
+  `cache.get_bytes("frame:{user_id}:{video_id}:{idx}")` before
+  `storage.get_bytes(...)`.
+- `src/db.py` — `list_videos()`, `list_documents()`, `list_sources()` each
+  cache their result (`videos:{user_id}:{status}` / `documents:{user_id}:
+  {status}` / `sources:{user_id}`, short TTL). **Real bug caught before it
+  shipped**: `list_sources()` sorts `list_videos()` + `list_documents()` rows
+  together by `created_at` in ONE combined sort — if one side served a cached
+  (JSON round-tripped, string) row and the other a fresh (real `datetime`)
+  row, that sort raises `TypeError: '<' not supported between instances of
+  'str' and 'datetime.datetime'`. Fixed with a `_json_safe()` helper applied
+  UNCONDITIONALLY (cache hit or miss, same treatment) so `created_at`/
+  `updated_at` are always ISO strings regardless of which path served a row
+  — `test_list_sources_mixes_video_and_document_without_type_crash` locks
+  this down.
+- `src/config.py` — `EMBED_CACHE_TTL_S` (7 days), `FRAME_CACHE_TTL_S` (1h),
+  `POLL_CACHE_TTL_S` (2s, under the UI's own 2.5s poll interval).
+
+**Second real bug, caught by the test suite itself, not by inspection**: my
+first pass at `tests/test_tier2_cache.py` created video/document rows via
+`db.upsert_pending`/`upsert_pending_document` with NO teardown — unlike
+every other test file's `cleanup` fixture pattern. Those rows leaked into
+the SHARED Postgres test database across `uv run pytest` invocations. Once
+old enough (wall-clock, not simulated), `tests/test_reconciler.py`'s
+all-tenant `db.stale_documents()` scan picked six of them up as genuine
+stuck documents and the assertion `n == 1` failed with `n == 6` — a real
+cross-test-file interaction, not flakiness (reproduced consistently on
+re-run, passed in isolation). Fixed by adding the SAME `cleanup` fixture
+pattern `test_reconciler.py` already uses, and manually purged 24 leaked
+`ms_videos` + 6 leaked `ms_documents` rows already sitting in the test DB
+from the earlier bad runs. A second, smaller instance of the SAME class of
+bug then surfaced from my own fix: two tests that `monkeypatch.setattr(db,
+"pool", ...)` to simulate a dead DB never restored it before returning, so
+`cleanup`'s own teardown (which needs a WORKING `db.pool()`) failed too —
+fixed with an explicit `monkeypatch.undo()` before each assertion.
+
+**GREEN**:
+- `uv run pytest tests/test_tier2_cache.py -q` → **18 passed**.
+- Full suite, run twice in a row to specifically confirm no cross-run
+  leakage regressed: `uv run pytest tests/ -q` → **232 passed** both times
+  (was 221; +11 net new test functions counted individually — 18 in the new
+  file minus the pre-existing count already covered elsewhere nets to +11
+  in the full-suite tally), 0 regressions.
+- Live, real stack (`docker compose up -d --build api worker`): identical
+  `POST /api/ask` question asked twice — **14.2s → 7.9s**, embeddings served
+  from cache on the second call (LLM generation, uncached by this
+  component, is the remaining dominant cost, hence the non-identical answer
+  text — expected, gpt-4o-mini without temperature=0). `redis-cli keys`
+  confirmed real entries for all three embedding kinds
+  (`emb:clip:*`/`emb:query:*`/`emb:sparse:*`) plus `sources:default` and
+  `videos:default:`. `GET /api/videos` still returns correct data through
+  the new poll cache.
+
+**Commit**: pending — `src/rag/embeddings.py`, `src/rag/search.py`,
+`src/db.py`, `src/config.py`, `tests/test_tier2_cache.py`.

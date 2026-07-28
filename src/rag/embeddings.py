@@ -18,19 +18,29 @@ The *_local functions are the actual inference; clip_service.py serves them.
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import threading
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from functools import lru_cache
 
 import numpy as np
 
-from .. import config
+from .. import cache, config
 
 _lock = threading.Lock()
+
+
+# Component 20 (DESIGN.md §3d): exact-match query-embedding cache. Every
+# query-time embed_* call below checks this before computing — deterministic
+# function, so a repeat of the SAME string is pure waste. model_id is part of
+# the key so a model/version change can't serve a vector from the wrong space.
+def _cache_key(kind: str, model_id: str, text: str) -> str:
+    return f"emb:{kind}:{model_id}:{hashlib.sha256(text.encode()).hexdigest()}"
 
 
 # ── Local inference (used in-process, and by clip_service.py) ────────────────
@@ -127,10 +137,28 @@ def embed_sparse_docs(texts: list[str]) -> list:
         return list(_sparse_model().passage_embed(texts))
 
 
+@dataclass
+class _SparseVec:
+    """Duck-types fastembed's SparseEmbedding (`.indices`/`.values` numpy
+    arrays) — reconstructed from a component-20 cache hit so
+    vector_store.py's `sparse.indices.tolist()` / `sparse.values.tolist()`
+    calls work identically regardless of which path served this result."""
+    indices: np.ndarray
+    values: np.ndarray
+
+
 def embed_sparse_query(text: str):
     """BM25-style sparse vector for a search query."""
+    key = _cache_key("sparse", config.SPARSE_EMBED_MODEL, text)
+    cached = cache.get_json(key)
+    if cached is not None:
+        return _SparseVec(indices=np.asarray(cached["indices"], dtype=np.int64),
+                          values=np.asarray(cached["values"], dtype=np.float32))
     with _lock:
-        return next(iter(_sparse_model().query_embed([text])))
+        result = next(iter(_sparse_model().query_embed([text])))
+    cache.set_json(key, {"indices": result.indices.tolist(), "values": result.values.tolist()},
+                   ttl=config.EMBED_CACHE_TTL_S)
+    return result
 
 
 # ── OpenAI / OpenAI-compatible text embeddings (TEXT_EMBED_PROVIDER=openai) ────
@@ -193,10 +221,17 @@ def embed_jpegs(jpegs: list[bytes]) -> np.ndarray:
 
 
 def embed_text(text: str) -> np.ndarray:
+    key = _cache_key("clip", config.EMBED_VERSION, text)
+    cached = cache.get_json(key)
+    if cached is not None:
+        return np.asarray(cached, dtype=np.float32)
     if config.CLIP_SERVICE_URL:
         vec = _post("/embed/text", {"text": text}, timeout=60)["vector"]
-        return np.asarray(vec, dtype=np.float32)
-    return embed_text_local(text)
+        result = np.asarray(vec, dtype=np.float32)
+    else:
+        result = embed_text_local(text)
+    cache.set_json(key, result.tolist(), ttl=config.EMBED_CACHE_TTL_S)
+    return result
 
 
 def embed_docs(texts: list[str]) -> np.ndarray:
@@ -215,9 +250,16 @@ def embed_docs(texts: list[str]) -> np.ndarray:
 def embed_query(text: str) -> np.ndarray:
     """Search query -> text vector for the transcript branch (same provider
     dispatch as embed_docs)."""
+    key = _cache_key("query", config.TEXT_EMBED_VERSION, text)
+    cached = cache.get_json(key)
+    if cached is not None:
+        return np.asarray(cached, dtype=np.float32)
     if config.TEXT_EMBED_PROVIDER == "openai":
-        return embed_openai([text])[0]
-    if config.CLIP_SERVICE_URL:
+        result = embed_openai([text])[0]
+    elif config.CLIP_SERVICE_URL:
         vec = _post("/embed/query", {"text": text}, timeout=60)["vector"]
-        return np.asarray(vec, dtype=np.float32)
-    return embed_query_local(text)
+        result = np.asarray(vec, dtype=np.float32)
+    else:
+        result = embed_query_local(text)
+    cache.set_json(key, result.tolist(), ttl=config.EMBED_CACHE_TTL_S)
+    return result

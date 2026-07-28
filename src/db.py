@@ -7,12 +7,24 @@ pending -> fetching -> sampling -> embedding -> indexed | skipped | failed
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from typing import Any
 
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
-from .config import DATABASE_URL, INFLIGHT_STATUSES
+from . import cache
+from .config import DATABASE_URL, INFLIGHT_STATUSES, POLL_CACHE_TTL_S
+
+
+def _json_safe(row: dict) -> dict:
+    """Component 20 (DESIGN.md §3d): datetimes aren't JSON-serializable, and
+    the poll-read cache round-trips rows through Redis as JSON. Stringify
+    them the SAME way whether a row came fresh from Postgres or a warm cache
+    hit, so a caller combining rows from multiple functions (list_sources()
+    sorting list_videos() + list_documents() together by created_at) never
+    sees a type mismatch depending on which path served which row."""
+    return {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in row.items()}
 
 _pool: ConnectionPool | None = None
 _pool_pid: int | None = None
@@ -180,6 +192,10 @@ def find_duplicate(user_id: str, source_hash: str, exclude_id: str) -> dict | No
 
 
 def list_videos(user_id: str, status: str | None = None) -> list[dict]:
+    key = f"videos:{user_id}:{status or ''}"
+    cached = cache.get_json(key)
+    if cached is not None:
+        return cached
     q = "SELECT * FROM ms_videos WHERE user_id = %s"
     params: list = [user_id]
     if status:
@@ -187,7 +203,9 @@ def list_videos(user_id: str, status: str | None = None) -> list[dict]:
         params.append(status)
     q += " ORDER BY created_at DESC"
     with pool().connection() as conn:
-        return conn.execute(q, tuple(params)).fetchall()
+        rows = [_json_safe(r) for r in conn.execute(q, tuple(params)).fetchall()]
+    cache.set_json(key, rows, ttl=POLL_CACHE_TTL_S)
+    return rows
 
 
 def videos_by_ids(ids: list[str]) -> dict[str, dict]:
@@ -318,6 +336,10 @@ def find_duplicate_document(user_id: str, source_hash: str, exclude_id: str) -> 
 
 
 def list_documents(user_id: str, status: str | None = None) -> list[dict]:
+    key = f"documents:{user_id}:{status or ''}"
+    cached = cache.get_json(key)
+    if cached is not None:
+        return cached
     q = "SELECT * FROM ms_documents WHERE user_id = %s"
     params: list = [user_id]
     if status:
@@ -325,7 +347,9 @@ def list_documents(user_id: str, status: str | None = None) -> list[dict]:
         params.append(status)
     q += " ORDER BY created_at DESC"
     with pool().connection() as conn:
-        return conn.execute(q, tuple(params)).fetchall()
+        rows = [_json_safe(r) for r in conn.execute(q, tuple(params)).fetchall()]
+    cache.set_json(key, rows, ttl=POLL_CACHE_TTL_S)
+    return rows
 
 
 def documents_by_ids(ids: list[str]) -> dict[str, dict]:
@@ -351,7 +375,16 @@ def list_sources(user_id: str) -> list[dict]:
     {id, kind, status, title, pct, chunk_count}, newest first. chunk_count is
     frame_count for a video, chunk_count for a document — additive field
     (benchmark/bench.py's throughput measurement needs it over the public API,
-    never touching the DB directly)."""
+    never touching the DB directly).
+
+    Also cached directly (component 20) — called on every LLM-generated
+    answer by search.py's citation-attribution backstop, not just the
+    /admin/sources endpoint, so this is a hot path worth its own short-TTL
+    entry on top of list_videos()/list_documents()'s own caching."""
+    cache_key = f"sources:{user_id}"
+    cached = cache.get_json(cache_key)
+    if cached is not None:
+        return cached
     rows = [
         (v["created_at"], {"id": v["id"], "kind": "video", "status": v["status"],
                            "title": v["title"], "pct": _pct(v["progress"]),
@@ -364,7 +397,9 @@ def list_sources(user_id: str) -> list[dict]:
         for d in list_documents(user_id)
     ]
     rows.sort(key=lambda r: r[0], reverse=True)
-    return [r[1] for r in rows]
+    result = [r[1] for r in rows]
+    cache.set_json(cache_key, result, ttl=POLL_CACHE_TTL_S)
+    return result
 
 
 def queue_status_counts() -> list[dict]:

@@ -13,7 +13,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from .. import config, db, llm, metrics, storage
+from .. import cache, config, db, llm, metrics, storage
 from ..config import (BRANCH_TOP_K, CONFIDENCE_THRESHOLD, CROSS_MODAL_BOOST,
                       FUSION_WINDOW_S, RRF_K, TEXT_CONFIDENCE_THRESHOLD, TOP_K)
 from . import vector_store
@@ -369,10 +369,16 @@ def _build_moments(user_id: str, citations: list[dict[str, Any]]) -> list[dict]:
     def frame_bytes(c):
         if c.get("idx") is None or c.get("video_id") is None:
             return None
+        key = f"frame:{user_id}:{c['video_id']}:{c['idx']}"
+        cached = cache.get_bytes(key)
+        if cached is not None:
+            return cached
         try:
-            return storage.get_bytes(storage.frame_key(user_id, c["video_id"], c["idx"]))
+            data = storage.get_bytes(storage.frame_key(user_id, c["video_id"], c["idx"]))
         except Exception:
             return None
+        cache.set_bytes(key, data, ttl=config.FRAME_CACHE_TTL_S)
+        return data
 
     with ThreadPoolExecutor(max_workers=6) as ex:
         images = list(ex.map(frame_bytes, citations))
