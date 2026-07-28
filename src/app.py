@@ -56,12 +56,33 @@ async def _metrics_middleware(request, call_next):
     ROUTE TEMPLATE, not the raw path — request.scope["route"] is populated
     once Starlette's router has matched (i.e. by the time call_next returns),
     so /api/videos/{video_id} stays one bucket regardless of how many
-    distinct video_ids are ever requested."""
+    distinct video_ids are ever requested.
+
+    StreamingResponse (i.e. /ask_stream's SSE) needs special handling: found
+    live (EVIDENCE.md) — call_next() returns as soon as the response object
+    exists, well BEFORE the body has actually been sent, so timing only
+    around call_next massively under-reports latency for any streaming
+    route (observed: 9.8ms recorded for calls that actually took 14-21s).
+    Fix: wrap the response's body_iterator so the timer only fires once the
+    real, full body has finished draining."""
     start = time.perf_counter()
     response = await call_next(request)
     route = request.scope.get("route")
     path = route.path if route is not None else request.url.path
-    metrics.record_request(path, response.status_code, (time.perf_counter() - start) * 1000)
+
+    body_iterator = getattr(response, "body_iterator", None)
+    if body_iterator is None:
+        metrics.record_request(path, response.status_code, (time.perf_counter() - start) * 1000)
+        return response
+
+    async def _timed_body():
+        try:
+            async for chunk in body_iterator:
+                yield chunk
+        finally:
+            metrics.record_request(path, response.status_code, (time.perf_counter() - start) * 1000)
+
+    response.body_iterator = _timed_body()
     return response
 
 

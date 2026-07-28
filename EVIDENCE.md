@@ -2464,3 +2464,42 @@ already covers the ordinary error cases).
 
 **Commit**: `048d7a5` — "Add live metrics/observability dashboard: request
 timing, LLM cost/tokens, grounding rate, ingest queue (component 18)".
+
+---
+
+### 2026-07-28 — Fix: metrics middleware under-reported streaming-response latency
+
+Found while answering a user question about concurrent-request handling: fired
+20 real concurrent `/ask_stream` calls at the live stack (all 20 succeeded, zero
+429s/errors, individual latencies 14.0-20.9s, total wall-clock for all 20 to
+finish 20.9s — genuine thread-level parallelism via Starlette's default 40-slot
+thread limiter for sync route handlers, not serialization). Checking
+`/admin/metrics` afterward to corroborate turned up a real bug: it reported
+`/ask_stream` avg latency as **9.8ms** — nonsense against calls that took
+14-21 *seconds*.
+
+Root cause: `/ask_stream` returns a `StreamingResponse`. Starlette's
+`call_next()` (used by `@app.middleware("http")`) returns as soon as the
+response object is constructed — the actual SSE body streams out AFTER that
+point, invisible to a middleware that only times around `call_next`. Every
+streaming route was silently under-reported; every plain JSON route was fine.
+
+RED: added `test_middleware_measures_full_streaming_body_duration_not_just_setup`
+(`tests/test_metrics_api.py`) — mocks `rag_search.ask` with a 200ms sleep,
+asserts the recorded `/ask_stream` latency reflects it. Failed exactly as
+predicted: **32.1ms recorded vs. the real ~200ms delay**.
+
+IMPLEMENT: `src/app.py`'s middleware now checks for `response.body_iterator`
+(present only on `StreamingResponse`); when present, wraps it in an async
+generator that records the latency in a `finally` block once the real body is
+fully drained, and reassigns `response.body_iterator` before returning — the
+standard fix for this well-known Starlette gotcha. Non-streaming responses
+keep the original (already-correct) immediate-timing behavior.
+
+GREEN: `uv run pytest tests/test_metrics_api.py -q` → 7 passed.
+Full suite: `uv run pytest tests/ -q` → **197 passed** (was 196; +1, 0
+regressions). Live re-verification after rebuild: a real `/ask_stream` call
+now reports **13609.7ms** — matching directly observed reality, not a
+fabricated number.
+
+**Commit**: pending — `src/app.py`, `tests/test_metrics_api.py`.

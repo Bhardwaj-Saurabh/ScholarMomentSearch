@@ -66,3 +66,30 @@ def test_middleware_tracks_status_codes():
     c.get("/api/videos/does-not-exist")  # 404
     resp = c.get("/admin/metrics", headers=AUTH)
     assert resp.json()["status_counts"].get("404") or resp.json()["status_counts"].get(404)
+
+
+def test_middleware_measures_full_streaming_body_duration_not_just_setup(client, monkeypatch):
+    """Real bug found live: /ask_stream is a StreamingResponse — Starlette's
+    call_next() returns as soon as the response object exists, well BEFORE
+    the SSE body has actually been sent. Timing only around call_next
+    massively under-reports latency for every streaming route (observed
+    live: 9.8ms avg for calls that actually took 14-21 SECONDS). The
+    middleware must wrap the response's body_iterator so the recorded time
+    covers the real, full duration."""
+    import time
+
+    from src.rag import search as rag_search
+
+    def _slow_ask(*a, **k):
+        time.sleep(0.2)
+        return {"citations": [], "answer": "x", "llm_used": False, "abstained": True}
+
+    monkeypatch.setattr(rag_search, "ask", _slow_ask)
+    resp = client.get("/ask_stream?q=test")
+    assert resp.status_code == 200
+
+    snap = client.get("/admin/metrics", headers=AUTH).json()
+    route = next(r for r in snap["routes"] if r["route"] == "/ask_stream")
+    assert route["avg"] >= 150, (
+        f"expected the recorded latency to cover the real ~200ms body-generation "
+        f"delay, got {route['avg']}ms — looks like it's only timing call_next()")
