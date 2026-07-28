@@ -2034,3 +2034,42 @@ user directly; decision: **accept as disclosed-open**, the same treatment alread
 given to `recall_at_10`'s existing 0.667 FAIL — a real, honestly-reported gap for
 the writeup, not a blocker on shipping components 12-14. No gate was loosened to
 manufacture a pass.
+
+---
+
+### 2026-07-28 — Component 12 root-cause diagnosis: why precision@10 = 0.635
+
+Follow-up investigation (per-query breakdown of the live 0.635 run, not a fix — the
+user's earlier "accept as disclosed-open" call stands). Ran a one-off diagnostic
+(not committed — ad hoc, scratchpad-only) resolving every citation across all 16
+labeled queries to its corpus_id via `_seed_corpus_id_map()`.
+
+Two concrete, confirmed mechanisms, of ~34 total off-topic hits across the 16
+queries:
+
+1. **~12/34 (~35%)**: the 4 pre-Assignment-3 background videos seeded into the same
+   shared index (`src/samples.py::SAMPLE_VIDEOS` — 3Blue1Brown's Attention/
+   Transformers/LLMs explainers + Karpathy's "[1hr Talk] Intro to LLMs") are
+   genuinely topical for nearly every query in this corpus (all 8 triplets are
+   modern NLP/LLM-history topics) but resolve to no corpus_id at all, so
+   `_score_precision` scores them as noise. Not real retrieval noise — a metric
+   blind spot: it only credits a citation belonging to the query's own labeled
+   triplet, never "legitimately relevant general content from elsewhere in the
+   tenant."
+2. **~22/34 (~65%)**: genuine cross-triplet content adjacency, confirmed via the
+   RRF math itself — citation scores match `1/(RRF_K + rank)` exactly
+   (`RRF_K=60`: rank 0 → 0.0167, rank 1 → 0.0164, rank 2 → 0.0161, verified against
+   `src/config.py`'s default), meaning the fused score reflects ONLY a hit's rank
+   position within its own branch's `BRANCH_TOP_K=20` candidate pool, never the
+   actual embedding-similarity magnitude — a borderline candidate at rank 0 scores
+   identically to the single best match at rank 0 of the other branch. Concretely:
+   the Stanford CS224N BERT lecture (a broad NLP survey course) recurs as an
+   off-topic top-6 hit across the `clip`, `rag`, `lora`, and `react` queries —
+   not because it's the best answer, but because a long survey lecture ranks
+   somewhere in nearly every branch search. A secondary compounding factor: the
+   same off-topic video frequently fills 2-3 of a query's 6 citation slots
+   (different timestamps of one video), crowding out room for on-topic
+   alternates.
+
+Not fixed (per the user's disclosed-open decision) — recorded here so the number
+is diagnosed, not just reported.
