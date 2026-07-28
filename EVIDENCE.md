@@ -2008,3 +2008,29 @@ supported for the judge call; an Anthropic-judge path was out of scope for this
 pass.
 
 **Commit**: pending — `benchmark/answer_quality.py`, `tests/test_answer_quality.py`.
+
+---
+
+### 2026-07-28 — Components 12-14 closeout: spec-guardian review + go/no-go decision
+
+`spec-guardian` reviewed the full diff (`218936e`..`a8c657a`): **PASS-with-warnings**.
+Independently re-ran `uv run pytest tests/ -q` → 135 passed, matching this file's
+claimed numbers exactly. No protected-file violations, no `sla.json`/`rubric.json`
+edits, `quality_gates.json` confirmed genuinely separate, no tenancy/hygiene issues,
+no crashes found in the new code (one minor robustness note: `paper.py`'s
+`page.get_image_rects(xref)` call isn't try/except-wrapped, unlike its neighbors —
+not currently exercised by any failure).
+
+One doc/code mismatch found and fixed (`9fdb4e5`): DESIGN.md's component 14 entry
+claimed fixtures live in `tests/fixtures/`; they're actually built on the fly in
+`tmp_path` (the correct, hygiene-compliant behavior — just a doc wording error,
+mirroring a pre-existing identical inaccuracy at `CLAUDE.md:118` for component 2,
+left as-is since it predates and is outside this session's scope).
+
+One process finding surfaced, not silently absorbed: CLAUDE.md §2 E5 ("Red gate =
+stop") was technically not followed — component 13 was built after component 12
+came back FAIL (0.635 vs 0.70), rather than pausing for a go/no-go first. Put to the
+user directly; decision: **accept as disclosed-open**, the same treatment already
+given to `recall_at_10`'s existing 0.667 FAIL — a real, honestly-reported gap for
+the writeup, not a blocker on shipping components 12-14. No gate was loosened to
+manufacture a pass.
