@@ -210,6 +210,73 @@ def test_real_qdrant_one_query_returns_video_paper_and_deck(monkeypatch):
     vector_store.delete_document_chunks(user, doc_deck)
 
 
+# ── video_ids scoping must not silently exclude documents (found while
+# auditing the UI: it never actually returned a paper/deck citation) ────────
+
+def test_video_ids_scope_excludes_other_videos_but_not_documents(monkeypatch):
+    """Real bug found auditing the UI (not from bench.py/curl testing, which
+    never pass video_ids): Qdrant's `must: video_id MatchAny(video_ids)`
+    condition requires the field to EXIST and match — document chunks carry
+    no video_id field at all, so ANY non-empty video_ids scope silently
+    dropped every document from the results. The UI's own search box passes
+    video_ids on every single query (SAMPLE_INDEXED or the checked-video
+    set) — meaning it could never have surfaced a paper/deck citation to a
+    real user, contradicting the whole cross-source premise. video_ids must
+    scope the VIDEO branch only; document chunks always pass through."""
+    user = f"u_scope_{uuid.uuid4().hex[:8]}"
+    v_in, v_out = f"yt_{uuid.uuid4().hex[:11]}", f"yt_{uuid.uuid4().hex[:11]}"
+    doc = f"doc_{uuid.uuid4().hex[:8]}"
+
+    texts = ["the selected video talks about attention", "the excluded video also talks about attention",
+            "the paper explains attention in section 3"]
+    from src.rag.embeddings import embed_docs
+    vecs = embed_docs(texts)
+
+    vector_store.upsert_chunks(user, v_in, vecs[0:1], payloads=[
+        {"user_id": user, "video_id": v_in, "modality": "text",
+         "t_start": 1.0, "ms": 1000, "text": texts[0]}])
+    vector_store.upsert_chunks(user, v_out, vecs[1:2], payloads=[
+        {"user_id": user, "video_id": v_out, "modality": "text",
+         "t_start": 1.0, "ms": 1000, "text": texts[1]}])
+    vector_store.upsert_document_chunks(user, doc, "paper", vecs[2:3], payloads=[
+        {"user_id": user, "source_id": doc, "kind": "paper", "page": 3, "text": texts[2]}])
+
+    hits = vector_store.search_text(vecs[0], user, top_k=10, video_ids=[v_in])
+    video_ids_seen = {h.get("video_id") for h in hits if h.get("video_id")}
+    doc_ids_seen = {h.get("source_id") for h in hits if h.get("source_id")}
+
+    assert v_in in video_ids_seen
+    assert v_out not in video_ids_seen  # excluded video correctly scoped out
+    assert doc in doc_ids_seen          # document must NOT be scoped out too
+
+    vector_store.delete_video(user, v_in)
+    vector_store.delete_video(user, v_out)
+    vector_store.delete_document_chunks(user, doc)
+
+
+def test_ask_stream_accepts_video_ids_plural_query_params(monkeypatch):
+    """Mirrors POST /api/ask's existing video_ids param -- GET /ask_stream
+    only ever accepted a single video_id, so the UI's multi-select checkbox
+    scope (`video_ids=[...]`) had no way to reach the SSE endpoint at all."""
+    captured = {}
+
+    def _fake_ask(question, uid, *, top_k=None, video_id=None, video_ids=None):
+        captured["video_id"] = video_id
+        captured["video_ids"] = video_ids
+        return {"question": question, "citations": [], "answer": "x",
+               "llm_used": False, "abstained": True}
+    monkeypatch.setattr(rag_search, "ask", _fake_ask)
+
+    from src.app import app
+    client = TestClient(app)
+    with client.stream("GET", "/ask_stream",
+                       params={"q": "hi", "video_ids": ["yt_a", "yt_b"]}) as resp:
+        assert resp.status_code == 200
+        "".join(resp.iter_text())
+
+    assert captured["video_ids"] == ["yt_a", "yt_b"]
+
+
 # ── GET /ask_stream: SSE shape ───────────────────────────────────────────────
 
 def test_ask_stream_emits_citations_event_with_page_locator(monkeypatch):

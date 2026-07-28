@@ -11,7 +11,7 @@ import json
 import re
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -155,24 +155,32 @@ def _sse(event: str, data: dict) -> str:
 
 @router.get("/ask_stream")
 def ask_stream(q: str, x_user_id: str | None = Header(default=None),
-              video_id: str | None = None):
+              video_id: str | None = None,
+              video_ids: list[str] | None = Query(default=None)):
     """SSE wrapper around the existing ask() path (DESIGN.md component 7):
     trace -> citations (kind + locator, cross-source) -> answer -> done. No
     token-by-token generation — llm.answer() is a single blocking call, so
     "streamed answer" means the whole answer arrives as one SSE event, same
-    content POST /api/ask already returns."""
+    content POST /api/ask already returns.
+
+    video_ids (plural) mirrors POST /api/ask's own param — the UI's
+    multi-select checkbox scope needs it to reach this endpoint too, now
+    that the UI's search box calls /ask_stream instead of /api/ask so a
+    query can actually surface paper/deck citations (see
+    src/rag/vector_store.py's _user_filter fix, EVIDENCE.md)."""
     if not q.strip():
         raise HTTPException(400, "Empty question.")
     uid = _uid(x_user_id)
 
     def gen():
         yield _sse("trace", {"stage": "retrieving"})
-        result = rag_search.ask(q.strip(), uid, video_id=video_id)
+        result = rag_search.ask(q.strip(), uid, video_id=video_id, video_ids=video_ids or None)
         yield _sse("citations", {"citations": result["citations"]})
         yield _sse("answer", {
             "answer": result["answer"],
             "llm_used": result.get("llm_used", False),
             "abstained": result.get("abstained", False),
+            "note": result.get("note"),
         })
         yield _sse("done", {})
 

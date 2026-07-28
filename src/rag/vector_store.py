@@ -79,12 +79,25 @@ def point_id(video_id: str, frame_idx: int) -> str:
 
 def _user_filter(user_id: str, video_id: str | None = None,
                  video_ids: list[str] | None = None) -> qm.Filter:
-    must: list[qm.FieldCondition] = [
+    must: list[qm.FieldCondition | qm.Filter] = [
         qm.FieldCondition(key="user_id", match=qm.MatchValue(value=user_id))]
+    scope = None
     if video_id:  # single-video scope (kept for /transcript-style calls)
-        must.append(qm.FieldCondition(key="video_id", match=qm.MatchValue(value=video_id)))
+        scope = qm.FieldCondition(key="video_id", match=qm.MatchValue(value=video_id))
     elif video_ids:  # multi-select scope — query only the chosen videos
-        must.append(qm.FieldCondition(key="video_id", match=qm.MatchAny(any=video_ids)))
+        scope = qm.FieldCondition(key="video_id", match=qm.MatchAny(any=video_ids))
+    if scope is not None:
+        # video_id/video_ids scopes the VIDEO branch only. Paper/deck chunks
+        # (TEXT_COLLECTION, shared with video transcripts) carry no video_id
+        # field at all — a plain `must` on that field silently excluded every
+        # document from any video-scoped query, which meant the UI's search
+        # box (which always passes video_ids) could never surface a paper/
+        # deck citation at all. A document chunk (video_id absent) must
+        # always pass this condition, regardless of which videos are
+        # selected — the CLIP visual collection never has document points,
+        # so this is a no-op there (is_empty just never matches).
+        must.append(qm.Filter(should=[
+            scope, qm.IsEmptyCondition(is_empty=qm.PayloadField(key="video_id"))]))
     return qm.Filter(must=must)
 
 

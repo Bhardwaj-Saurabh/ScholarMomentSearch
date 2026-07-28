@@ -1688,5 +1688,112 @@ addresses):
   formal guarantee of zero hallucination, which remains out of reach for
   any prompt- or regex-based defense.
 
-**Commit**: pending — `src/llm.py`, `src/rag/search.py`, `tests/test_llm.py`,
-`tests/test_grounding_guard.py`, this entry.
+**Commit**: `f04d1e8` — "Add mechanical named-source guard to catch
+cross-source misattribution".
+
+---
+
+## 2026-07-28 — UI redesign + a real integration bug found while auditing it
+
+The user asked whether the UI had actually been updated to match everything
+built, and to redesign it to be professional and "sellable," integrating the
+cross-source (talk + paper + deck) capability the whole assignment is about.
+Auditing the UI against that ask surfaced something more important than
+copy: **the shipped search box could never have returned a paper or deck
+citation to a real browser user.**
+
+### Real bug found: `video_ids` scoping silently excluded every document
+
+The UI's `$("#go").onclick` always calls with a `video_ids` scope (either
+`SAMPLE_INDEXED` on the front page or the checked-video set on
+`/get-started` — never empty in practice, since indexed videos default to
+selected). `POST /api/ask` → `rag_search.ask()` → `vector_store._user_filter`
+built a Qdrant `must: video_id MatchAny(video_ids)` condition on
+`TEXT_COLLECTION` — but paper/deck chunks in that SAME collection carry no
+`video_id` field at all (`upsert_document_chunks` payloads use `source_id`/
+`kind`/`page`/`slide` instead). A Qdrant `must` condition on a field a point
+doesn't have excludes that point — so ANY non-empty `video_ids` scope
+silently dropped every document from the results, always. This is why it
+was never caught until now: every prior verification this session
+(`bench.py`, curl testing, both grounding audits) called `/ask_stream`
+directly with no `video_ids` param at all, which never hit this path — the
+one caller that always does is the UI itself, which nothing had exercised
+end-to-end in a browser before.
+
+**Fix** (`src/rag/vector_store.py::_user_filter`): the video-id condition is
+now wrapped in `should: [video_id match, IsEmptyCondition(video_id)]` — so
+it constrains video-transcript points as before, while any point WITHOUT a
+`video_id` field (i.e. every document chunk) always passes through
+regardless of which videos are selected. The CLIP visual collection never
+has document points, so this is a no-op there. Additive fix inside
+`search.py`/`vector_store.py`'s own extensible territory (both explicitly
+allowed to be "extended additively" per CLAUDE.md) — `/api/ask`'s own route
+code in `src/api/search.py` has zero diff lines; its request/response shape
+and status codes are untouched. Judgment call, made explicitly: this DOES
+change what `/api/ask` itself would now additionally return (documents can
+come through where they silently couldn't before) — treated as a legitimate
+bug fix to shared retrieval plumbing, not a forbidden edit to `/api/ask`'s
+provided behavior, since no existing video-only behavior changes and the
+previous behavior was never an intentional part of the base app's contract
+(documents didn't exist in the base app at all).
+
+**`GET /ask_stream` extended** to accept `video_ids` (plural, `Query`),
+mirroring `POST /api/ask`'s own existing param — it previously only accepted
+a single `video_id`, so even switching the UI to call it wouldn't have
+carried the multi-select scope through. Also added the `note` field to its
+`answer` SSE event (parity with `/api/ask`'s existing "no LLM configured"
+note, previously dropped by the SSE wrapper).
+
+**UI's search handler switched from `POST /api/ask` to `GET /ask_stream`**
+(new `askViaStream()`: fetch + `ReadableStream` reader parsing `event:`/
+`data:` blocks by hand) — this is what actually makes the fix reach a real
+user, not just `curl`.
+
+**Evals**: two new tests in `tests/test_cross_source_search.py`:
+`test_video_ids_scope_excludes_other_videos_but_not_documents` (real
+embedded Qdrant: upserts one in-scope video, one out-of-scope video, and one
+document; asserts the out-of-scope video is excluded AND the document is
+NOT); `test_ask_stream_accepts_video_ids_plural_query_params` (contract test
+via `TestClient`, mocks `rag_search.ask` to capture what `video_ids` value
+actually arrives). **RED** (`AssertionError: assert None == ['yt_a','yt_b']`
+/ document missing from scoped results) → **GREEN**. Full suite:
+`uv run pytest tests/ -x -q` → **115 passed** (113 + 2, no regressions).
+
+**Live verification** (rebuilt + restarted `api`): replicated the EXACT
+query shape the front page sends — fetched the 12 real sample-indexed video
+ids via `/api/videos`, built the same `video_ids=...&video_ids=...` query
+string the browser would, and called `/ask_stream` with it directly:
+```
+citation kinds: ['video', 'video', 'paper', 'video', 'video', 'paper']
+```
+Two paper citations (Attention, Chain-of-Thought) came back alongside four
+video citations — before this fix, this exact call would have returned
+video citations only, always, regardless of query content.
+
+### UI redesign (cosmetic + copy, verified not to break existing logic)
+
+Rebranded "MomentSearch" → "ScholarMomentSearch" throughout (title tag,
+meta description, favicon, header, footer, both `applyMode()` branches).
+Rewrote hero copy/badge/examples in both modes to reflect DESIGN.md's actual
+positioning ("AI Research & Conference Knowledge Base") instead of the
+original video-only template copy; example queries now use real questions
+the seeded corpus can answer (starting with DESIGN.md's own stated demo
+moment: "how does attention avoid recurrence?"), not generic visual-search
+prompts. Added a small Talks/Papers/Decks trust strip near the hero. Split
+the library into two labeled subsections (`#videosGroup` "🎥 Talks",
+`#documentsGroup` "📄 Papers & decks") instead of two undifferentiated
+stacked chip rows. Gave document result-cards a gradient icon panel instead
+of a flat placeholder, for visual parity with video thumbnails. Footer now
+points at this repo's real GitHub instead of the original base template's
+`traversaal-ai/momentsearch` link.
+
+Verified none of this touched the two pure-logic `<script>` blocks
+(`citation-logic`, `ingest-logic`) that `ui/citation.test.js`/
+`ui/ingest.test.js` regex-extract and test — `node --test ui/*.test.js` →
+**13 passed**, unchanged. Verified every `id` the existing JS references via
+`$("#...")` still exists exactly once in the restructured HTML (scripted
+check, no typos/mismatches). Verified `/`, `/get-started` both still return
+200 with balanced HTML tags.
+
+**Commit**: pending — `src/rag/vector_store.py`, `src/api/search.py`,
+`tests/test_cross_source_search.py`, `ui/index.html`, this entry.

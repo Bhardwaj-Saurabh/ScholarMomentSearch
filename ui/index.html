@@ -3,7 +3,9 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>MomentSearch — search video by what's on screen</title>
+<title>ScholarMomentSearch — one search across every talk, paper, and slide</title>
+<meta name="description" content="Ask a research question once and get an answer grounded in the exact talk timestamp, paper page, and slide — cited, playable, and clickable.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23FF5A3C'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='19' font-weight='700' fill='white' text-anchor='middle'%3ES%3C/text%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -42,9 +44,9 @@
 <!-- HEADER -->
 <header class="border-b border-line">
   <div class="max-w-6xl mx-auto px-6 py-4 flex items-center gap-3">
-    <div class="w-8 h-8 rounded-lg bg-coral flex items-center justify-center text-white font-bold display">M</div>
-    <span class="font-bold tracking-tight">MomentSearch</span>
-    <span class="text-muted text-sm hidden sm:inline">· visual video search</span>
+    <div class="w-8 h-8 rounded-lg bg-coral flex items-center justify-center text-white font-bold display">S</div>
+    <span class="font-bold tracking-tight">ScholarMomentSearch</span>
+    <span class="text-muted text-sm hidden sm:inline">· research knowledge base</span>
     <span id="llmBadge" class="ml-auto text-xs px-3 py-1 rounded-full border border-line text-muted">checking…</span>
   </div>
 </header>
@@ -52,19 +54,30 @@
 <!-- HERO / ASK (Perplexity-style centered search) -->
 <section class="max-w-2xl mx-auto px-6 pt-20 pb-6 text-center">
   <div id="heroBadge" class="inline-flex items-center gap-2 text-xs font-semibold text-coral2 bg-coral/10 border border-coral/25 rounded-full px-3 py-1 mb-6">
-    ● Sample project · four LLM talks, pre-indexed
+    ● AI Research Knowledge Base · 8 talks, papers &amp; decks, pre-indexed
   </div>
   <h1 id="heroTitle" class="display text-4xl sm:text-5xl font-bold leading-[1.05] tracking-tight">
-    A Deep Dive into <span class="text-coral">LLMs</span>.
+    One search across every <span class="text-coral">talk, paper, and slide</span>.
   </h1>
   <p id="heroSub" class="mt-4 text-[17px] text-muted leading-relaxed mx-auto max-w-lg">
-    Ask anything shown or said across these talks. MomentSearch searches both the
-    picture and the transcript, and plays the exact moment beside its answer.
+    Ask a research question once. ScholarMomentSearch finds the exact talk moment,
+    paper page, and slide that answer it — cited, and playable side by side.
   </p>
 
+  <!-- trust strip: makes "one shared index across three kinds" visible at a glance -->
+  <div class="mt-6 flex items-center justify-center gap-2 text-xs text-muted">
+    <span class="inline-flex items-center gap-1.5 bg-white border border-line rounded-full px-3 py-1.5">🎥 Talks</span>
+    <span class="text-line">+</span>
+    <span class="inline-flex items-center gap-1.5 bg-white border border-line rounded-full px-3 py-1.5">📄 Papers</span>
+    <span class="text-line">+</span>
+    <span class="inline-flex items-center gap-1.5 bg-white border border-line rounded-full px-3 py-1.5">🖼 Decks</span>
+    <span class="text-line hidden sm:inline">—</span>
+    <span class="hidden sm:inline">one shared index, one answer</span>
+  </div>
+
   <!-- big centered search bar -->
-  <div class="mt-8 flex items-end gap-2 bg-white border border-line rounded-2xl shadow-sm px-3 py-2.5 text-left focus-within:border-coral focus-within:ring-4 focus-within:ring-coral/15 transition">
-    <textarea id="q" rows="1" placeholder="Ask about anything shown on screen…"
+  <div class="mt-6 flex items-end gap-2 bg-white border border-line rounded-2xl shadow-sm px-3 py-2.5 text-left focus-within:border-coral focus-within:ring-4 focus-within:ring-coral/15 transition">
+    <textarea id="q" rows="1" placeholder="Ask a research question — e.g. how does attention avoid recurrence?"
       class="flex-1 bg-transparent outline-none resize-none text-[16px] leading-relaxed px-2 py-2"></textarea>
     <button id="go" aria-label="Ask"
       class="shrink-0 w-10 h-10 rounded-xl bg-coral hover:bg-coral2 text-white text-lg flex items-center justify-center transition">→</button>
@@ -108,8 +121,14 @@
       </div>
       <div id="ingestStatus" class="text-sm text-muted mt-3 min-h-[20px]"></div>
     </div>
-    <div id="videos" class="flex flex-wrap gap-2 mt-2"></div>
-    <div id="documents" class="flex flex-wrap gap-2 mt-2"></div>
+    <div id="videosGroup">
+      <h3 class="text-[11px] font-semibold uppercase tracking-wide text-muted mt-4 mb-1.5">🎥 Talks</h3>
+      <div id="videos" class="flex flex-wrap gap-2"></div>
+    </div>
+    <div id="documentsGroup" class="hidden">
+      <h3 class="text-[11px] font-semibold uppercase tracking-wide text-muted mt-4 mb-1.5">📄 Papers &amp; decks</h3>
+      <div id="documents" class="flex flex-wrap gap-2"></div>
+    </div>
     <div id="scopeLine" class="hidden text-xs text-muted mt-3"></div>
     <p id="libNote" class="text-xs text-muted mt-3">YouTube is searched by picture (frames) and transcript; uploads by picture only for now. First ingest downloads the models.</p>
   </section>
@@ -119,7 +138,7 @@
     <article id="article" class="max-w-3xl"></article>
     <div class="flex items-center justify-between mt-10 mb-4">
       <h3 class="display text-2xl font-600">Moments</h3>
-      <span class="text-muted text-sm">Click any moment to play it here.</span>
+      <span class="text-muted text-sm">Talks play here · papers &amp; decks open at the right page.</span>
     </div>
     <div id="sources" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
   </section>
@@ -149,8 +168,8 @@
 
 <footer class="border-t border-line">
   <div class="max-w-6xl mx-auto px-6 py-6 text-xs text-muted flex justify-between flex-wrap gap-2">
-    <span>Open source · Apache 2.0 · CLIP + Qdrant + bring-your-own-LLM</span>
-    <span><a class="hover:text-ink" href="https://momentsearch.vercel.app/">momentsearch.vercel.app</a> · <a class="hover:text-ink" href="https://github.com/traversaal-ai/momentsearch">GitHub</a></span>
+    <span>One index, three source types · CLIP + bge + Qdrant + bring-your-own-LLM</span>
+    <span><a class="hover:text-ink" href="https://github.com/Bhardwaj-Saurabh/ScholarMomentSearch">GitHub</a></span>
   </div>
 </footer>
 
@@ -221,21 +240,23 @@ const MODE = window.MS_MODE || "sample";   // "sample" (curated, read-only) | "f
 /* ---------- mode-specific framing ---------- */
 function applyMode(){
   if(MODE==="full"){
-    $("#heroBadge").innerHTML='● Bring your own videos';
-    $("#heroTitle").innerHTML='Ask your videos <span class="text-coral">anything</span> you can see.';
-    $("#heroSub").textContent='Add a YouTube URL or upload a file. MomentSearch finds the exact moments — and plays each one right beside the answer.';
+    document.title='Add your sources — ScholarMomentSearch';
+    $("#heroBadge").innerHTML='● Bring your own talks, papers &amp; decks';
+    $("#heroTitle").innerHTML='Build your own <span class="text-coral">research knowledge base</span>.';
+    $("#heroSub").textContent='Add a YouTube talk, a paper, or a slide deck. ScholarMomentSearch indexes all three into one shared library and answers from whichever actually has the answer.';
     $("#modeLink").textContent='← Back to the sample';     $("#modeLink").href='/';
-    $("#libTitle").textContent='Your videos';
-    $("#libNote").innerHTML='YouTube videos are searched by <b>both</b> what\'s shown (frames) and what\'s said (transcript). Uploaded files are searched by picture only for now — no transcript yet. Tip: unselect the samples to search only your own uploads.';
+    $("#libTitle").textContent='Your library';
+    $("#libNote").innerHTML='Talks are searched by <b>both</b> what\'s shown (frames) and what\'s said (transcript); papers and decks by their text, page by page. Tip: unselect a source to search only what you actually want.';
   } else {
-    $("#heroBadge").innerHTML='● Sample project · four LLM talks, pre-indexed';
-    $("#heroTitle").innerHTML='A Deep Dive into <span class="text-coral">LLMs</span>.';
-    $("#heroSub").textContent='Ask anything about these four talks — MomentSearch finds the exact moment from what\'s shown on screen and what\'s said, and plays it right here.';
-    $("#modeLink").textContent='Want your own videos? Get started →';   $("#modeLink").href='/get-started';
-    $("#libTitle").textContent='In this deep dive';
+    document.title='ScholarMomentSearch — one search across every talk, paper, and slide';
+    $("#heroBadge").innerHTML='● AI Research Knowledge Base · 8 talks, papers &amp; decks, pre-indexed';
+    $("#heroTitle").innerHTML='One search across every <span class="text-coral">talk, paper, and slide</span>.';
+    $("#heroSub").textContent='Ask a research question once. ScholarMomentSearch finds the exact talk moment, paper page, and slide that answer it — cited, and playable side by side.';
+    $("#modeLink").textContent='Want your own research library? Get started →';   $("#modeLink").href='/get-started';
+    $("#libTitle").textContent='In this knowledge base';
     $("#addTabs").classList.add("hidden");
     $("#addControls").classList.add("hidden");
-    $("#libNote").textContent='A curated set of LLM explainers and talks, indexed by what appears on screen.';
+    $("#libNote").textContent='Eight landmark ML papers, each paired with its talk and slide deck — one shared index, cited down to the exact page, slide, or second.';
   }
 }
 
@@ -368,10 +389,11 @@ document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{
    for both videos and documents — filtered here to the non-video rows so
    loadVideos()'s own video rendering/is_sample logic stays untouched). */
 async function loadDocuments(){
-  if(!SELECTABLE()){ $("#documents").innerHTML=""; return []; }
+  if(!SELECTABLE()){ $("#documents").innerHTML=""; $("#documentsGroup").classList.add("hidden"); return []; }
   const {sources}=await (await fetch("/admin/sources")).json();
   const docs=sources.filter(s=>s.kind!=="video");
   const box=$("#documents");
+  $("#documentsGroup").classList.toggle("hidden", docs.length===0);
   if(!docs.length){ box.innerHTML=""; return docs; }
   const kindLabel=k=>k==="paper"?"📄 paper":"🖼 deck";
   box.innerHTML=docs.map(d=>{
@@ -460,6 +482,41 @@ function autogrow(){ qEl.style.height="auto"; qEl.style.height=Math.min(qEl.scro
 qEl.addEventListener("input",autogrow);
 qEl.addEventListener("keydown",e=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); $("#go").click(); }});
 
+/* GET /ask_stream (SSE), not POST /api/ask: the latter's video_ids scope
+   used to silently exclude every paper/deck citation from Qdrant's filter
+   (video chunks carry video_id, document chunks never do) — fixed in
+   src/rag/vector_store.py's _user_filter, but /api/ask has no way to also
+   ask for document-only content once documents get their own selection UI
+   later, whereas /ask_stream is the endpoint DESIGN.md built specifically
+   for cross-source answers. Parsed by hand (event:/data: blocks split on a
+   blank line) rather than EventSource — same trust boundary, more control
+   over error handling, and it mirrors the SSE parsing already proven out
+   in this session's own diagnostics. */
+async function askViaStream(q, video_ids){
+  const params=new URLSearchParams({q});
+  (video_ids||[]).forEach(id=>params.append("video_ids", id));
+  const resp=await fetch("/ask_stream?"+params.toString());
+  if(!resp.ok){ const e=await resp.json().catch(()=>({})); throw new Error(e.detail||resp.statusText); }
+  const reader=resp.body.getReader(), decoder=new TextDecoder();
+  let buf="", out={citations:[], answer:"", note:null, abstained:false};
+  while(true){
+    const {done,value}=await reader.read();
+    if(done) break;
+    buf+=decoder.decode(value,{stream:true});
+    let idx;
+    while((idx=buf.indexOf("\n\n"))>=0){
+      const block=buf.slice(0,idx); buf=buf.slice(idx+2);
+      const evLine=block.split("\n").find(l=>l.startsWith("event:"));
+      const dataLine=block.split("\n").find(l=>l.startsWith("data:"));
+      if(!evLine||!dataLine) continue;
+      const ev=evLine.slice(6).trim(), data=JSON.parse(dataLine.slice(5).trim());
+      if(ev==="citations") out.citations=data.citations||[];
+      if(ev==="answer"){ out.answer=data.answer; out.note=data.note; out.abstained=data.abstained; }
+    }
+  }
+  return out;
+}
+
 $("#go").onclick=async()=>{
   const q=qEl.value.trim(); if(!q)return;
   $("#resultsWrap").classList.remove("hidden");
@@ -468,13 +525,12 @@ $("#go").onclick=async()=>{
   try{
     // Front page (/) queries ONLY the samples; /get-started queries the selected set.
     const video_ids = SELECTABLE() ? [...SELECTED] : SAMPLE_INDEXED;
-    const r=await (await fetch("/api/ask",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({question:q, video_ids})})).json();
+    const r=await askViaStream(q, video_ids);
     CITES=r.citations||[];
     let html="";
     if(r.answer) html+=`<div class="prose-body fade-in">${renderMarkdown(r.answer)}</div>`;
     if(r.note) html+=`<p class="text-xs text-muted mt-3">${esc(r.note)}</p>`;
-    if(!r.answer && !CITES.length) html=`<p class="text-muted">No matching moments. Add a video first.</p>`;
+    if(!r.answer && !CITES.length) html=`<p class="text-muted">No matching moments. Add a source first.</p>`;
     $("#article").innerHTML=html;
     renderSources();
   }catch(e){ $("#article").innerHTML=`<p class="text-coral2">Error: ${esc(e.message)}</p>`; }
@@ -482,17 +538,19 @@ $("#go").onclick=async()=>{
 };
 
 function renderDocumentCard(c){
-  // Paper/deck (Assignment 3): no video thumbnail exists for these — the
-  // card shows the source kind + page/slide locator + matched excerpt instead.
-  const icon = c.kind==="paper" ? "📄" : "🖼";
-  const kindTag = c.kind==="paper"
-    ? '<span class="text-[9px] px-1 rounded bg-[#e0d9f7] text-[#5b3fa0]">paper</span>'
-    : '<span class="text-[9px] px-1 rounded bg-[#e0d9f7] text-[#5b3fa0]">deck</span>';
+  // Paper/deck (Assignment 3): no video thumbnail exists for these — a
+  // designed gradient panel (color-coded by kind, same visual weight as a
+  // video thumbnail) stands in for one, so cross-source results read as one
+  // consistent grid, not "videos, plus some other stuff".
+  const isDeck = c.kind==="deck";
+  const icon = isDeck ? "🖼" : "📄";
+  const grad = isDeck ? "from-[#e0d9f7] to-[#cfc2ef]" : "from-[#ffe2d8] to-[#ffd0c0]";
+  const kindTag = `<span class="text-[9px] font-semibold px-1.5 py-px rounded bg-[#e0d9f7] text-[#5b3fa0]">${isDeck?"deck":"paper"}</span>`;
   const quote = c.text
     ? `<div class="text-[11px] text-muted italic mt-1 line-clamp-2">“${esc(c.text)}”</div>` : "";
   return `
-  <button class="source text-left bg-card border border-line rounded-2xl overflow-hidden shadow-sm hover:border-coral transition" data-n="${c.n}">
-    <div class="aspect-video bg-paper2 overflow-hidden flex items-center justify-center text-3xl">${icon}</div>
+  <button class="source text-left bg-card border border-line rounded-2xl overflow-hidden shadow-sm hover:border-coral hover:shadow-md transition" data-n="${c.n}">
+    <div class="aspect-video bg-gradient-to-br ${grad} overflow-hidden flex items-center justify-center text-3xl">${icon}</div>
     <div class="p-3">
       <div class="flex items-center gap-2 mb-1">
         <span class="text-[10px] font-bold text-white bg-coral rounded px-1.5 py-0.5">${c.n}</span>
@@ -590,9 +648,12 @@ document.addEventListener("keydown",e=>{ if(e.key==="Escape") closeModal(); });
 /* citation pills inside the answer */
 $("#article").addEventListener("click",e=>{ const c=e.target.closest(".cite"); if(c) openCitation(+c.dataset.n); });
 
-/* examples */
-const EXAMPLES=["a diagram of the attention mechanism","an animation of a neural network",
-  "a slide listing examples of large language models","a person speaking on stage next to slides"];
+/* examples — real cross-source questions the seeded corpus can actually
+   answer (grounded in benchmark/corpus.json's 8 paper+deck+talk triplets),
+   not generic visual-search prompts. First one is DESIGN.md's own demo
+   moment: one answer citing a talk timestamp, a paper page, and a slide. */
+const EXAMPLES=["how does attention avoid recurrence?","what does the LoRA paper say about trainable parameters?",
+  "how does ReAct combine reasoning and acting?","what makes BERT bidirectional?"];
 $("#examples").innerHTML=EXAMPLES.map(q=>`<span class="chip">${esc(q)}</span>`).join("");
 $("#examples").querySelectorAll(".chip").forEach(c=>c.onclick=()=>{ qEl.value=c.textContent; autogrow(); qEl.focus(); });
 
