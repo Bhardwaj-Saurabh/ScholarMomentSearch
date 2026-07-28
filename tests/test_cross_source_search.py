@@ -155,6 +155,69 @@ def test_retrieve_citation_shape_paper_and_deck(monkeypatch):
     assert deck["source_id"] == "doc_1c2d"
 
 
+# ── Component 17 (DESIGN.md §3b): _merge_hits — dedup + re-sort across
+# possibly-multiple sub-queries from query enhancement. ─────────────────────
+
+def test_merge_hits_single_list_is_equivalent_to_that_list():
+    """QUERY_ENHANCEMENT_ENABLED=false (default) means queries=[question]
+    always — _merge_hits([hits]) must be a no-op vs. the original hits, or
+    routing every call through it (regardless of the flag) would silently
+    change behavior for everyone who never turned enhancement on."""
+    hits = [{"score": 0.9, "video_id": "a"}, {"score": 0.5, "video_id": "b"}]
+    assert rag_search._merge_hits([hits]) == hits
+
+
+def test_merge_hits_dedupes_the_same_point_keeping_the_higher_score():
+    a = [{"score": 0.4, "video_id": "x", "idx": 1}]
+    b = [{"score": 0.9, "video_id": "x", "idx": 1}]  # same point, different sub-query
+    out = rag_search._merge_hits([a, b])
+    assert len(out) == 1
+    assert out[0]["score"] == 0.9
+
+
+def test_merge_hits_combines_distinct_points_sorted_by_score():
+    a = [{"score": 0.3, "video_id": "x", "idx": 1}]
+    b = [{"score": 0.7, "source_id": "doc_1", "page": 2}]
+    out = rag_search._merge_hits([a, b])
+    assert [h["score"] for h in out] == [0.7, 0.3]
+
+
+def test_merge_hits_empty_input_returns_empty():
+    assert rag_search._merge_hits([]) == []
+    assert rag_search._merge_hits([[], []]) == []
+
+
+# ── retrieve() wiring: enhancement disabled by default, opt-in when set ────
+
+def test_retrieve_query_enhancement_disabled_by_default_calls_search_once_per_branch(monkeypatch):
+    calls = {"search": 0, "search_text": 0}
+    monkeypatch.setattr(vector_store, "search", lambda *a, **k: calls.__setitem__("search", calls["search"] + 1) or [])
+    monkeypatch.setattr(vector_store, "search_text", lambda *a, **k: calls.__setitem__("search_text", calls["search_text"] + 1) or [])
+    monkeypatch.setattr(db, "videos_by_ids", lambda ids: {})
+    monkeypatch.setattr(db, "documents_by_ids", lambda ids: {})
+
+    rag_search.retrieve("plain question", "u1")
+    assert calls["search"] == 1              # one visual call, not per-enhanced-query
+    assert calls["search_text"] == 2         # gate call (top_k=1) + the real hybrid call
+
+
+def test_retrieve_query_enhancement_enabled_widens_the_candidate_pool(monkeypatch):
+    from src.rag import query_enhance
+    monkeypatch.setattr(rag_search.config, "QUERY_ENHANCEMENT_ENABLED", True)
+    monkeypatch.setattr(query_enhance, "enhance_query",
+                        lambda q: [q, "sub-question one", "sub-question two"])
+
+    search_calls = []
+    monkeypatch.setattr(vector_store, "search", lambda *a, **k: (
+        search_calls.append(1) or []))
+    monkeypatch.setattr(vector_store, "search_text", lambda *a, **k: [])
+    monkeypatch.setattr(db, "videos_by_ids", lambda ids: {})
+    monkeypatch.setattr(db, "documents_by_ids", lambda ids: {})
+
+    rag_search.retrieve("plain question", "u1")
+    assert len(search_calls) == 3  # one visual search per enhanced query
+
+
 # ── ask(): grounded/abstain regression ───────────────────────────────────────
 
 def test_ask_grounded_empty_retrieval_returns_empty_citations(monkeypatch):

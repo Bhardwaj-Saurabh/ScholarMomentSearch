@@ -209,6 +209,16 @@ TEXT_EMBED_DIM = _int("TEXT_EMBED_DIM", 1536 if _TE_OPENAI else 384)
 TEXT_EMBED_API_KEY = os.getenv("TEXT_EMBED_API_KEY", "").strip()
 TEXT_EMBED_BASE_URL = os.getenv("TEXT_EMBED_BASE_URL", "").strip()
 TEXT_EMBED_VERSION = os.getenv("TEXT_EMBED_VERSION", f"{TEXT_EMBED_MODEL}-v1")
+# Component 15 (DESIGN.md §3b): hybrid dense+sparse text search — Qdrant's OWN
+# native fusion (Prefetch + FusionQuery), not hand-rolled BM25. TEXT_COLLECTION
+# gains a named sparse vector alongside the existing unnamed dense one.
+# IMPORTANT: this Qdrant server version rejects adding a sparse config to an
+# already-populated collection (verified live, EVIDENCE.md) — flipping this on
+# for an existing deploy needs the same "drop + recreate + reseed" step
+# TEXT_EMBED_PROVIDER's own comment above already documents for a dim change.
+ENABLE_HYBRID_TEXT_SEARCH = _envbool("ENABLE_HYBRID_TEXT_SEARCH", True)
+SPARSE_VECTOR_NAME = "bm25"
+SPARSE_EMBED_MODEL = os.getenv("SPARSE_EMBED_MODEL", "Qdrant/bm25")
 # Transcript chunking: group caption cues into ~CHUNK_SECONDS windows so a chunk
 # is a coherent spoken passage with a real t_start/t_end, not one tiny cue.
 TRANSCRIPT_CHUNK_SECONDS = _float("TRANSCRIPT_CHUNK_SECONDS", 20.0)
@@ -225,6 +235,17 @@ FUSION_WINDOW_S = _float("FUSION_WINDOW_S", 15.0)
 CROSS_MODAL_BOOST = _float("CROSS_MODAL_BOOST", 1.5)
 # Per-branch candidates fetched before fusion.
 BRANCH_TOP_K = _int("BRANCH_TOP_K", 20)
+# Component 16 (DESIGN.md §3b): cross-encoder reranker. RRF is rank-based
+# (score-agnostic) by design — a cross-encoder reads (question, passage)
+# pairs directly, correcting ties/near-ties RRF fusion can't distinguish.
+# Env-flagged so bench.py's search-latency gates can be measured on vs off.
+RERANK_ENABLED = _envbool("RERANK_ENABLED", True)
+RERANK_MODEL = os.getenv("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+# Component 17 (DESIGN.md §3b): query enhancement (decomposition + expansion).
+# OFF by default — an LLM call before retrieval starts adds real latency to
+# every search, and accept_latency_p95_ms is already red; this must never
+# become the baseline latency graders/reviewers see unless explicitly turned on.
+QUERY_ENHANCEMENT_ENABLED = _envbool("QUERY_ENHANCEMENT_ENABLED", False)
 
 # --- YouTube download hardening ---------------------------------------------------
 # YouTube increasingly answers yt-dlp's default web client with "Sign in to

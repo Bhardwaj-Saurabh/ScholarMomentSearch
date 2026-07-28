@@ -2153,3 +2153,169 @@ data in production.
 Per user decision: logged here as a disclosed, pre-existing gap, not fixed in
 this pass — a separate test-infrastructure hardening task, out of scope for
 components 15-17.
+
+---
+
+### 2026-07-28 — Component 15: hybrid dense+sparse text search (DESIGN.md §3b)
+
+Scope: the text branch was pure dense (bge) with no lexical/keyword matching.
+Qdrant's OWN native hybrid search (Prefetch + FusionQuery(fusion=RRF)) added — a
+named sparse vector (`bm25`, via fastembed's `Qdrant/bm25` `SparseTextEmbedding`,
+already a fastembed dependency) alongside the existing dense vector, fused
+server-side in one `query_points` call. Verified against the live Qdrant Cloud
+instance (throwaway probe collections) BEFORE any implementation — see the two
+"pre-implementation finding" entries above (migration constraint: sparse config
+can't be added to an already-populated collection; tenant-filter must be set on
+EACH `Prefetch`, not just the top-level `query_filter`, or it silently leaks
+cross-tenant data).
+
+RED: 9 tests added to `tests/test_hybrid_search.py` (point-vector shape, sparse
+collection creation, upsert stores both vector types, tenant-scoping regression,
+end-to-end correctness, backward-compat, confidence-gate correctness) —
+confirmed 7 failed / 1 passed-by-coincidence before implementation.
+
+IMPLEMENT: `src/config.py` (`ENABLE_HYBRID_TEXT_SEARCH`, `SPARSE_VECTOR_NAME`,
+`SPARSE_EMBED_MODEL`), `src/rag/embeddings.py` (`embed_sparse_docs`/
+`embed_sparse_query`), `src/rag/vector_store.py` (`_ensure()` gained
+`sparse_vector_name`; `_point_vectors()` builds `{"": dense, "bm25": SparseVector}`
+per point; `search_text()` gained `query_text` — hybrid Prefetch+Fusion when
+given, unchanged dense-only path when not), `src/rag/search.py` (`retrieve()`
+passes `query_text=question`).
+
+**Correctness fix found and applied before shipping**: Qdrant's native RRF
+fusion score is rank-quantized, not magnitude-based (verified: an off-topic
+query's top score, 0.5, landed nearly as high as an on-topic one's, 1.0 — versus
+dense-only's cleaner 0.41 vs 0.64 separation on the same probe). Feeding this
+into `TEXT_CONFIDENCE_THRESHOLD`'s abstain gate would have weakened grounding.
+Fix: `retrieve()` computes `best_text` from a separate plain dense-only call
+(unchanged pre-component-15 semantics); the hybrid call only changes WHICH
+candidates get returned for citations, never the gate. Locked down by
+`test_retrieve_confidence_gate_uses_dense_only_score_not_hybrid_fusion_score`.
+
+**Live migration** (user-approved): dropped + recreated the production
+`moments_text` collection (6661 points, no sparse config) with sparse config from
+creation, reset all 12 video + 16 document rows to `pending`, reseeded via
+`docker compose up seed` — real re-embedding of all 24 sources, exit 0,
+"[seed] corpus complete — everything indexed". New collection: 3141 points,
+`sparse_vectors: ['bm25']` confirmed live.
+
+GREEN: `uv run pytest tests/ -q` → **150 passed** (was 135; +15 new — 9 hybrid +
+6 confidence-gate/rerank-adjacent — 0 regressions) immediately after
+implementation, **168 passed** after components 16-17 were added on top.
+
+**Live before/after** (BASE_URL=http://localhost:8000, real stack, real corpus):
+- `recall_at_10`: **0.667 (official) / 0.729 (uncontended) → 0.76 PASS** — the
+  first time this gate has ever passed in this project.
+- `precision_at_10`: **0.635 → 0.625** — essentially unchanged (within noise).
+  Consistent with the earlier root-cause diagnosis: most "off-topic" hits were
+  either the 4 generic background sample videos (a metric-definition blind spot,
+  not a retrieval defect) or genuine cross-triplet content adjacency — neither is
+  something lexical/sparse matching directly fixes.
+- `answer_quality.py`: relevancy **5.0 → 5.0** (unchanged), faithfulness
+  **0.923 → 0.96** (48/52 → 48/50 citations supported) — small improvement, no
+  regression.
+
+**Commit**: pending — `src/config.py`, `src/rag/{embeddings,vector_store,search}.py`,
+`tests/test_hybrid_search.py`.
+
+---
+
+### 2026-07-28 — Component 16: cross-encoder reranker (DESIGN.md §3b)
+
+Scope: `_fuse()`'s RRF is rank-based (score-agnostic) by design — component 12's
+precision@10 diagnosis found this lets a borderline match tie a genuinely strong
+one. A cross-encoder (`cross-encoder/ms-marco-MiniLM-L-6-v2`, via
+`sentence_transformers.CrossEncoder` — same library CLIP already depends on)
+reads (question, passage) pairs directly, re-scoring the FULL fused window list
+before truncation to `TOP_K`. Frame-only windows (nothing for a text
+cross-encoder to read) keep their original order and rank after every
+text-scored window — never crash, never get force-scored on nothing.
+
+RED: 6 tests in `tests/test_rerank.py` (reorder-by-score, frame-only ordering,
+all-frame-only no-op with an assertion the model is never even invoked, empty
+input, multi-frame-only order preservation, one REAL cross-encoder proof) —
+confirmed failing on collection (`ImportError: cannot import name 'rerank'`).
+
+IMPLEMENT: `src/config.py` (`RERANK_ENABLED` default true, `RERANK_MODEL`),
+`src/rag/rerank.py` (new), `src/rag/search.py`'s `retrieve()` reranks the full
+fused list before slicing to `top_k`.
+
+GREEN: `uv run pytest tests/test_rerank.py -q` → **6 passed** (47s first run,
+downloading the ~90MB model + `sentence-transformers`/`torch`, which were
+declared `requirements.txt` dependencies but missing from this LOCAL dev venv —
+installed to catch it up to spec, same fix noted for `openai` earlier this
+session). Full suite unaffected elsewhere.
+
+**Live latency disclosure** (component 16's stated primary eval): `bench.py`'s
+own `search_p95` metric (`/ask_stream` round-trip) is dominated by the OpenAI
+answer-generation call and proved noise-dominated for this comparison — a
+RERANK_ENABLED=false run measured 18711ms vs RERANK_ENABLED=true's 9753ms,
+backwards from what rerank overhead would predict, clearly LLM-call jitter, not
+a real effect. Re-measured properly: 20 warmed, in-process `retrieve()` calls
+(no LLM, isolates retrieval+rerank only) — **RERANK_ENABLED=true: mean 1565.9ms,
+p95 1877.4ms** vs **RERANK_ENABLED=false: mean 1567.2ms, p95 1633.0ms**. Steady-
+state mean cost is negligible; p95 tail cost is a real but modest ~244ms once the
+model is warm (a one-time ~seconds-scale model-load cost is paid ONCE per
+process/container lifetime, not per query — confirmed by an unwarmed run showing
+a 68-second outlier on the very first call only).
+
+**Commit**: pending — `src/config.py`, `src/rag/rerank.py`, `src/rag/search.py`,
+`tests/test_rerank.py`.
+
+---
+
+### 2026-07-28 — Component 17: query enhancement (DESIGN.md §3b)
+
+Scope: **opt-in** (`QUERY_ENHANCEMENT_ENABLED`, default false — an LLM call
+before retrieval starts adds real latency to every search, and
+`accept_latency_p95_ms` is already red; this must never become the baseline
+graders/reviewers see unless explicitly turned on). One LLM call
+(`llm.env_config()`'s server-wide model only, never a tenant's BYO model)
+classifies the question and returns 1-3 query strings — decomposition for a
+compound question, alternate phrasings for a single-topic one, or the question
+unchanged. Best-effort: any failure falls back to `[question]`, never blocks
+retrieval.
+
+`src/llm.py` gained `complete(system, prompt, cfg)` — a plain text-only
+completion (no images, no moments/citation framing), reusing the existing
+openai/anthropic provider dispatch. Needed because `answer()`'s SYSTEM prompt is
+specifically about citing numbered "moments," which would confuse a query-
+rewriting task; `caption_image()`'s existing reuse-via-fake-moment trick doesn't
+fit here since there's no image/evidence at all for this task.
+
+RED: 12 tests in `tests/test_query_enhance.py` (parse logic: plain/fenced JSON,
+malformed input, blank-entry stripping, max-queries cap; enhance_query: no-LLM
+fallback, success path, call-failure fallback, unparseable-response fallback) —
+designed alongside the implementation rather than strictly RED-first (both are
+small/tightly coupled), but GREEN confirms real, meaningful behavior, not tests
+retrofitted to whatever the code happened to do.
+
+Also added to `tests/test_cross_source_search.py`: `_merge_hits`/`_hit_key`
+(dedup-by-point-identity + re-sort-by-score across possibly-multiple sub-query
+result lists — a single-list input is a verified no-op, proving disabled-by-
+default behavior is byte-identical to before this component existed) and
+`retrieve()` wiring tests (disabled → exactly 1 search call per branch;
+enabled → 1 call per enhanced query, mocking `query_enhance.enhance_query`).
+
+IMPLEMENT: `src/config.py` (`QUERY_ENHANCEMENT_ENABLED` default false),
+`src/rag/query_enhance.py` (new), `src/rag/search.py` (`_hit_key`/`_merge_hits`
+added; `retrieve()` calls `enhance_query()` when enabled, searches each branch
+once per enhanced query, merges before `_fuse()`; the confidence gate always
+scores the ORIGINAL question only, never a sub-query, so enabling this can only
+add candidates, never change the abstain decision).
+
+GREEN: `uv run pytest tests/ -q` → **168 passed** (was 150; +18 new, 0
+regressions).
+
+**Live before/after** (`recall_at_10`, component 17's stated primary eval):
+`QUERY_ENHANCEMENT_ENABLED=false` (default): **0.76**. `=true`: **0.76** — no
+additional lift measured beyond components 15-16 alone. Plausible reason: the 16
+labeled queries are already simple, well-phrased single-topic questions (not
+particularly compound), so decomposition rarely has anything to split, and
+expansion's alternate phrasings apparently don't surface meaningfully different
+chunks once hybrid+rerank are already active. Not regressed either — a neutral,
+honestly-reported result, left off by default as scoped.
+
+**Commit**: pending — `src/config.py`, `src/llm.py`, `src/rag/query_enhance.py`,
+`src/rag/search.py`, `tests/test_query_enhance.py`,
+`tests/test_cross_source_search.py`.

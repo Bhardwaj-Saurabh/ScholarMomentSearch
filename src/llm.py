@@ -222,3 +222,37 @@ def _answer_anthropic(cfg: LLMConfig, question: str, moments: list[dict]) -> str
         messages=[{"role": "user", "content": blocks}],
     )
     return "".join(b.text for b in resp.content if b.type == "text").strip()
+
+
+def _complete_openai(cfg: LLMConfig, system: str, prompt: str) -> str:
+    from openai import OpenAI
+
+    client = OpenAI(api_key=cfg.api_key or "not-needed", base_url=_base_url(cfg))
+    resp = client.chat.completions.create(
+        model=cfg.model,
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=cfg.max_tokens,
+    )
+    return (resp.choices[0].message.content or "").strip()
+
+
+def _complete_anthropic(cfg: LLMConfig, system: str, prompt: str) -> str:
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=cfg.api_key, base_url=cfg.base_url or None)
+    resp = client.messages.create(
+        model=cfg.model, max_tokens=cfg.max_tokens, system=system,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return "".join(b.text for b in resp.content if b.type == "text").strip()
+
+
+def complete(system: str, prompt: str, cfg: LLMConfig) -> str:
+    """Plain text-only completion — no images, no moments/citation framing.
+    For utility tasks that need an LLM call but aren't answering FROM
+    retrieved evidence (e.g. DESIGN.md component 17's query enhancement).
+    Reuses the same provider dispatch as answer()/caption_image()."""
+    if cfg.provider == "anthropic":
+        return _complete_anthropic(cfg, system, prompt)
+    return _complete_openai(cfg, system, prompt)

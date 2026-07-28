@@ -28,6 +28,7 @@ from qdrant_client.http import models as qm
 from ..config import (
     CLIP_DIM,
     CLIP_MODEL,
+    ENABLE_HYBRID_TEXT_SEARCH,
     QDRANT_API_KEY,
     QDRANT_COLLECTION,
     QDRANT_HNSW_ON_DISK,
@@ -35,6 +36,7 @@ from ..config import (
     QDRANT_ON_DISK,
     QDRANT_QUANTIZATION,
     QDRANT_URL,
+    SPARSE_VECTOR_NAME,
     TEXT_COLLECTION,
     TEXT_EMBED_DIM,
 )
@@ -101,8 +103,13 @@ def _user_filter(user_id: str, video_id: str | None = None,
     return qm.Filter(must=must)
 
 
-def _ensure(collection: str, dim: int) -> None:
-    """Create a collection (low-RAM profile) + tenant/video payload indexes."""
+def _ensure(collection: str, dim: int, sparse_vector_name: str | None = None) -> None:
+    """Create a collection (low-RAM profile) + tenant/video payload indexes.
+
+    sparse_vector_name (component 15): the ONLY point this can be set — this
+    Qdrant server version rejects adding a sparse vector config to an
+    already-populated collection (verified live, EVIDENCE.md), so a sparse
+    config missing here can't be retrofitted later without a drop+recreate."""
     c = client()
     if not c.collection_exists(collection):
         c.create_collection(
@@ -117,6 +124,9 @@ def _ensure(collection: str, dim: int) -> None:
                 qm.ScalarQuantization(scalar=qm.ScalarQuantizationConfig(
                     type=qm.ScalarType.INT8, always_ram=True))
                 if QDRANT_QUANTIZATION else None
+            ),
+            sparse_vectors_config=(
+                {sparse_vector_name: qm.SparseVectorParams()} if sparse_vector_name else None
             ),
         )
     # Tenant index on user_id: co-locates a tenant's points so per-user
@@ -148,7 +158,8 @@ def ensure_text_collection() -> None:
     """Transcript (bge text) collection — the second branch, now also home to
     paper/deck chunks. source_id gets its own index attempt here (not in
     _ensure): frame payloads in the visual collection never carry that field."""
-    _ensure(TEXT_COLLECTION, TEXT_EMBED_DIM)
+    _ensure(TEXT_COLLECTION, TEXT_EMBED_DIM,
+           sparse_vector_name=SPARSE_VECTOR_NAME if ENABLE_HYBRID_TEXT_SEARCH else None)
     try:
         client().create_payload_index(collection_name=TEXT_COLLECTION, field_name="source_id",
                                       field_schema=qm.PayloadSchemaType.KEYWORD)
@@ -194,14 +205,33 @@ def search(vector: np.ndarray, user_id: str, *, top_k: int,
 
 # ── Transcript (text) branch ─────────────────────────────────────────────────
 
+def _point_vectors(vectors: np.ndarray, texts: list[str]) -> list[Any]:
+    """Component 15: each point's dense vector, plus a BM25 sparse vector
+    derived from its own text, when hybrid search is enabled — a bare dense
+    list (unchanged, pre-component-15 shape) otherwise. Lazy-imports
+    embeddings (mirrors _dim()'s existing lazy import) so a plain video-only
+    deploy with hybrid disabled never pays for loading the sparse model."""
+    if not ENABLE_HYBRID_TEXT_SEARCH or not texts:
+        return [vec.tolist() for vec in vectors]
+    from .embeddings import embed_sparse_docs
+
+    sparse_vecs = embed_sparse_docs(texts)
+    return [
+        {"": vec.tolist(), SPARSE_VECTOR_NAME: qm.SparseVector(
+            indices=sparse.indices.tolist(), values=sparse.values.tolist())}
+        for vec, sparse in zip(vectors, sparse_vecs)
+    ]
+
+
 def upsert_chunks(user_id: str, video_id: str, vectors: np.ndarray,
                   payloads: list[dict[str, Any]]) -> None:
     """Transcript chunks into the text collection. IDs are uuid5 of
     '<video_id>:text:<i>' so re-runs overwrite, and never collide with frame ids."""
+    point_vectors = _point_vectors(vectors, [p.get("text", "") for p in payloads])
     points = [
         qm.PointStruct(id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{video_id}:text:{i}")),
-                       vector=vec.tolist(), payload=payload)
-        for i, (vec, payload) in enumerate(zip(vectors, payloads))
+                       vector=vec, payload=payload)
+        for i, (vec, payload) in enumerate(zip(point_vectors, payloads))
     ]
     if points:
         client().upsert(collection_name=TEXT_COLLECTION, points=points, wait=True)
@@ -209,19 +239,54 @@ def upsert_chunks(user_id: str, video_id: str, vectors: np.ndarray,
 
 def search_text(vector: np.ndarray, user_id: str, *, top_k: int,
                 video_id: str | None = None,
-                video_ids: list[str] | None = None) -> list[dict[str, Any]]:
+                video_ids: list[str] | None = None,
+                query_text: str | None = None) -> list[dict[str, Any]]:
+    """query_text (component 15): when given (and hybrid enabled), fuses the
+    dense vector search with a BM25 sparse search of the same query, natively
+    in Qdrant (Prefetch + FusionQuery). Omitted -> the original dense-only
+    path, unchanged, for backward compatibility with every existing caller.
+
+    CRITICAL (verified live, EVIDENCE.md): the tenant filter is applied to
+    EACH Prefetch individually, not only passed once at the top level — a
+    top-level-only filter does NOT scope Qdrant's prefetch legs at all, which
+    would silently leak another tenant's data through the hybrid path."""
+    qfilter = _user_filter(user_id, video_id, video_ids)
     try:
-        hits = client().query_points(
-            collection_name=TEXT_COLLECTION,
-            query=vector.tolist(),
-            limit=top_k,
-            query_filter=_user_filter(user_id, video_id, video_ids),
-            with_payload=True,
-            search_params=qm.SearchParams(
-                quantization=qm.QuantizationSearchParams(rescore=True)
-                if QDRANT_QUANTIZATION else None,
-            ),
-        ).points
+        if ENABLE_HYBRID_TEXT_SEARCH and query_text:
+            from .embeddings import embed_sparse_query
+
+            sparse = embed_sparse_query(query_text)
+            hits = client().query_points(
+                collection_name=TEXT_COLLECTION,
+                prefetch=[
+                    qm.Prefetch(
+                        query=vector.tolist(), using="", filter=qfilter, limit=top_k,
+                        params=qm.SearchParams(
+                            quantization=qm.QuantizationSearchParams(rescore=True)
+                            if QDRANT_QUANTIZATION else None),
+                    ),
+                    qm.Prefetch(
+                        query=qm.SparseVector(indices=sparse.indices.tolist(),
+                                              values=sparse.values.tolist()),
+                        using=SPARSE_VECTOR_NAME, filter=qfilter, limit=top_k,
+                    ),
+                ],
+                query=qm.FusionQuery(fusion=qm.Fusion.RRF),
+                limit=top_k,
+                with_payload=True,
+            ).points
+        else:
+            hits = client().query_points(
+                collection_name=TEXT_COLLECTION,
+                query=vector.tolist(),
+                limit=top_k,
+                query_filter=qfilter,
+                with_payload=True,
+                search_params=qm.SearchParams(
+                    quantization=qm.QuantizationSearchParams(rescore=True)
+                    if QDRANT_QUANTIZATION else None,
+                ),
+            ).points
     except Exception as exc:
         if "doesn't exist" in str(exc) or "Not found" in str(exc):
             return []
@@ -235,10 +300,11 @@ def upsert_document_chunks(user_id: str, source_id: str, kind: str, vectors: np.
     the shared cross-source semantic space (DESIGN.md component 4). IDs are
     uuid5 of '<source_id>:<kind>:<i>' so re-runs overwrite, and never collide
     with video ids ('<video_id>:text:<i>')."""
+    point_vectors = _point_vectors(vectors, [p.get("text", "") for p in payloads])
     points = [
         qm.PointStruct(id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source_id}:{kind}:{i}")),
-                       vector=vec.tolist(), payload=payload)
-        for i, (vec, payload) in enumerate(zip(vectors, payloads))
+                       vector=vec, payload=payload)
+        for i, (vec, payload) in enumerate(zip(point_vectors, payloads))
     ]
     if points:
         client().upsert(collection_name=TEXT_COLLECTION, points=points, wait=True)

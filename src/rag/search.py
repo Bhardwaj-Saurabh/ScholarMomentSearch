@@ -28,6 +28,30 @@ def _seconds(ms: int) -> str:
     return f"{s // 60:02d}:{s % 60:02d}"
 
 
+def _hit_key(h: dict[str, Any]) -> tuple:
+    """Point identity for dedup across possibly-multiple sub-query result
+    sets (component 17) — a video frame (video_id+idx), a video transcript
+    chunk (video_id+ms), or a document chunk (source_id+page/slide)."""
+    return (h.get("video_id"), h.get("idx"), h.get("ms"),
+           h.get("source_id"), h.get("page"), h.get("slide"))
+
+
+def _merge_hits(hit_lists: list[list[dict]]) -> list[dict]:
+    """Dedup by point identity across N sub-query result lists (keeping the
+    best-scoring instance of each), then re-sort by score descending so
+    _fuse()'s rank-based RRF still sees a properly ordered list regardless of
+    which sub-query surfaced a hit. A single list in -> that same list right
+    back out, sorted (a verified no-op when query enhancement is disabled,
+    since Qdrant already returns hits best-first)."""
+    best: dict[tuple, dict] = {}
+    for hits in hit_lists:
+        for h in hits:
+            key = _hit_key(h)
+            if key not in best or h["score"] > best[key]["score"]:
+                best[key] = h
+    return sorted(best.values(), key=lambda h: h["score"], reverse=True)
+
+
 def _fuse(visual_hits: list[dict], text_hits: list[dict]) -> list[dict]:
     """Reciprocal-Rank-Fusion of the two branches into time windows.
 
@@ -124,21 +148,62 @@ def retrieve(question: str, user_id: str, *, top_k: int | None = None,
     the search to chosen videos (UI select/unselect)."""
     k = top_k or TOP_K
 
+    # Component 17: opt-in (QUERY_ENHANCEMENT_ENABLED, default false) — widens
+    # the candidate pool with LLM-generated sub-questions/paraphrases. The
+    # confidence gate below always scores the ORIGINAL question only (never a
+    # sub-query), so enabling this can only add candidates, never change the
+    # abstain decision. Disabled -> queries == [question] always, and
+    # _merge_hits([hits]) is a verified no-op, so behavior is byte-identical
+    # to before this component existed.
+    queries = [question]
+    if config.QUERY_ENHANCEMENT_ENABLED:
+        from .query_enhance import enhance_query
+
+        queries = enhance_query(question)
+
     # Visual branch — CLIP text→image.
-    vhits = vector_store.search(embed_text(question), user_id, top_k=BRANCH_TOP_K,
-                                video_id=video_id, video_ids=video_ids)
+    vhits = _merge_hits([
+        vector_store.search(embed_text(q), user_id, top_k=BRANCH_TOP_K,
+                           video_id=video_id, video_ids=video_ids)
+        for q in queries
+    ])
     best_visual = vhits[0]["score"] if vhits else 0.0
 
     # Text branch — bge query→transcript-chunk (only if transcript is enabled).
     thits: list[dict] = []
     best_text = 0.0
     if config.ENABLE_TRANSCRIPT:
-        thits = vector_store.search_text(embed_query(question), user_id,
-                                         top_k=BRANCH_TOP_K, video_id=video_id,
-                                         video_ids=video_ids)
-        best_text = thits[0]["score"] if thits else 0.0
+        # Gate 1 needs a score on the SAME scale CONFIDENCE_THRESHOLD/
+        # TEXT_CONFIDENCE_THRESHOLD were calibrated against (a continuous,
+        # magnitude-based cosine similarity) — component 15's hybrid fusion
+        # score is Qdrant's own RRF, which is rank-quantized, not magnitude-
+        # based (verified live: an off-topic query's top RRF score can land
+        # nearly as high as an on-topic one's — RRF only encodes WHICH rank a
+        # hit got, never how strong the match actually was). So the plain
+        # dense-only top score for the ORIGINAL question (unchanged from
+        # before component 15/17) still powers the confidence gate; the
+        # hybrid, possibly-multi-query calls below only change WHICH
+        # candidates get returned for citations, never the gate.
+        gate_hits = vector_store.search_text(embed_query(question), user_id, top_k=1,
+                                             video_id=video_id, video_ids=video_ids)
+        best_text = gate_hits[0]["score"] if gate_hits else 0.0
+        thits = _merge_hits([
+            vector_store.search_text(embed_query(q), user_id, top_k=BRANCH_TOP_K,
+                                     video_id=video_id, video_ids=video_ids, query_text=q)
+            for q in queries
+        ])
 
-    windows = _fuse(vhits, thits)[:k]
+    windows = _fuse(vhits, thits)
+    if config.RERANK_ENABLED:
+        # Component 16: RRF is rank-based (score-agnostic) — a cross-encoder
+        # reads the actual question against each window's actual text,
+        # correcting ties/near-ties fusion alone can't distinguish. Reranks
+        # the FULL fused list, THEN truncates, so top_k gets to pick from
+        # every candidate fusion surfaced, not just its own top guesses.
+        from .rerank import rerank
+
+        windows = rerank(question, windows)
+    windows = windows[:k]
     videos = db.videos_by_ids(sorted({w["video_id"] for w in windows if w["video_id"]}))
     documents = db.documents_by_ids(sorted({w["text"]["source_id"] for w in windows
                                             if w["video_id"] is None}))

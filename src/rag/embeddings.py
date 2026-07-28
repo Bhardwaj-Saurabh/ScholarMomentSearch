@@ -106,6 +106,33 @@ def embed_query_local(text: str) -> np.ndarray:
     return np.asarray(vec, dtype=np.float32)
 
 
+# ── Sparse (BM25) text embeddings — the lexical half of hybrid search ────────
+# Component 15 (DESIGN.md §3b): Qdrant's own native fusion needs a sparse
+# vector alongside the dense bge one, fused server-side (Prefetch +
+# FusionQuery) rather than us hand-rolling BM25 ourselves.
+
+@lru_cache
+def _sparse_model():
+    from fastembed import SparseTextEmbedding
+
+    return SparseTextEmbedding(config.SPARSE_EMBED_MODEL)
+
+
+def embed_sparse_docs(texts: list[str]) -> list:
+    """BM25-style sparse vectors for transcript/paper/deck chunks (passage
+    side)."""
+    if not texts:
+        return []
+    with _lock:
+        return list(_sparse_model().passage_embed(texts))
+
+
+def embed_sparse_query(text: str):
+    """BM25-style sparse vector for a search query."""
+    with _lock:
+        return next(iter(_sparse_model().query_embed([text])))
+
+
 # ── OpenAI / OpenAI-compatible text embeddings (TEXT_EMBED_PROVIDER=openai) ────
 # Hosted alternative to bge for the transcript branch. Reuses the OpenAI client
 # (already a dependency for the LLM), so one OpenAI key powers both the answer
