@@ -132,6 +132,10 @@ A component is DONE only when: its tests are green, relevant SLA rows pass,
 | 16 | cross-encoder reranker | unit: reorders toward relevance, frame-only windows don't crash; live: before/after + search_p95 on/off |
 | 17 | query enhancement (decomposition/expansion) | unit: prompt/parse/dedup logic; live: recall@10 flag on/off |
 | 18 | live metrics / observability dashboard | unit: route-template bucketing, usage capture, cost fallback, queue aggregate; probe: `/metrics` + `/admin/metrics` 401 without token, 200 with |
+| 19 | Redis Stack infra + fail-open cache client | unit: cache wrapper never raises on broken Redis; `enabled()` false when `REDIS_URL` unset; live: kill `redis` container, confirm search/ingest still work |
+| 20 | Tier 2 mechanical caches (query-embedding, frame-bytes, poll-read) | unit: repeat call hits cache (mock call-count 1, not 2); live: `bench.py` `search_p95` warm vs. cold |
+| 21 | Tier 3 ingest-side caches (caption, query-enhancement) | unit: same image+model+prompt-version caches; prompt-version bump or model change invalidates |
+| 22 | Tier 1 semantic answer cache (RediSearch vector match) | unit: identical question hits; corpus_version bump after caching makes it miss; adversarial close-but-different-source pair does NOT cross-hit; live: `answer_quality.py` before/after, latency win warm vs. cold |
 
 Cross-cutting, always: `grounding-auditor` after 7/8/10; search-during-ingest ratio
 ≤ 1.3× after 4/5; provided-endpoint regression (probe 6) after everything.
@@ -149,6 +153,15 @@ Components 15–17 (DESIGN.md §3b, added 2026-07-28) are retrieval-quality upgr
 following up on component 12's precision@10 diagnosis. Component 17 is opt-in
 (`QUERY_ENHANCEMENT_ENABLED`, default false) — never let it change the baseline
 latency/recall numbers reviewers see unless explicitly turned on.
+
+Components 19–22 (DESIGN.md §3d, added 2026-07-28) are a Redis caching layer, not
+part of the assignment's grading rubric either. `REDIS_URL` unset ⇒ caching fully
+disabled, never a crash (same degrade philosophy as `CLIP_SERVICE_URL` unset).
+Every cache failure must fail OPEN — bypass and serve live, never raise; this is
+enforced in exactly one place (`src/cache.py`) that every other component calls
+into. Component 22 (semantic answer cache) is the one with real grounding risk —
+its adversarial "close but different source must not cross-hit" eval is not
+optional, per AGENTS.md's grounded-or-silent non-negotiable.
 
 ## 8. Definition of done for the whole assignment
 
