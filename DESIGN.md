@@ -105,6 +105,34 @@ Primary eval per component, mirrored into `CLAUDE.md` §7:
 - **16** — unit: reranker reorders a candidate list toward the more textually-relevant one, frame-only windows never crash the reranker; live: same before/after re-run as component 15, plus `search_p95` with `RERANK_ENABLED` on vs. off (latency cost must be disclosed, not hidden).
 - **17** — unit: prompt/response parsing, dedup-and-resort logic; a query classified as simple returns `[question]` unchanged; live: recall@10 with the flag on vs. off (this is the one most likely to move recall, since it's the only one that changes what gets retrieved rather than how it's ranked).
 
+### 3c. Live metrics / observability dashboard (added 2026-07-28, DECIDED — own scope)
+
+Not part of the assignment's grading (`eval/rubric.json`/`benchmark/sla.json` don't
+gate on it) — an operator-facing addition the user asked for directly. Confirmed
+with the user: (a) both new endpoints require the admin bearer token, same
+`require_auth` dependency the other admin-sensitive routes already use; (b) scope
+is global/admin-wide (all tenants), not per-tenant — this is an ops dashboard, not
+a user-facing feature; (c) in-memory only, resets on process restart — this is a
+*live* dashboard (3s auto-refresh), not a persisted analytics/BI page, so no new
+DB table for ephemeral request/token counters.
+
+| # | Component | File | Notes |
+|---|-----------|------|-------|
+| 18 | Metrics collection + endpoints | `src/metrics.py` (new), `src/app.py`, `src/llm.py`, `src/db.py`, `src/api/metrics.py` (new) | In-process, lock-protected counters (mirrors the `_INFLIGHT`-style dict pattern already used elsewhere): a `@app.middleware("http")` in `app.py` times every request and buckets it by ROUTE TEMPLATE (`request.scope["route"].path`, not the raw path — avoids one row per `video_id`) + HTTP status; `llm.py`'s 4 call sites (`_answer_openai/_answer_anthropic/_complete_openai/_complete_anthropic`) now read `resp.usage` (OpenAI: `prompt_tokens`/`completion_tokens`; Anthropic: `input_tokens`/`output_tokens`) instead of discarding it, tagged by `kind` ("answer"/"caption"/"complete"/"ping") so only real answer-synthesis calls count toward "LLM answers"; a small hardcoded `model -> ($/1M input, $/1M output)` pricing table estimates cost, with an explicit $0 fallback for unrecognized/self-hosted models (a tenant's BYO vLLM/Ollama endpoint has no real per-token billing) — disclosed as a best-effort estimate from a static table, not live pricing-API data. `search.py::ask()` is wrapped (not restructured) so every one of its return paths gets counted toward the grounding/abstain-rate stat. `db.py` gains `queue_status_counts()` — a `GROUP BY kind, status` rollup across `ms_videos` UNION `ms_documents`, ALL tenants (existing `list_sources()` is tenant-scoped, wrong shape for an ops view — a new function, not a repurposed one). `GET /metrics` (Prometheus text exposition format) and `GET /admin/metrics` (JSON, for the UI's own polling) both gated by `Depends(require_auth)`. |
+| — | UI: Metrics page | `ui/index.html` | New sidebar nav item + `data-view="metrics"` panel: stat cards (LLM cost est., input/output tokens, LLM answers, requests, rate-limited [count of 429 *responses this API returned*, honestly 0 until/unless one ever occurs — no new rate-limiting logic was added, only passive counting], **abstain rate** [user-requested addition, beyond the pasted spec]), a per-route latency table (Route/Count/Avg/p50/p95), the live ingest-queue table (Kind/Status/Count), and a response-by-status breakdown — all polled every 3s via `GET /admin/metrics`. Since the browser UI has never sent an Authorization header for ANY call (a pre-existing gap, confirmed live: with `ADMIN_TOKEN` set, the UI's existing register/retry/delete calls already 401 today — disclosed, not fixed here, out of scope for this component), the Metrics page gets its own small admin-token entry (stored in `localStorage`, sent only on this page's polling calls) rather than retrofitting auth into the unrelated existing mutating calls. |
+
+Primary eval:
+- unit: request middleware buckets by route template not raw path; LLM usage
+  capture correctly reads both provider shapes; cost table's unknown-model
+  fallback is `0`, not a crash; `queue_status_counts()` aggregates across BOTH
+  tables and ALL tenants; `ask()`'s wrapper counts every return path exactly
+  once (no double-count, no missed path).
+- contract-probe: `GET /metrics` and `GET /admin/metrics` both 401 without the
+  bearer token, 200 with it; `/metrics` is valid Prometheus text exposition
+  format.
+- manual: the UI's Metrics page renders live, non-fabricated numbers after a
+  handful of real `/ask_stream` calls, auto-refreshing every 3s.
+
 **How content gets in (product model):** (1) seeded shared corpus at boot — day-one
 value; (2) self-serve at runtime — any user pastes a YouTube/arXiv/deck URL in the
 UI, tenant-scoped to them; (3) bulk backfill via the admin API. All three ride the

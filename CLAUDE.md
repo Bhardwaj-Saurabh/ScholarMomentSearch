@@ -131,6 +131,7 @@ A component is DONE only when: its tests are green, relevant SLA rows pass,
 | 15 | hybrid dense+sparse text search | unit: lexical-only match surfaces; live: precision@10 + answer_quality before/after |
 | 16 | cross-encoder reranker | unit: reorders toward relevance, frame-only windows don't crash; live: before/after + search_p95 on/off |
 | 17 | query enhancement (decomposition/expansion) | unit: prompt/parse/dedup logic; live: recall@10 flag on/off |
+| 18 | live metrics / observability dashboard | unit: route-template bucketing, usage capture, cost fallback, queue aggregate; probe: `/metrics` + `/admin/metrics` 401 without token, 200 with |
 
 Cross-cutting, always: `grounding-auditor` after 7/8/10; search-during-ingest ratio
 ≤ 1.3× after 4/5; provided-endpoint regression (probe 6) after everything.
@@ -138,6 +139,11 @@ Cross-cutting, always: `grounding-auditor` after 7/8/10; search-during-ingest ra
 Components 12–14 (DESIGN.md §3a, added 2026-07-28) are quality-eval hardening, not
 grading-rubric requirements — they get their own `benchmark/quality_gates.json`,
 never `sla.json`/`rubric.json` (those stay frozen, per §2 E5).
+
+Component 18 (DESIGN.md §3c, added 2026-07-28) is an operator-facing addition, not
+part of the assignment's grading rubric either. Both new endpoints require the
+admin bearer token (confirmed with the user) — never leave `/metrics`/
+`/admin/metrics` ungated.
 
 Components 15–17 (DESIGN.md §3b, added 2026-07-28) are retrieval-quality upgrades
 following up on component 12's precision@10 diagnosis. Component 17 is opt-in
