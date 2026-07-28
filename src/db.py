@@ -79,6 +79,11 @@ CREATE TABLE IF NOT EXISTS ms_documents (
 CREATE INDEX IF NOT EXISTS ms_documents_user_idx   ON ms_documents (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS ms_documents_status_idx ON ms_documents (status);
 CREATE INDEX IF NOT EXISTS ms_documents_hash_idx   ON ms_documents (user_id, source_hash);
+-- Added post-launch (Part 0 resilience finding): lets src/reconciler.py ask
+-- Prefect for a stuck row's OWN flow run state, instead of guessing from a
+-- timestamp alone. NULL for anything seeded directly in-process (no Prefect
+-- run was ever scheduled for it) — reconciler.py skips those.
+ALTER TABLE ms_documents ADD COLUMN IF NOT EXISTS flow_run_id TEXT;
 
 -- Bring-your-own-model: a tenant's hosted LLM endpoint (vLLM / Ollama / any
 -- OpenAI-compatible server, NVIDIA NIM, or Anthropic). When a row exists the
@@ -243,6 +248,32 @@ def set_document_status(doc_id: str, status: str, *, error: str | None = None,
             (status, error, title, chunk_count, page_count, source_hash,
              embed_version, progress, doc_id),
         )
+
+
+def set_document_flow_run_id(doc_id: str, flow_run_id: str | None) -> None:
+    """Recorded at every (re-)enqueue so src/reconciler.py can later ask
+    Prefect for THIS specific run's state, not just guess from a timestamp."""
+    with pool().connection() as conn:
+        conn.execute("UPDATE ms_documents SET flow_run_id = %s WHERE id = %s",
+                     (flow_run_id, doc_id))
+
+
+def stale_documents(statuses: tuple[str, ...], older_than_s: float) -> list[dict]:
+    """Documents in one of `statuses` whose row hasn't been touched in
+    `older_than_s` seconds — candidates for src/reconciler.py to check
+    against Prefect's own record of that row's flow run (a stale timestamp
+    alone doesn't mean orphaned; it might just be waiting for a free worker
+    slot, which is normal backlog, not a crash)."""
+    with pool().connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM ms_documents
+            WHERE status = ANY(%s) AND updated_at < now() - (%s || ' seconds')::interval
+            ORDER BY updated_at ASC
+            """,
+            (list(statuses), older_than_s),
+        ).fetchall()
+    return rows
 
 
 def set_document_storage_key(doc_id: str, storage_key: str) -> None:

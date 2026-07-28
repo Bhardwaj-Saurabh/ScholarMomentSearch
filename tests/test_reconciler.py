@@ -1,0 +1,206 @@
+"""Part-0 resilience finding, fixed: `bench.py --resilience` killed a worker
+mid-ingest and 2 of 10 documents never reached a terminal state — Docker's
+`restart: unless-stopped` didn't even fire for the killed `--scale` replica,
+and even once a worker was back, the interrupted flow runs stayed stuck
+forever (no flow-level retries, no automatic redelivery). Manually calling
+this repo's own POST /admin/documents/{id}/retry recovered them fine — this
+component automates exactly that recovery, via a background sweep
+(src/reconciler.py) that finds documents stuck in an active status whose OWN
+Prefect flow run has genuinely died (Crashed/Failed/Cancelled — NOT just
+"hasn't updated in a while", which is also true of perfectly healthy work
+still queued behind capacity) and restarts them.
+
+Real throwaway Postgres for the actual stale-row query and end-to-end
+reconcile logic (that IS what's being proven); Prefect's own flow-run-state
+API is mocked (a real check needs a live Prefect Cloud deployment, out of
+scope for a unit test — already exercised for real in this session against
+the live stack, see EVIDENCE.md) and jobs.enqueue_document is mocked (same
+reasoning as component 5/6's own tests).
+"""
+from __future__ import annotations
+
+import pytest
+
+from src import config, db, jobs, reconciler
+
+
+@pytest.fixture(autouse=True)
+def _schema():
+    db.init_schema()
+
+
+@pytest.fixture
+def cleanup():
+    ids = []
+    yield ids
+    for i in ids:
+        db.delete_document(i)
+
+
+def _make_document(doc_id, status, age_s=0, flow_run_id=None):
+    db.upsert_pending_document({"id": doc_id, "user_id": "default", "kind": "paper",
+                               "uri": "https://arxiv.org/pdf/1706.03762",
+                               "storage_key": None, "source_hash": None, "title": "x"})
+    db.set_document_status(doc_id, status)
+    if flow_run_id:
+        db.set_document_flow_run_id(doc_id, flow_run_id)
+    if age_s:
+        with db.pool().connection() as conn:
+            conn.execute("UPDATE ms_documents SET updated_at = now() - (%s || ' seconds')::interval "
+                        "WHERE id = %s", (age_s, doc_id))
+
+
+# ── db.stale_documents() ─────────────────────────────────────────────────────
+
+def test_stale_documents_finds_old_rows_in_the_given_statuses(cleanup):
+    cleanup.append("doc_stale1")
+    _make_document("doc_stale1", "fetching", age_s=200)
+    found = {r["id"] for r in db.stale_documents(("fetching", "parsing", "embedding"), 90)}
+    assert "doc_stale1" in found
+
+
+def test_stale_documents_excludes_recently_updated_rows(cleanup):
+    cleanup.append("doc_fresh1")
+    _make_document("doc_fresh1", "fetching", age_s=0)
+    found = {r["id"] for r in db.stale_documents(("fetching", "parsing", "embedding"), 90)}
+    assert "doc_fresh1" not in found
+
+
+def test_stale_documents_excludes_rows_in_other_statuses(cleanup):
+    cleanup.append("doc_done1")
+    _make_document("doc_done1", "indexed", age_s=200)
+    found = {r["id"] for r in db.stale_documents(("fetching", "parsing", "embedding"), 90)}
+    assert "doc_done1" not in found
+
+
+# ── db.set_document_flow_run_id() ────────────────────────────────────────────
+
+def test_set_document_flow_run_id_persists(cleanup):
+    cleanup.append("doc_fr1")
+    _make_document("doc_fr1", "fetching")
+    db.set_document_flow_run_id("doc_fr1", "flow-run-abc")
+    assert db.get_document("doc_fr1")["flow_run_id"] == "flow-run-abc"
+
+
+# ── reconciler._flow_run_dead() ───────────────────────────────────────────────
+
+class _FakeState:
+    def __init__(self, type_):
+        self.type = type_
+
+
+class _FakeRun:
+    def __init__(self, state_type):
+        self.state = _FakeState(state_type) if state_type else None
+
+
+def test_flow_run_dead_true_for_every_non_completed_state(monkeypatch):
+    """Prefect's own state can't reliably distinguish orphaned from healthy
+    (confirmed live, two distinct ways): a worker SIGKILLed mid-EXECUTION
+    leaves its run 'Running' indefinitely (zombie-run detection is an opt-in
+    Cloud automation, off by default, ~9min even when on); a worker SIGKILLed
+    mid-LAUNCH (before the subprocess ever started) leaves its run stuck at
+    'Pending'/'Submitting' instead — and PENDING/SCHEDULED is ALSO the state
+    of perfectly healthy queued work. By the time this is called the caller
+    has ALREADY confirmed DB staleness (the real signal), so every state
+    except COMPLETED is treated as restart-worthy."""
+    from prefect.client.schemas.objects import StateType
+
+    for bad in (StateType.CRASHED, StateType.FAILED, StateType.CANCELLED,
+               StateType.RUNNING, StateType.PENDING, StateType.SCHEDULED):
+        monkeypatch.setattr(reconciler, "_read_flow_run", lambda fid, _b=bad: _FakeRun(_b))
+        assert reconciler._flow_run_dead("some-id") is True, bad
+
+
+def test_flow_run_dead_false_when_prefect_says_it_already_completed(monkeypatch):
+    """The one state that must NOT be restarted: Prefect says this run
+    already finished. Restarting would risk duplicating finished work — a
+    DB/Prefect desync like this is left for investigation, not auto-fixed."""
+    from prefect.client.schemas.objects import StateType
+
+    monkeypatch.setattr(reconciler, "_read_flow_run", lambda fid: _FakeRun(StateType.COMPLETED))
+    assert reconciler._flow_run_dead("some-id") is False
+
+
+def test_flow_run_dead_false_when_no_flow_run_id():
+    assert reconciler._flow_run_dead(None) is False
+
+
+def test_flow_run_dead_false_on_lookup_error(monkeypatch):
+    def _boom(fid):
+        raise RuntimeError("Prefect Cloud unreachable")
+    monkeypatch.setattr(reconciler, "_read_flow_run", _boom)
+    assert reconciler._flow_run_dead("some-id") is False  # uncertain -> don't touch it
+
+
+# ── reconciler.reconcile_once() ──────────────────────────────────────────────
+
+def test_reconcile_restarts_a_document_whose_flow_run_actually_died(monkeypatch, cleanup):
+    cleanup.append("doc_dead1")
+    _make_document("doc_dead1", "fetching", age_s=200, flow_run_id="dead-run-1")
+    monkeypatch.setattr(reconciler, "_flow_run_dead", lambda fid: True)
+    calls = {}
+
+    def _fake_enqueue(doc_id, user_id, kind):
+        calls["doc_id"] = doc_id
+        return "new-run-id"
+    monkeypatch.setattr(jobs, "enqueue_document", _fake_enqueue)
+
+    n = reconciler.reconcile_once()
+    assert n == 1
+    assert calls["doc_id"] == "doc_dead1"
+    row = db.get_document("doc_dead1")
+    assert row["flow_run_id"] == "new-run-id"
+
+
+def test_reconcile_leaves_a_still_in_flight_document_alone(monkeypatch, cleanup):
+    cleanup.append("doc_alive1")
+    _make_document("doc_alive1", "embedding", age_s=200, flow_run_id="running-1")
+    monkeypatch.setattr(reconciler, "_flow_run_dead", lambda fid: False)
+    calls = {"n": 0}
+    monkeypatch.setattr(jobs, "enqueue_document", lambda *a, **k: calls.__setitem__("n", calls["n"] + 1))
+
+    n = reconciler.reconcile_once()
+    assert n == 0
+    assert calls["n"] == 0
+    assert db.get_document("doc_alive1")["status"] == "embedding"  # untouched
+
+
+def test_reconcile_skips_a_stale_row_with_no_flow_run_id(monkeypatch, cleanup):
+    """Seeded documents (component 10) call ingest_document() directly,
+    in-process — never through Prefect scheduling — so they have no
+    flow_run_id to check. Never guess for these; leave them alone."""
+    cleanup.append("doc_noflow1")
+    _make_document("doc_noflow1", "parsing", age_s=200, flow_run_id=None)
+    calls = {"n": 0}
+    monkeypatch.setattr(jobs, "enqueue_document", lambda *a, **k: calls.__setitem__("n", calls["n"] + 1))
+
+    n = reconciler.reconcile_once()
+    assert n == 0
+    assert calls["n"] == 0
+
+
+def test_reconcile_does_not_restart_the_same_row_twice_within_the_cooldown(monkeypatch, cleanup):
+    cleanup.append("doc_cooldown1")
+    _make_document("doc_cooldown1", "fetching", age_s=200, flow_run_id="dead-run-2")
+    monkeypatch.setattr(reconciler, "_flow_run_dead", lambda fid: True)
+    calls = {"n": 0}
+
+    def _fake_enqueue(doc_id, user_id, kind):
+        calls["n"] += 1
+        return "new-run-id"
+    monkeypatch.setattr(jobs, "enqueue_document", _fake_enqueue)
+
+    reconciler._RECENTLY_RESTARTED.clear()
+    first = reconciler.reconcile_once()
+    # Re-backdate so it still LOOKS stale on the very next tick (as a real
+    # freshly-restarted "pending" row would not, but this isolates the
+    # cooldown behavior specifically from the staleness prefilter).
+    with db.pool().connection() as conn:
+        conn.execute("UPDATE ms_documents SET updated_at = now() - interval '200 seconds' "
+                    "WHERE id = %s", ("doc_cooldown1",))
+    second = reconciler.reconcile_once()
+
+    assert first == 1
+    assert second == 0
+    assert calls["n"] == 1

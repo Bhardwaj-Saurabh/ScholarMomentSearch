@@ -130,6 +130,19 @@ ENABLE_FAIR_DISPATCH = _envbool("ENABLE_FAIR_DISPATCH", True)
 DISPATCH_MAX_INFLIGHT = _int("DISPATCH_MAX_INFLIGHT", _int("WORKER_CONCURRENCY", 2))
 DISPATCH_INTERVAL_S = _float("DISPATCH_INTERVAL_S", 3.0)  # how often the dispatcher tops up
 
+# --- Crash recovery (src/reconciler.py) ---------------------------------------
+# A worker killed mid-flight leaves a document's row stuck in a non-terminal
+# status forever — nothing else ever touches it again (see EVIDENCE.md's
+# Part-0 resilience finding). RECONCILE_STALE_AFTER_S is deliberately well
+# under bench.py's --resilience poll timeout (300s) so a genuine crash gets
+# caught and restarted with room to spare; it's also well above a document's
+# typical per-stage duration (seconds, occasionally ~1-2min under LLM
+# captioning rate limits) so a merely-slow-but-alive run isn't restarted out
+# from under itself — the reconciler still double-checks with Prefect's own
+# record of that row's flow run before acting, this is just a cheap prefilter.
+RECONCILE_STALE_AFTER_S = _int("RECONCILE_STALE_AFTER_S", 90)
+RECONCILE_INTERVAL_S = _float("RECONCILE_INTERVAL_S", 20.0)
+
 # --- Frame sampling (the biggest scaling lever) --------------------------------
 # interval: one frame every FRAME_INTERVAL_SEC (widened to respect MAX_FRAMES).
 # scene:    one frame per detected cut (ffmpeg scene filter).

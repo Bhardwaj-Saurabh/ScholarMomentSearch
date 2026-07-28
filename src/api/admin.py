@@ -47,7 +47,8 @@ def register_document(req: DocumentRequest, uid: str = Depends(user_id_dep)):
     # (done above) -> enqueue -> 202. A failure here is the upstream's fault
     # (Prefect Cloud unreachable), not the caller's — 502, not 400/500.
     try:
-        jobs.enqueue_document(row["id"], uid, req.kind)
+        flow_run_id = jobs.enqueue_document(row["id"], uid, req.kind)
+        db.set_document_flow_run_id(row["id"], flow_run_id)
     except Exception as exc:
         db.set_document_status(row["id"], "failed", error=f"enqueue: {exc}")
         raise HTTPException(502, "Failed to schedule ingestion.") from exc
@@ -70,4 +71,5 @@ def retry_document(doc_id: str, uid: str = Depends(user_id_dep)):
         raise HTTPException(404, "Document not found.")
     db.set_document_status(doc_id, "pending", error=None)
     flow_run_id = jobs.enqueue_document(doc_id, uid, row["kind"])
+    db.set_document_flow_run_id(doc_id, flow_run_id)
     return {"id": doc_id, "status": "pending", "flow_run_id": flow_run_id}

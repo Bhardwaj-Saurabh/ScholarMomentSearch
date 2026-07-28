@@ -63,6 +63,10 @@ def main():
     # only — documents ride FIFO (DESIGN.md component 5's documented choice).
     from . import dispatcher
     dispatcher.start_in_background()
+    # Crash recovery (Part 0 finding): a worker killed mid-flight leaves a
+    # document stuck forever otherwise — see src/reconciler.py.
+    from . import reconciler
+    reconciler.start_in_background()
     limit = int(os.getenv("WORKER_CONCURRENCY", "2"))
     deployments = _build_deployments()
     # serve() talks to Prefect Cloud on startup; a transient outage (e.g. a 503)

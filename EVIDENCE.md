@@ -1465,5 +1465,119 @@ against cited text before the answer is accepted) — a materially bigger
 change than this session's fix, flagged for the user to decide whether to
 pursue further.
 
-**Commit**: pending — `src/rag/search.py`, `src/llm.py`, `tests/test_llm.py`,
-this entry.
+**Commit**: `d8744b0` — "Ground LLM answers in source titles to stop
+cross-source misattribution".
+
+---
+
+## 2026-07-28 — Resilience fix: automatic crash recovery (no_loss_under_crash)
+
+The user directed that README's "No loss" non-negotiable (`--resilience`
+passes) is a must, not a disclosed-and-deferred item. `bench.py --resilience`
+was FAIL (`no_loss_under_crash: False`) at the start of this entry, with two
+layered causes already found in the earlier Part-0 entry: (1) Docker's
+`restart: unless-stopped` never actually fires for a `docker kill`ed
+`--scale`-created worker replica, and (2) even once a worker is back, an
+interrupted flow run has no automatic path to re-execution — no flow-level
+`retries=`, and Prefect's own crash detection turned out to be far weaker
+than DESIGN.md/ARCHITECTURE.md assumed (see below). Manual retry via this
+repo's own `POST /admin/documents/{id}/retry` (component 11) recovered fine —
+this entry automates exactly that as a background sweep.
+
+**Scope**: maintenance/hardening of existing component 5 (queue wiring) +
+component 11 (retry), not a new DESIGN.md component. New file
+`src/reconciler.py`; additive changes to `src/db.py` (new `flow_run_id`
+column + 2 functions), `src/config.py` (2 new tunables), `src/api/admin.py`
+(persist `flow_run_id` at register/retry), `src/worker.py` (start the sweep
+alongside `src/dispatcher.py`'s).
+
+**Design iteration — two real dead ends found and corrected BEFORE landing
+on what actually works**, each confirmed empirically against the live stack,
+not assumed:
+
+1. First attempt: only trust Prefect's flow-run state, treating
+   `CRASHED`/`FAILED`/`CANCELLED` as "safe to restart" and `RUNNING` as
+   "still fine, leave it." Result: **still FAIL**. Investigated why — the
+   orphaned flow run's `read_flow_run()` reported `state.type ==
+   StateType.RUNNING` a full 5+ minutes after its worker container was
+   SIGKILLed. Researched Prefect 3.x's actual crash-detection mechanism:
+   heartbeat-based "zombie run" detection is an **opt-in Cloud-managed
+   automation** (not on by default) and even enabled takes **~9 minutes**
+   (3 missed 3-minute heartbeats) — nowhere near reliable enough for a
+   300s resilience-test window, or for real production recovery speed.
+2. Second attempt: widen "safe to restart" to include `RUNNING` (trusting
+   our own DB timestamp staleness instead of Prefect's state for that case),
+   keep `PENDING`/`SCHEDULED` as "still fine" (genuinely-queued-behind-
+   capacity is a real, common, healthy state we observed repeatedly earlier
+   in Part 0). Result: **still FAIL** — a *different* stuck document this
+   time, found to be sitting in `StateType.PENDING` ("Submitting"): its
+   worker was killed while still LAUNCHING the flow, before it ever reached
+   `Running`. Since `PENDING`/`SCHEDULED` is simultaneously the state of
+   perfectly healthy queued work AND this orphaned-mid-launch case, Prefect's
+   state genuinely cannot distinguish them.
+3. **Final design**: stopped trying to make Prefect's state authoritative at
+   all. `db.stale_documents()` (a real Postgres query: status in
+   `(pending, fetching, parsing, embedding)` AND `updated_at` older than
+   `RECONCILE_STALE_AFTER_S`, default 90s) is the actual load-bearing signal.
+   Prefect's state is consulted only to rule out the one case worth ruling
+   out — `COMPLETED` (Prefect says this already finished; restarting would
+   risk duplicating finished work, left for investigation instead). Every
+   other state, once the row is already confirmed stale, is treated as
+   restart-worthy. Trade-off, explicitly accepted (same one
+   `src/dispatcher.py`'s own WFQ loop already makes): a row that turns out
+   to have still been healthily backlogged might get a redundant duplicate
+   flow run — never an *incorrect* one, since crash-safe status ordering,
+   idempotent uuid5 upserts, and per-tenant duplicate detection all still
+   hold regardless of how many times a document gets (re-)submitted.
+
+**Evals defined**: `tests/test_reconciler.py` (12 tests, real throwaway
+Postgres for `stale_documents`/end-to-end `reconcile_once` logic — that IS
+what's being proven — Prefect's flow-run-state API mocked, a real check
+needs a live Prefect Cloud deployment): staleness query correctness (finds
+old rows in the given statuses, excludes fresh ones, excludes other
+statuses); `_flow_run_dead` returns True for every state except `COMPLETED`,
+False for `COMPLETED`/no-flow-run-id/lookup-failure; `reconcile_once`
+actually restarts a dead row (resets to pending, re-enqueues, persists the
+new `flow_run_id`), leaves an explicitly-still-alive row untouched, skips a
+stale row with no `flow_run_id` (seeded documents — never went through
+Prefect scheduling), and never restarts the same row twice within a 300s
+cooldown.
+
+**RED** (before implementation): `ImportError: cannot import name
+'reconciler' from 'src'`.
+
+**GREEN**: `uv run pytest tests/test_reconciler.py -v` → 12/12 passed (after
+2 rounds of test updates matching the 2 design corrections above). Full
+suite: `uv run pytest tests/ -x -q` → **105 passed** (93 + 12, no
+regressions).
+
+**Live verification — 4 successive real `bench.py --resilience` runs
+against the live stack**, each a real `docker kill` on a real worker
+container mid-ingest:
+```
+Run 1 (before this fix):     [FAIL] no_loss_under_crash: False — 2 sources never reached a terminal state
+Run 2 (Prefect-state-only, attempt 1): [FAIL] — same 2 ids, confirmed stuck at state.type==RUNNING 5+ min post-kill
+Run 3 (widened to RUNNING, attempt 2): [FAIL] — 2 NEW ids, confirmed stuck at state.type==PENDING ("Submitting")
+Run 4 (staleness-primary, final):      [PASS] no_loss_under_crash: True (target 0 dropped, all indexed)
+```
+Run 4's worker logs confirm the mechanism working as designed —
+`[reconcile] doc_608c62b14e stuck in 'pending' — its flow run
+06a67f7e-... died — restarting` for 4 of the 10 submitted documents (the
+ones actually assigned to the killed container; `docker compose ps -a`
+confirmed the killed replica never auto-restarted — `Exited (137)`, matching
+the earlier-disclosed Docker `--scale` restart-policy gap, still not fixed,
+only worked around by the reconciler not depending on it).
+
+**Residual, disclosed**: the killed worker container itself still never
+auto-restarts (a Docker Compose `--scale`-replica behavior, not fixed this
+session — the reconciler makes this no longer matter for correctness, but a
+`docker compose ps` after a crash will still show one fewer running replica
+than desired until an operator/monitoring system notices and runs `docker
+compose up -d --scale worker=N` again). Scoped to documents only, matching
+`bench.py --resilience`'s own scope — videos have a narrower parallel gap
+(stuck in an active status, not just 'pending') not addressed here, since
+`src/dispatcher.py`/`src/api/videos.py` are CLAUDE.md-protected and the
+graded gate only exercises documents.
+
+**Commit**: pending — `src/reconciler.py`, `src/db.py`, `src/config.py`,
+`src/api/admin.py`, `src/worker.py`, `tests/test_reconciler.py`, this entry.
