@@ -1954,3 +1954,57 @@ Left open for follow-up, not silently patched.
 
 **Commit**: pending — `benchmark/bench.py`, `benchmark/quality_gates.json`,
 `tests/test_bench.py`.
+
+---
+
+### 2026-07-28 — Component 13: answer relevancy + faithfulness LLM-judge (DESIGN.md §3a)
+
+Scope: neither relevancy (does the answer address the question) nor faithfulness
+(is every cited claim actually supported by its citation's own text) had any eval
+before this — recall@10 and precision@10 only ever look at retrieval, never at the
+generated answer text. New script `benchmark/answer_quality.py`: for each of the 16
+labeled queries, calls the live `/ask_stream` (reusing `bench.py`'s `_req`/
+`_labeled_queries`/SSE helpers), then judges the answer with the server's own
+configured LLM (`LLM_API_KEY`/`LLM_MODEL`, OpenAI-compatible Chat Completions,
+temperature 0) on two axes: relevancy (1-5) and per-citation faithfulness (is the
+claim next to each `[n]` actually supported by that citation's own retrieved text —
+the same text the answering LLM itself was shown). Gated against
+`benchmark/quality_gates.json`'s `answer_relevancy_min: 4.0` / `answer_faithfulness_
+min: 0.85` (own file, never `sla.json`/`rubric.json`, CLAUDE.md §2 E5).
+
+RED: added 10 tests to `tests/test_answer_quality.py` for `_build_judge_prompt`,
+`_parse_judge_response`, `_aggregate`. `uv run pytest tests/test_answer_quality.py -q`
+→ `ImportError: cannot import name 'answer_quality' from 'benchmark'` (module didn't
+exist yet — collection error, confirmed RED).
+
+IMPLEMENT: `benchmark/answer_quality.py` (new) — pure logic (prompt construction,
+response parsing tolerant of markdown code fences, score aggregation that skips
+failed judge calls and doesn't penalize faithfulness for a query with zero
+citations) plus live glue (`_ask`, `_judge_call`, `measure_answer_quality`, `main`).
+Reuses `bench.py`'s `_req`/`_labeled_queries`/`QUALITY`/`ROOT` rather than
+duplicating them (CLAUDE.md "reuse before writing"). Must be run as
+`python -m benchmark.answer_quality` (not `python benchmark/answer_quality.py`) —
+the package-relative import needs module invocation; fixed the docstring to match
+after discovering this live.
+
+GREEN:
+- `uv run pytest tests/test_answer_quality.py -q` → **10 passed**.
+- Full suite: `uv run pytest tests/ -q` → **135 passed** (was 125; +10 new, 0
+  regressions).
+- Live run against the running stack, real judge calls (`LLM_MODEL=gpt-4o-mini`),
+  all 16 labeled queries:
+  ```
+  queries judged: 16 / 16, citations checked: 52
+  [PASS] answer_relevancy: 5.0 (target 4.0)
+  [PASS] answer_faithfulness: 0.923 (target 0.85)
+  ```
+  Exit code 0 — both gates PASS on this real run.
+
+Disclosed limitation: a single live run, one sample — an LLM-judge (even at
+temperature 0) is not perfectly deterministic across runs, and this is a
+measurement, not ground truth (a second independent judge model would be a
+stronger check, not built here). Only the "openai"-compatible provider shape is
+supported for the judge call; an Anthropic-judge path was out of scope for this
+pass.
+
+**Commit**: pending — `benchmark/answer_quality.py`, `tests/test_answer_quality.py`.
