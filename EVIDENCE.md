@@ -2105,3 +2105,25 @@ cleaned up after) before writing any production code:
 
 DESIGN.md §3b (components 15-17) + CLAUDE.md §7 updated to match, before any
 implementation, per CLAUDE.md §1.
+
+---
+
+### 2026-07-28 — Component 15 pre-implementation finding: tenant-filter leak risk in Qdrant hybrid queries
+
+Before writing any hybrid-search code, verified the exact filter semantics of
+Qdrant's `Prefetch` + `FusionQuery` API against a throwaway embedded collection
+with two synthetic tenants ('alice', 'bob'):
+
+- Setting the tenant filter ONLY at the top-level `query_points(query_filter=...)`
+  while using `prefetch=[...]` + `query=FusionQuery(...)` does **NOT** restrict the
+  prefetch legs — both tenants' points came back (`['bob', 'alice']`).
+- Setting `filter=` on **each individual `Prefetch` object** correctly scopes both
+  legs — only `['alice']` came back.
+
+This is a real tenant-leak risk (CLAUDE.md hard invariant "Tenancy everywhere"),
+not a hypothetical: the natural-looking, more obvious way to write this call
+(top-level filter only, mirroring the existing non-hybrid `search_text()`'s
+`query_filter=` pattern) silently leaks cross-tenant data. `vector_store.py`'s
+hybrid implementation sets `filter=` on every `Prefetch` explicitly; a dedicated
+regression test (`test_search_text_hybrid_scopes_by_tenant` against real embedded
+Qdrant) locks this down before any other component-15 work proceeds.
