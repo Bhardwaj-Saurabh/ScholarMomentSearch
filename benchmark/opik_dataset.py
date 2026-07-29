@@ -43,7 +43,9 @@ ROOT = Path(__file__).resolve().parents[1]
 # compensate. Idempotent, and a no-op under `python -m` / pytest, where the
 # root is already present.
 if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+    # append, not insert(0): this only needs `src` to be importable, and taking
+    # precedence over site-packages is a shadowing risk for no benefit.
+    sys.path.append(str(ROOT))
 
 from src import config, prompts  # noqa: E402 - must follow the sys.path fix
 
@@ -101,10 +103,12 @@ def push_labeled_queries() -> dict | None:
     disabled/unavailable."""
     if not enabled():
         return None
-    items = _dataset_items()
-    if not items:
-        return None
     try:
+        # Inside the try: a malformed labeled_queries.json would otherwise
+        # propagate out of a function whose contract says it always fails open.
+        items = _dataset_items()
+        if not items:
+            return None
         ds = _client().get_or_create_dataset(
             name=DATASET_NAME,
             description="Labeled queries for recall@10 / precision@10 / answer "

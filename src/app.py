@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from . import config, db, metrics, security
+from . import config, db, metrics, security, tracing
 from .api.admin import router as admin_router
 from .api.metrics import router as metrics_router
 from .api.search import router as search_router
@@ -46,6 +46,16 @@ async def lifespan(app: FastAPI):
             vector_store.ensure_text_collection()  # transcript (bge text)
     except Exception as exc:
         print(f"[startup] Qdrant not ready ({exc!r}) — search degrades to empty results")
+    # Build tracing backends HERE, not on the first traced request. `opik.Opik()`
+    # does workspace/config resolution over the network with no timeout, and it
+    # was happening lazily under a lock — so the first /api/ask paid it while
+    # every other pool thread blocked, on a path whose accept_latency SLA is
+    # already red (spec-guardian). Fails open: a backend that cannot be built
+    # just means no tracing.
+    try:
+        tracing.warm()
+    except Exception as exc:
+        print(f"[startup] tracing backends unavailable ({exc!r}) — continuing untraced")
     yield
 
 

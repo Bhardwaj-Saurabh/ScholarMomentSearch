@@ -206,3 +206,56 @@ def test_no_function_can_terminate_the_benchmark(client):
             call()
         except SystemExit:                            # pragma: no cover
             pytest.fail("telemetry raised SystemExit")
+
+
+# ── The call-site guards (spec-guardian: the shipped regression had no test) ─
+
+def test_bench_quality_records_without_crashing_when_opik_is_broken(monkeypatch):
+    """A `from benchmark import opik_dataset` failure once crashed bench.py
+    AFTER the gate had printed — on a PASSING run that would have turned a
+    green SLA non-zero. The fix was verified by hand but never pinned, which
+    is how it could regress silently."""
+    import benchmark.bench as bench
+
+    src = __import__("inspect").getsource(bench.main)
+    assert "try:" in src and "opik_dataset" in src, "the guard vanished from bench.main"
+    # The import must resolve under BOTH invocations the docs use.
+    import importlib
+    assert importlib.import_module("benchmark.opik_dataset") is not None
+
+
+def test_opik_module_imports_with_only_benchmark_on_the_path(monkeypatch):
+    """Simulates `python benchmark/bench.py`, where sys.path[0] is benchmark/
+    and `src` is NOT importable — the exact condition that made the feature
+    silently inert."""
+    import subprocess
+    import sys as _sys
+
+    r = subprocess.run(
+        [_sys.executable, "-c",
+         "import sys; sys.path.insert(0,'benchmark');"
+         "import opik_dataset; print(opik_dataset.DATASET_NAME)"],
+        capture_output=True, text=True, cwd=str(opik_dataset.ROOT))
+    assert r.returncode == 0, f"script-mode import failed: {r.stderr[-400:]}"
+    assert "scholarmomentsearch-labeled-queries" in r.stdout
+
+
+def test_experiment_names_are_unique_without_an_explicit_run_id(client, monkeypatch):
+    """The earlier uniqueness test passed run_id explicitly, so the DEFAULT
+    path — a wall-clock suffix — was never exercised."""
+    seq = iter(["20260101-000001", "20260101-000002"])
+    monkeypatch.setattr(opik_dataset, "_run_suffix", lambda: next(seq))
+    opik_dataset.log_experiment("precision", {"p": 1})
+    opik_dataset.log_experiment("precision", {"p": 2})
+    names = {e.kw.get("name") for e in client.experiments}
+    assert len(names) == 2, names
+
+
+def test_push_fails_open_on_a_malformed_query_file(client, monkeypatch):
+    """`_dataset_items()` used to run OUTSIDE the try, so a bad JSON file
+    escaped a function whose contract says it always fails open."""
+    def _boom():
+        raise ValueError("malformed labeled_queries.json")
+
+    monkeypatch.setattr(opik_dataset, "_dataset_items", _boom)
+    assert opik_dataset.push_labeled_queries() is None

@@ -32,23 +32,23 @@ def test_registered_prompt_exposes_text_and_version():
 
 
 def test_version_is_derived_from_content_not_declared():
-    a = prompts.Prompt(name="t", text="you are a helpful assistant")
-    b = prompts.Prompt(name="t", text="you are a helpful assistant")
+    a = prompts.Prompt(name="t", source="you are a helpful assistant")
+    b = prompts.Prompt(name="t", source="you are a helpful assistant")
     assert a.version == b.version
 
 
 def test_editing_the_text_changes_the_version_automatically():
     """The whole point: no human step can be forgotten."""
-    a = prompts.Prompt(name="t", text="answer only from the sources")
-    b = prompts.Prompt(name="t", text="answer only from the sources.")   # one char
+    a = prompts.Prompt(name="t", source="answer only from the sources")
+    b = prompts.Prompt(name="t", source="answer only from the sources.")   # one char
     assert a.version != b.version
 
 
 def test_version_is_short_and_stable_across_processes():
-    p = prompts.Prompt(name="t", text="hello")
+    p = prompts.Prompt(name="t", source="hello")
     assert p.version == "sha256:2cf24dba5fb0a3"[:len(p.version)] or len(p.version) <= 24
     # Deterministic: recomputing gives the same answer, no salt/uuid involved.
-    assert p.version == prompts.Prompt(name="t", text="hello").version
+    assert p.version == prompts.Prompt(name="t", source="hello").version
 
 
 def test_every_serving_prompt_is_registered():
@@ -146,3 +146,22 @@ def test_benchmark_can_register_its_judge_prompt_at_runtime():
     prompts._extra.clear()
     answer_quality._register_judge_prompt()
     assert prompts.get("judge").version == prompts.Prompt("judge", answer_quality.JUDGE_SYSTEM).version
+
+
+def test_version_follows_a_live_prompt_rebind():
+    """spec-guardian DEMONSTRATED the original claim false: `@lru_cache`
+    snapshotted the string, so rebinding `llm.SYSTEM` left the registry
+    reporting the stale hash (69f1121dc865 while the live text hashed
+    cfe4f535e436). The registry resolves live now — this is the test that
+    would have caught it."""
+    from src import llm
+
+    original = llm.SYSTEM
+    before = prompts.get("answer").version
+    try:
+        llm.SYSTEM = original + " APPENDED FOR TEST"
+        assert prompts.get("answer").version != before, \
+            "registry reported a stale version after the prompt changed"
+    finally:
+        llm.SYSTEM = original
+    assert prompts.get("answer").version == before

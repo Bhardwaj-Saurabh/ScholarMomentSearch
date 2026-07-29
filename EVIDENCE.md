@@ -3827,7 +3827,11 @@ versions; it is stamped on the `ask` span root, `prompt_version` goes on the
 
 **A refactor done carefully**: the judge's instructions were an inline f-string,
 so they were hoisted to `JUDGE_SYSTEM` to make them hashable. Verified
-**byte-identical** afterwards (703 chars, captured before and compared after) —
+**byte-identical** afterwards — `_build_judge_prompt('Q?', 'A.', [{'n':1,
+'title':'T','text':'txt'}])` produced the same **703**-char string before and
+after (note: that is the BUILT prompt for those inputs; `len(JUDGE_SYSTEM)`
+itself is 658 — the entry originally gave 703 without the inputs, which
+spec-guardian correctly flagged as unreproducible as written) —
 changing that text would have silently invalidated component 13's recorded
 numbers.
 
@@ -4161,3 +4165,110 @@ run is the one that exercised every stage.
 **Commit**: pending — `src/trace_link.py`, `src/tracing.py`,
 `src/tracing_opik.py`, `src/ingest/doc_pipeline.py`, `src/api/admin.py`,
 `tests/test_ingest_tracing.py`.
+
+---
+
+### 2026-07-29 — spec-guardian review of §3g (components 44-48): findings and fixes
+
+Three parallel reviews covering 44+46 (tracing infra), 45 (RAG spans + the
+tie-break), and 47+48 (versioning). **All three returned PASS-with-warnings**,
+and — after three E4 violations earlier in this session — **all three
+independently reproduced every test count** (10/10/477, 10/477, 13/14/477). One
+number was flagged as unreproducible-as-written rather than wrong; corrected
+above.
+
+Two claims were independently VERIFIED rather than taken on trust: the
+`JUDGE_SYSTEM` hoist really is byte-identical (reconstructed from `95c20a5^`
+and diffed over three input cases), so component 13's numbers stand; and
+`_retrieve_impl` really is behavior-preserving (one return, span code only
+reads).
+
+**Fixed — false claims in code.** Three comments asserted behavior the code did
+not have, the same defect class caught in the streaming-latency work earlier:
+- `src/tracing.py` carried a dead `adopted` field whose comment claimed it
+  governed span-vs-trace emission; the Opik backend had since been changed to
+  emit every root as a span unconditionally. Field and comment removed.
+- `_merge_hits`' docstring still said "a verified no-op … byte-identical to
+  before", untrue since the tie-break. Both it and `retrieve()`'s comment now
+  say what the code does.
+- **`src/prompts.py`' central claim was demonstrably false.** It said "a
+  registry that has drifted from the text actually sent is unreachable", but
+  `@lru_cache` snapshotted the string: spec-guardian rebound `llm.SYSTEM` and
+  got `registry 69f1121dc865 / live cfe4f535e436`. The registry now holds
+  RESOLVERS, verified live (`69f1121dc865 -> cfe4f535e436` on rebind), with
+  `test_version_follows_a_live_prompt_rebind` performing exactly that rebind.
+
+**Fixed — E2 test debt on shipped behavior.** The ranking tie-break was written
+during the precision investigation and committed with **no test**, which
+CLAUDE.md §2 E2 forbids; the existing suite passed only because its fixtures
+have distinct scores, leaving the tie case (the COMMON case under hybrid RRF)
+uncovered. New `tests/test_ranking_determinism.py` (6 tests) pins ordering
+stability under ties, that score still dominates, and that `_hit_key`'s
+None-containing tuples stringify stably. Writing it also surfaced a
+precondition worth recording: `_fuse` ranks by input POSITION, so it is only
+correct downstream of `_merge_hits` — my first test misused it and rightly
+failed. Similarly, the opik call-site import guards and the default
+`_run_suffix()` path had no tests despite a real crash having shipped through
+them; 4 added.
+
+**Fixed — fail-open and latency holes.**
+- `st.pop()` in `span()`'s `finally` was the one unguarded statement in a module
+  promising "fails open, always" — an unbalanced stack would REPLACE the
+  caller's exception. Now guarded.
+- `_dataset_items()` ran outside `push_labeled_queries()`'s try, so a malformed
+  `labeled_queries.json` escaped a function contracted to always fail open.
+- **Opik client construction was on the red-latency path**: built lazily under
+  a lock on the first traced request, doing network config resolution with no
+  timeout while other pool threads blocked. Now warmed in the app lifespan.
+- `sys.path.insert(0, ROOT)` → `append`: same fix without outranking
+  site-packages.
+
+**Fixed — wrong telemetry, which is worse than none because it gets trusted.**
+`reordered` under-reported (frame-only windows collapsed to
+`("frame", video_id)`, so same-video swaps read as no-reorder — now includes
+the timestamp); `top_hybrid_score` was the DENSE score whenever hybrid was off
+(renamed `top_score` + `top_score_is_hybrid`); `chunker_version()` ignored
+`TRANSCRIPT_CHUNK_SECONDS`, an env knob that moves chunk boundaries with no
+source change.
+
+**Fixed — component 46 was partially delivered against its own plan.** §3g said
+video ingest gets a flow-level span and listed `worker.py`; I had touched
+neither, so video ingest emitted **no span at all**, and EVIDENCE's "no
+per-stage spans" understated that. `pipeline.py` being protected explains why
+its TASKS can't be wrapped — it does not explain the missing flow-level span,
+which `worker.py` can provide. Added `tracing.record()` (emits an
+already-completed span with explicit bounds) plus a Prefect state hook in
+`worker.py`. Video traces remain deliberately UNCORRELATED: the registering
+endpoint is `videos.py`, also protected, so there is nowhere additive to stash
+a trace context.
+
+**STILL RED — specified in §3g, NOT built, and not previously declared** (this
+is the E6 omission the reviews caught; listing rather than quietly dropping):
+- **`opik.Prompt` prompt-library push (47)** — versions are computed, stamped on
+  spans and returned by `/api/config`, but nothing is pushed to Opik's prompt
+  library. Zero occurrences of `opik.Prompt` in the tree.
+- **Corpus revision in `versions()` (47)** — embed/text-embed/chunker versions
+  are recorded; the corpus revision is not.
+- **`log_traces_feedback_scores` per-query scores (48)** — experiments carry
+  aggregate metrics only, so "which queries regressed" still needs the raw
+  numbers rather than Opik's per-item view.
+- **Per-embed / rerank / LLM spans (45)** — §3g lists `rerank.py`,
+  `query_enhance.py` and `llm.py`; none contain a `tracing` reference. The
+  embed spans "each tagged cache hit-or-miss", token/cost attributes, and
+  candidate ids are not implemented. `llm_answer` records model and
+  answer length only.
+
+**Minor doc drift corrected in the same pass**: the trace key is
+`trace:{source_id}` where §3g wrote `trace:{kind}:{id}`; §3g's file lists for 45
+and 46 omit `src/trace_link.py` and `src/api/admin.py`; the precision-diagnosis
+entry attributed the `search.py` tie-break to `6d8a211` when it landed in
+`c609b69`.
+
+**GREEN**: `uv run pytest tests/ -q` → **493 passed** (was 477; +16 — 6 ranking
+determinism, 4 opik call-site/fail-open, 5 tracing `record()`/`warm()`, 1 prompt
+rebind), 0 regressions.
+
+**Commit**: pending — `src/tracing.py`, `src/tracing_opik.py`, `src/prompts.py`,
+`src/rag/search.py`, `src/worker.py`, `src/app.py`, `benchmark/opik_dataset.py`,
+`tests/test_ranking_determinism.py`, `tests/test_tracing.py`,
+`tests/test_prompts.py`, `tests/test_opik_dataset.py`, `EVIDENCE.md`.

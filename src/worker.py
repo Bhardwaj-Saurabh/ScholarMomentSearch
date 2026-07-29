@@ -26,6 +26,7 @@ from prefect.deployments.runner import EntrypointType
 
 from .db import init_schema
 from .ingest.doc_pipeline import ingest_document
+from . import tracing
 from .ingest.pipeline import ingest_video
 
 
@@ -47,10 +48,37 @@ def _build_deployments():
     normal importlib.import_module("src.ingest.doc_pipeline"), which keeps
     the module inside its real package and resolves relative imports fine.
     """
+    # Component 46: video ingest gets a FLOW-LEVEL span only. Its tasks live in
+    # CLAUDE.md-protected `src/ingest/pipeline.py`, so they cannot be wrapped
+    # the way doc_pipeline's are — but the run itself is observable from a
+    # Prefect state hook here, which is extendable. Reported with Prefect's own
+    # start/end times via tracing.record(). Uncorrelated by design: the
+    # registering endpoint is `videos.py`, also protected, so there is nowhere
+    # additive to stash a trace context for the video path.
+    traced_video = ingest_video.with_options(
+        on_completion=[_video_flow_span], on_failure=[_video_flow_span])
     return [
-        ingest_video.to_deployment(name="ingest", entrypoint_type=EntrypointType.MODULE_PATH),
+        traced_video.to_deployment(name="ingest", entrypoint_type=EntrypointType.MODULE_PATH),
         ingest_document.to_deployment(name="ingest", entrypoint_type=EntrypointType.MODULE_PATH),
     ]
+
+
+def _video_flow_span(flow, flow_run, state) -> None:
+    """Prefect state hook -> one flow-level span for a video ingest run.
+    Best-effort: a telemetry hook must never affect the run's outcome."""
+    try:
+        start = flow_run.start_time.timestamp() if flow_run.start_time else time.time()
+        end = time.time()
+        tracing.record(
+            "ingest_video", start_ts=start, end_ts=end,
+            error=None if state.is_completed() else str(state.type),
+            flow_run_id=str(flow_run.id),
+            video_id=(flow_run.parameters or {}).get("video_id"),
+            tenant=(flow_run.parameters or {}).get("user_id"),
+            state=str(state.type),
+        )
+    except Exception as exc:
+        print(f"[worker] video flow span failed ({type(exc).__name__}: {exc}) — ignored")
 
 
 def main():

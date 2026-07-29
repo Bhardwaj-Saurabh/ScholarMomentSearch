@@ -159,3 +159,51 @@ def test_span_never_swallows_time_even_on_backend_failure(monkeypatch):
     tracing.set_backends([_EndOnly()])
     with tracing.span("x"):
         pass          # the failure in end() must be swallowed
+
+
+# ── record(): completed spans from outside our control ──────────────────────
+
+def test_record_emits_a_completed_span(recording):
+    """Used by the video-ingest Prefect hook, where the work happens inside a
+    CLAUDE.md-protected file and can only be observed after the fact."""
+    tracing.record("ingest_video", start_ts=1000.0, end_ts=1002.5,
+                   video_id="yt_x", state="COMPLETED")
+    (rec,) = recording.spans
+    assert rec["name"] == "ingest_video"
+    assert rec["duration_ms"] == 2500.0
+    assert rec["attrs"]["video_id"] == "yt_x"
+    assert rec["parent"] is None
+
+
+def test_record_is_a_noop_when_disabled(monkeypatch):
+    monkeypatch.setattr(config, "OPIK_API_KEY", "")
+    monkeypatch.setattr(config, "OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    tracing.reset()
+    tracing.record("ingest_video", start_ts=1.0, end_ts=2.0)   # must not raise
+    assert tracing.exported() == []
+
+
+def test_record_never_raises_on_a_broken_backend(monkeypatch):
+    class _Exploding:
+        def start(self, *a, **k): raise RuntimeError("down")
+        def end(self, *a, **k): raise RuntimeError("down")
+
+    monkeypatch.setattr(config, "OPIK_API_KEY", "test-key")
+    tracing.reset()
+    tracing.set_backends([_Exploding()])
+    tracing.record("ingest_video", start_ts=1.0, end_ts=2.0)
+
+
+def test_record_clamps_a_negative_duration(recording):
+    """Prefect hook times come from two different clocks; a skewed pair must
+    not produce a negative duration in the dashboard."""
+    tracing.record("ingest_video", start_ts=100.0, end_ts=90.0)
+    assert recording.spans[0]["duration_ms"] == 0.0
+
+
+def test_warm_is_safe_when_disabled(monkeypatch):
+    monkeypatch.setattr(config, "OPIK_API_KEY", "")
+    monkeypatch.setattr(config, "OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    tracing.reset()
+    tracing.warm()
+    assert tracing.enabled() is False

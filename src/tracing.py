@@ -125,6 +125,13 @@ def set_backends(backends: list) -> None:
         _initialized = True
 
 
+def warm() -> None:
+    """Construct backends up front (app startup), so no request pays the cost.
+    Safe to call when disabled or already initialised."""
+    if enabled():
+        _backends()
+
+
 def exported() -> list[dict]:
     """Spans captured by any MemoryBackend — test/debug helper."""
     out: list[dict] = []
@@ -176,6 +183,37 @@ def current_trace_id() -> str | None:
     return st[-1]["trace_id"] if st else None
 
 
+def record(name: str, *, start_ts: float, end_ts: float,
+           trace_id: str | None = None, error: str | None = None, **attrs) -> None:
+    """Emit an ALREADY-COMPLETED span with explicit bounds.
+
+    `span()` cannot be used where the work happens outside our control — the
+    video ingest flow lives in CLAUDE.md-protected `src/ingest/pipeline.py`, so
+    it can only be observed from a Prefect completion hook, after the fact.
+    This lets that hook report the run with Prefect's own start/end times.
+    Fails open like everything else here."""
+    backends = _backends() if enabled() else []
+    if not backends:
+        return
+    rec = {
+        "id": uuid.uuid4().hex,
+        "trace_id": trace_id or uuid.uuid4().hex,
+        "parent": None,
+        "name": name,
+        "attrs": dict(attrs),
+        "error": error,
+        "duration_ms": max(0.0, (end_ts - start_ts) * 1000),
+        "start_ts": start_ts,
+        "end_ts": end_ts,
+    }
+    for b in backends:
+        try:
+            b.start(rec)
+            b.end(rec)
+        except Exception as exc:
+            _warn_once(exc)
+
+
 @contextmanager
 def span(name: str, *, trace_id: str | None = None, **attrs):
     """Record `name` as a span. Yields a handle; always safe to call."""
@@ -201,10 +239,6 @@ def span(name: str, *, trace_id: str | None = None, **attrs):
         # real start AND end in ONE call rather than create-then-update.
         "start_ts": None,
         "end_ts": None,
-        # True when this root JOINED a trace started in another process
-        # (component 46). Such a root must be exported as a SPAN, not as the
-        # trace itself, or it collides with the originating process's root.
-        "adopted": bool(trace_id) and parent is None,
     }
     handle = _Span(rec)
     for b in backends:
@@ -226,7 +260,12 @@ def span(name: str, *, trace_id: str | None = None, **attrs):
     finally:
         rec["duration_ms"] = (time.perf_counter() - t0) * 1000
         rec["end_ts"] = time.time()
-        st.pop()
+        # Guarded: this runs in a `finally`, so an IndexError on an unbalanced
+        # stack would REPLACE whatever exception the caller was raising. Not
+        # reachable today, but "fails open, always" has to hold for the one
+        # statement in the module that could break it.
+        if st:
+            st.pop()
         for b in backends:
             try:
                 b.end(rec)

@@ -11,11 +11,13 @@ record that anything changed.
 because it looks trustworthy. Hashing the text makes the version impossible to
 forget and impossible to get wrong.
 
-**The registry points at the live text, it does not copy it.** `answer` is
-registered as `llm.SYSTEM` itself, so a registry that has drifted from the
-prompt actually being sent is not a state this module can reach. A test asserts
-the identity too, because that property is the whole basis for trusting the
-version.
+**The registry RESOLVES the live text, it does not copy it.** `answer` reads
+`llm.SYSTEM` through a resolver on every access, so a registry reporting a
+version for text that was never sent is not a state this module can reach.
+The first cut only *claimed* that while snapshotting the string under
+`@lru_cache`; spec-guardian rebound `llm.SYSTEM` and showed the registry
+happily reporting the stale hash. Now proven by a test that performs exactly
+that rebind.
 
 Data versioning extends what already exists (`EMBED_VERSION`,
 `TEXT_EMBED_VERSION`) with a **chunker version** derived from the parser
@@ -29,6 +31,7 @@ import hashlib
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Callable
 
 from . import config
 
@@ -41,8 +44,22 @@ def _hash(text: str) -> str:
 
 @dataclass(frozen=True)
 class Prompt:
+    """A registered prompt. `text` may be a live lookup rather than a snapshot.
+
+    spec-guardian demonstrated that the first version's claim — "a registry
+    that has drifted from the text actually sent is unreachable" — was FALSE:
+    `@lru_cache` snapshotted the `str` value, so rebinding `llm.SYSTEM` left the
+    registry reporting the old hash (`69f1121dc865` while the live text hashed
+    `cfe4f535e436`). Reading through a resolver makes the claim true by
+    construction instead of by luck.
+    """
     name: str
-    text: str
+    # Either the literal text, or a zero-arg callable resolving it live.
+    source: "str | Callable[[], str]" = ""
+
+    @property
+    def text(self) -> str:
+        return self.source() if callable(self.source) else self.source
 
     @property
     def version(self) -> str:
@@ -67,15 +84,17 @@ def _app_prompts() -> dict[str, Prompt]:
     versions", i.e. exactly the looks-trustworthy-but-isn't failure this module
     exists to prevent. Caught live in the container, not by the unit tests.
 
-    Built lazily, and the registered objects ARE the live prompt strings — so a
-    registry that has drifted from the text actually sent is unreachable.
+    Built lazily. The entries hold RESOLVERS, not copies, so the `@lru_cache`
+    here caches the mapping, never the prompt text — see Prompt's docstring for
+    why that distinction is load-bearing.
     """
     from . import llm
     from .rag import query_enhance
 
+    # Resolvers, not snapshots — see Prompt's docstring.
     return {
-        "answer": Prompt("answer", llm.SYSTEM),
-        "query_enhance": Prompt("query_enhance", query_enhance._SYSTEM),
+        "answer": Prompt("answer", lambda: llm.SYSTEM),
+        "query_enhance": Prompt("query_enhance", lambda: query_enhance._SYSTEM),
     }
 
 
@@ -104,13 +123,18 @@ def get(name: str) -> Prompt:
 def chunker_version() -> str:
     """Version of the code that decides chunk boundaries.
 
-    Hashed from the parser sources rather than a constant, for the same reason
-    prompts are: component 14 changed `paper.py`'s chunking and no constant got
-    bumped. A file that cannot be read is skipped rather than failing — a
-    provenance helper must never break the read path.
+    Hashed from the parser sources plus the chunk-window env knob, rather than
+    a constant, for the same reason prompts are: component 14 changed
+    `paper.py`'s chunking and no constant got bumped. A file that cannot be read
+    degrades to a marker rather than failing — a provenance helper must never
+    break the read path. Known limit, disclosed: this is `@lru_cache`d, so a
+    file that is unreadable at first call pins the degraded hash for the
+    process lifetime.
     """
     here = Path(__file__).resolve().parent
-    parts: list[str] = []
+    # The transcript chunk window is an env knob that moves chunk boundaries
+    # with no source change — hashing only the parsers would miss it.
+    parts: list[str] = [f"transcript_chunk_seconds={config.TRANSCRIPT_CHUNK_SECONDS}"]
     for rel in ("ingest/paper.py", "ingest/deck.py", "ingest/transcript.py"):
         try:
             parts.append((here / rel).read_text())

@@ -40,9 +40,14 @@ def _merge_hits(hit_lists: list[list[dict]]) -> list[dict]:
     """Dedup by point identity across N sub-query result lists (keeping the
     best-scoring instance of each), then re-sort by score descending so
     _fuse()'s rank-based RRF still sees a properly ordered list regardless of
-    which sub-query surfaced a hit. A single list in -> that same list right
-    back out, sorted (a verified no-op when query enhancement is disabled,
-    since Qdrant already returns hits best-first)."""
+    which sub-query surfaced a hit.
+
+    NOT a no-op for a single input list any more. It was, while scores were
+    continuous — but Qdrant's hybrid RRF is rank-quantized (a live probe found
+    11 distinct scores across 20 candidates), and the tie-break below
+    deliberately re-orders equal-scoring hits by point identity so repeated
+    runs agree. That changes the order Qdrant returned whenever there are
+    ties, which with hybrid enabled is most of the time."""
     best: dict[tuple, dict] = {}
     for hits in hit_lists:
         for h in hits:
@@ -178,9 +183,10 @@ def _retrieve_impl(question: str, user_id: str, *, top_k: int | None = None,
     # the candidate pool with LLM-generated sub-questions/paraphrases. The
     # confidence gate below always scores the ORIGINAL question only (never a
     # sub-query), so enabling this can only add candidates, never change the
-    # abstain decision. Disabled -> queries == [question] always, and
-    # _merge_hits([hits]) is a verified no-op, so behavior is byte-identical
-    # to before this component existed.
+    # abstain decision. Disabled -> queries == [question] always.
+    # (Formerly this said behavior was "byte-identical to before this component
+    # existed" because _merge_hits was a no-op on one list. That stopped being
+    # true when the tie-break landed — see _merge_hits' own docstring.)
     queries = [question]
     if config.QUERY_ENHANCEMENT_ENABLED:
         from .query_enhance import enhance_query
@@ -228,8 +234,15 @@ def _retrieve_impl(question: str, user_id: str, *, top_k: int | None = None,
             # score is rank-quantized RRF and not comparable to the thresholds
             # (see the comment above). Recording both avoids a reader assuming
             # the gate judged the fused number.
+            # `best_score` is the DENSE-ONLY gate score; `top_score` is the top
+            # score of whatever ranking actually produced these candidates —
+            # hybrid RRF when enabled, dense otherwise. Named neutrally because
+            # calling it `top_hybrid_score` while hybrid is off would be a
+            # mislabeled attribute, and a mislabeled attribute is worse than a
+            # missing one: it gets trusted.
             _st.set_attrs(candidates=len(thits), best_score=best_text,
-                          top_hybrid_score=thits[0]["score"] if thits else 0.0)
+                          top_score=thits[0]["score"] if thits else 0.0,
+                          top_score_is_hybrid=bool(config.ENABLE_HYBRID_TEXT_SEARCH))
 
     with tracing.span("fuse") as _sf:
         windows = _fuse(vhits, thits)
@@ -247,11 +260,17 @@ def _retrieve_impl(question: str, user_id: str, *, top_k: int | None = None,
         # quietly demoting the right chunk is a real failure mode (component
         # 16), and it is invisible unless before/after are both captured.
         with tracing.span("rerank", enabled=True, model=config.RERANK_MODEL) as _sr:
-            before = [_hit_key(w["text"]) if w.get("text") else ("frame", w.get("video_id"))
-                      for w in windows]
+            # Include the window's own timestamp for frame-only windows:
+            # collapsing them to ("frame", video_id) made same-video frame
+            # swaps read as "no reorder", so `reordered` under-reported.
+            def _order_key(w):
+                if w.get("text"):
+                    return _hit_key(w["text"])
+                return ("frame", w.get("video_id"), float(w.get("t") or 0.0))
+
+            before = [_order_key(w) for w in windows]
             windows = rerank(question, windows)
-            after = [_hit_key(w["text"]) if w.get("text") else ("frame", w.get("video_id"))
-                     for w in windows]
+            after = [_order_key(w) for w in windows]
             _sr.set_attrs(windows_in=len(before), windows_out=len(after),
                           reordered=before != after)
     else:
