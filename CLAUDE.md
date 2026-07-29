@@ -136,6 +136,26 @@ A component is DONE only when: its tests are green, relevant SLA rows pass,
 | 20 | Tier 2 mechanical caches (query-embedding, frame-bytes, poll-read) | unit: repeat call hits cache (mock call-count 1, not 2); live: `bench.py` `search_p95` warm vs. cold |
 | 21 | Tier 3 ingest-side caches (caption, query-enhancement) | unit: same image+model+prompt-version caches; prompt-version bump or model change invalidates |
 | 22 | Tier 1 semantic answer cache (RediSearch vector match) | unit: identical question hits; corpus_version bump after caching makes it miss; adversarial close-but-different-source pair does NOT cross-hit; live: `answer_quality.py` before/after, latency win warm vs. cold |
+| 23 | `storage://` ownership check (cross-tenant read primitive) | unit: tenant A registering tenant B's key is rejected (RED today: 202); own-key path still 202 |
+| 24 | SSRF guard on document fetch | unit: metadata IP, private/loopback host, redirect-into-internal, oversized body, HTML content-type all rejected; a real public PDF passes |
+| 25 | Hardened auth layer (app-level, additive) | `tests/test_security_authz.py` route × credential matrix; fails closed with `ADMIN_TOKEN` unset under `ENV=production`; `GET /api/llm` 401s unauthenticated |
+| 26 | Request bounds + rate limiting | over-limit burst → 429 + `Retry-After`; `top_k=10000` → 422; no limiting when `REDIS_URL` unset |
+| 27 | Secrets hygiene + UI auth wiring | live: with `ADMIN_TOKEN` set, every UI mutation succeeds (RED today: all 401) |
+| 28 | Fly deploy + real health checks | contract probes pass against the live Fly URL; `fly checks list` green; health reports degraded, not crash, with a dependency down |
+| 29 | Benchmark completion + in-region SLA re-measure | `bench.py` measures every key declared in `sla.json` incl. `error_rate_max_pct`; in-region numbers recorded verbatim beside the local ones |
+| 30 | `tests/test_contract.py` + 502 probe | the file exists and passes; the 502 test is RED against a deliberately broken enqueue |
+| 31 | Submission pack | `PRODUCT_EVAL.md` from real runs; README "How I ran it"; demo recorded |
+| 32 | LLM call resilience | fault injection: mocked 429-then-success → one answer; provider failure → 502 not raw 500; `/ask_stream` emits a terminal error event |
+| 33 | Dependency-degrade hardening | Qdrant stopped → `/api/ask` degraded 200, not 500; app boots with Postgres down; a raising route still increments metrics |
+| 34 | Deletion integrity + document deletion | `DELETE /admin/documents/{id}` removes row+object+vectors and content leaves `/api/ask`; janitor purges a seeded orphan (RED today: mocked purge failure leaves searchable vectors) |
+| 35 | Worker liveness | a `SIGSTOP`ped worker is flagged stale within the detection window |
+| 36 | Grounding backstops | nonsense-query fixture → `abstained:true`, no citations; false-premise fixture abstains; `answer_quality.py` must not regress |
+| 37 | Structured logging + request IDs | one structured JSON line per request with a request id; `grep "print("` in `src/` hits only protected files |
+| 38 | Error tracking + uptime alerting | a deliberately-raised exception reaches Sentry tagged with its request id |
+| 39 | Cross-machine metrics + cold-start | counters survive restart and aggregate across two processes with Redis up; fail open to in-memory when down |
+| 40 | RUNBOOK.md + backup/DR | spec-guardian review + a real, executed restore-drill transcript in EVIDENCE.md |
+| 41 | CI pipeline + test-isolation fix | CI green on a PR; the isolation guard test is RED against current behavior first |
+| 42 | Supply chain + browser hardening | CI fails on a known-vulnerable pin; security headers asserted in `tests/test_contract.py` |
 
 Cross-cutting, always: `grounding-auditor` after 7/8/10; search-during-ingest ratio
 ≤ 1.3× after 4/5; provided-endpoint regression (probe 6) after everything.
@@ -162,6 +182,25 @@ enforced in exactly one place (`src/cache.py`) that every other component calls
 into. Component 22 (semantic answer cache) is the one with real grounding risk —
 its adversarial "close but different source must not cross-hit" eval is not
 optional, per AGENTS.md's grounded-or-silent non-negotiable.
+
+Components 23–42 (DESIGN.md §3e, added 2026-07-29) are the enterprise-hardening
+program. Ordering rules that are NOT negotiable:
+- **Phase 0 (23–27) ships before ANY deploy.** 23 and 24 close a cross-tenant read
+  primitive and an SSRF-with-exfiltration in the document path; both are currently
+  harmless only because nothing is public, and deploying is what changes that.
+- **27 gates the deploy too**: the UI sends no `Authorization` on any mutation, so
+  today the app only works with auth disabled. Deploying before 27 ships either a
+  broken product or an open one.
+- **29 decides Phase E.** Components 21–22 are built only if the in-region
+  re-measure says they're needed — never "because caching is good".
+- Three components are additive by force, not by preference: 25 (auth middleware,
+  since `videos.py::require_auth` is protected), 34 (reconciler janitor, since
+  `videos.py`'s delete is protected), 36 (search-layer wrapper, since the
+  confidence gate is provided code). Never "fix" these by editing the protected
+  file.
+- `benchmark/sla.json` and `eval/rubric.json` stay frozen throughout. Component 29
+  IMPLEMENTS the never-measured `error_rate_max_pct` gate — it reports whatever the
+  number is; it does not adjust the threshold.
 
 ## 8. Definition of done for the whole assignment
 

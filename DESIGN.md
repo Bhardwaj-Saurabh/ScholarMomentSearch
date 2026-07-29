@@ -171,6 +171,133 @@ Primary eval per component, mirrored into `CLAUDE.md` §7:
 - **21** — unit: same image+model+prompt-version caches, a prompt-version bump invalidates it (cache miss), a different model also misses.
 - **22** — unit: identical question hits; a corpus_version bump (simulated ingest/delete) after caching makes the SAME question miss; the adversarial "close but different source" pair does NOT cross-hit; live: `answer_quality.py` before/after (a cache hit must not change relevancy/faithfulness), plus latency win on a warm hit vs. a cold miss, verbatim numbers.
 
+### 3e. Enterprise hardening (added 2026-07-29, DECIDED — own scope, own gates)
+
+A full lead-architect review of the repo (two exhaustive code inventories, then a
+plan reviewed against them) asked one question: what does this need to be a
+complete, enterprise-grade solution? Three problem classes came back, all verified
+in code rather than inferred.
+
+**The finding that sets the ordering.** Two real security holes live in the
+document-ingest path, and both are currently harmless *only because nothing is
+deployed*:
+
+1. **Cross-tenant read primitive** — `src/api/admin.py`'s `register_document`
+   takes `storage_key` verbatim from a user-supplied `storage://` URI with NO
+   ownership check. The video path does exactly this check
+   (`src/api/videos.py:92-93`, `key.startswith(f"{UPLOAD_KEY_PREFIX}{uid}/{video_id}")`);
+   the document path simply never got it. `doc_pipeline.py`'s `t_fetch` then calls
+   `fetch_upload(row["storage_key"], ...)` on it, so any `ADMIN_TOKEN` holder can
+   pull ANOTHER tenant's bucket object into their own corpus, have it parsed and
+   embedded under their `user_id`, and read it back through `/api/ask`.
+2. **SSRF with an exfiltration channel** — `doc_pipeline.py`'s `_download` is a
+   bare `urllib.request.urlopen(uri)`: no IP/host restrictions, redirects followed
+   by default, no size cap, and `Content-Type` read only to *guess a file
+   extension* rather than to reject non-documents. On Fly this reaches the private
+   6PN mesh (`clip.process.momentsearch.internal`), Redis, and cloud metadata
+   endpoints — and because the fetched body is embedded into the tenant's corpus,
+   `/api/ask` becomes the read-back channel.
+
+So **Phase 0 (components 23-27) must land before the first deploy**: deploying is
+precisely the act that converts these from theoretical to live. Both files are
+unprotected (`admin.py` is ours from component 6; `doc_pipeline.py` is ours from
+component 4), so neither fix fights CLAUDE.md §5.
+
+**Protected-file constraints shape three components here.** `src/api/videos.py`
+holds `require_auth` (fails OPEN when `ADMIN_TOKEN` is unset; non-constant-time
+`!=`) and the video `delete` (swallows vector-purge failures with a bare
+`except: pass`), and `src/rag/search.py`'s confidence gate came from the provided
+repo. None may be edited — so 25 (auth), 34 (deletion integrity) and 36 (grounding)
+are all deliberately **additive**: app-level middleware, a reconciler janitor, and
+a search-layer wrapper respectively, rather than in-place edits.
+
+**Scope discipline.** Components 21-22 (§3d) are explicitly deferred to Phase E and
+built ONLY if component 29's in-region re-measure shows they're needed — a cache is
+a response to a measured number, not a default. `benchmark/sla.json` and
+`eval/rubric.json` stay frozen; new thresholds go in `benchmark/quality_gates.json`
+or a new `benchmark/security_gates.json`.
+
+**Phase 0 — pre-exposure security (before any deploy)**
+
+| # | Component | File | Notes |
+|---|-----------|------|-------|
+| 23 | `storage://` ownership check | `src/api/admin.py` | Mirror the video path's existing prefix check: a `storage://` key whose tenant segment isn't the caller's `uid` is rejected before the row is inserted. Closes the cross-tenant read primitive described above. |
+| 24 | SSRF guard on document fetch | `src/ingest/doc_pipeline.py`, `src/ingest/urlguard.py` (new) | Replace the bare `urlopen`: scheme allowlist; resolve DNS and reject loopback/private/link-local/CGN/metadata ranges, **re-validated on every redirect hop** (no blind redirect following, since an allowed public host can 302 into internal space); hard size cap enforced *while streaming* (today `resp.read` loops to EOF uncapped); content-type allowlist actually enforced rather than used as an extension hint. Video ingest is out of scope — it goes through yt-dlp against a regex-validated YouTube URL. |
+| 25 | Hardened auth layer (app-level, additive) | `src/app.py`, `src/config.py`, `src/security.py` (new) | `videos.py::require_auth` is protected and fails OPEN when `ADMIN_TOKEN` is unset, comparing with a non-constant-time `!=`. Enforce instead in an `@app.middleware("http")` ahead of routing: `hmac.compare_digest`, and fail **closed** when `ADMIN_TOKEN` is unset under a new `ENV=production` flag (dev keeps today's open behavior deliberately). Also gate `GET /api/llm`, which today returns provider/model/base_url + key hint for any spoofed `X-User-Id`. Route-level `Depends(require_auth)` stays — redundant, harmless, and keeps the protected file untouched. |
+| 26 | Request bounds + rate limiting | `src/api/search.py`, `src/app.py`, reuses `src/cache.py` | `AskRequest.top_k` is an unbounded client-controlled int that flows into `_build_moments` → N storage fetches → N images in ONE multimodal LLM call; question length and `video_ids` length are likewise unbounded. Add Pydantic bounds, plus a Redis token bucket (keyed IP+tenant, stricter on `/api/ask*`) as app-level middleware — rate limiting can't be a decorator on `videos.py`'s routes, since that file is protected. Fails open when Redis is down, consistent with §3d's philosophy; disclosed here rather than hidden. |
+| 27 | Secrets hygiene + UI auth wiring | `ui/index.html`, `DEPLOYMENT.md`, `.env.example` | Two halves of one problem. (a) `ADMIN_TOKEN=change-me` is the live local value AND the committed example, and `DEPLOYMENT.md` bulk-imports the whole `.env` into `fly secrets` — so the published default would ship to production verbatim. Rotate it; replace bulk import with an explicit named-secret list. (b) The UI sends `Authorization` on exactly ONE call (the metrics poll, component 18); every mutation — register, presign, retry, delete, documents — sends none, so **the app only works today with auth disabled**. Generalize the metrics page's existing localStorage-token pattern into one shared fetch wrapper. Without this, the deploy ships either a broken product or an open one. |
+
+**Phase A — assignment Definition of Done (graded; unblocks the SLA re-measure)**
+
+| # | Component | File | Notes |
+|---|-----------|------|-------|
+| 28 | Fly deploy + real health checks | `fly.toml`, `.github/workflows/fly-deploy.yml`, `src/api/search.py`, `Dockerfile`, `docker-compose.yml` | `GET /api/health` returns a static `{"ok":true}` and NOTHING probes it — no `[[http_service.checks]]`, no Docker `HEALTHCHECK`, no compose `healthcheck:`. Make it check Postgres + Qdrant (short-cached so probes can't hammer them), then wire probes at all three layers. The deploy workflow triggers on a `dev` branch that doesn't exist, so it has never run — fix to `main` + `workflow_dispatch`. Bundled quick win: non-root `USER` in the Dockerfile (it runs as root today). |
+| 29 | Benchmark completion + in-region SLA re-measure | `benchmark/bench.py` | `error_rate_max_pct` is declared in the frozen `sla.json` and `bench.py` has **no code for it at all** — a declared gate that has never been measured. Implement it; report whatever it says. Then re-run the full benchmark in-region: EVIDENCE.md already root-caused `accept_latency_p95` (1280ms vs ≤300) to Neon+Prefect Cloud RTT from a laptop and explicitly recommended re-measuring post-deploy. Verbatim numbers either way — this is the component that decides whether Phase E happens. |
+| 30 | `tests/test_contract.py` + the 502 probe | `tests/test_contract.py` (new) | CLAUDE.md §2 E3 names this exact file as a required eval layer and it doesn't exist; contract coverage currently lives scattered across other TestClient files plus a manual curl checklist. Consolidate 202/400/401, and add the never-probed **502** (the handler exists at `admin.py:52-54` but no test or probe has ever exercised it). |
+| 31 | Submission pack | `PRODUCT_EVAL.md` (new), `README.md` | `PRODUCT_EVAL.md` via the `fde-momentsearch-scaled-eval` skill, the README "How I ran it" section, and the 60-90s demo — all against the DEPLOYED product, hence the dependency on 28/29. |
+
+**Phase B — reliability**
+
+| # | Component | File | Notes |
+|---|-----------|------|-------|
+| 32 | LLM call resilience | `src/llm.py`, `src/rag/search.py` | All four provider call paths (`_answer_openai`/`_answer_anthropic`/`_complete_openai`/`_complete_anthropic`) call the API bare: no timeout, no retry, no backoff, and a fresh client constructed per call. A real `RateLimitError` (TPM exhausted) was already observed in worker logs during throughput testing. Add module-cached clients, explicit timeouts, bounded exponential backoff with jitter on 429/5xx, map exhaustion to a clean 502, and emit a terminal SSE `error` event — today an LLM failure mid-`/ask_stream` truncates the stream after `citations` with no `answer` and no `done`. |
+| 33 | Dependency-degrade hardening | `src/rag/vector_store.py`, `src/app.py`, `src/db.py` | `search()`/`search_text()` classify Qdrant errors by **string-matching the exception message** (`"doesn't exist" in str(exc)`), so a missing collection degrades but a genuine outage re-raises → 500 on `/api/ask`; the 60s client timeout also lets a hung Qdrant stall a request for a full minute. Replace with typed handling that degrades to empty results (grounded-or-silent already treats empty retrieval as abstain) and cut the timeout. Also: Postgres-down at boot crashes the lifespan while Qdrant-down is explicitly tolerated (`app.py:41-46`) — make that symmetric. Also: the metrics middleware lacks `try/finally`, so a request that raises is never recorded. |
+| 34 | Deletion integrity + document deletion | `src/api/admin.py`, `src/db.py`, `src/reconciler.py` | **No `DELETE /admin/documents/{id}` route exists** — `db.delete_document` has zero production callers, so a paper or deck is permanent through the API: no tenant-erasure path at all. Add it, ordered purge-vectors → delete-object → delete-row, surfacing a purge failure instead of swallowing it. *Protected-file constraint:* the VIDEO delete lives in `videos.py` and swallows purge failures (`except Exception: pass` in `vector_store.delete_video`), returning `ok` while the vectors stay searchable and produce citations with dead deeplinks — it can't be edited, so add an **orphan-vector janitor** to `reconciler.py` (ours, unprotected) that diffs Qdrant payload ids against Postgres rows and purges the strays, additively repairing the video path too and clearing stale `frame:` cache keys. |
+| 35 | Worker liveness | `src/worker.py`, `src/reconciler.py`, `docker-compose.yml` | A worker was observed frozen for 13+ minutes under load (Prefect runner concurrency-accounting leak, EVIDENCE.md Part 0) and the recommended liveness check was never built; separately, a `docker kill`ed replica never auto-restarted despite `restart: unless-stopped`. Heartbeat key via `cache.py` (fail-open), staleness detection in the reconciler's existing sweep, restart-policy fix. |
+| 36 | Grounding backstops | `src/rag/search.py` | Two known-open gaps, both disclosed across three grounding-audit rounds. (a) A nonsense query (`zorbulax quantum pickles`) still returns real citations with `abstained:false`. (b) The **false-premise** failure: the answer affirms a false premise that its OWN correctly-cited chunk contradicts — `_check_named_source_attribution` only catches naming an *uncited* source, and does nothing when the citation is right but the claim about it is wrong. *Protected-file constraint:* the confidence gate itself is provided code, so both fixes are additive at the `search.py` layer — a post-retrieval score floor before the LLM is called, and a post-answer faithfulness self-check reusing the same chunk text component 13's judge already reads. |
+
+**Phase C — observability & operations**
+
+| # | Component | File | Notes |
+|---|-----------|------|-------|
+| 37 | Structured logging + request IDs | `src/logging_setup.py` (new), `src/app.py`, ~12 files | 35 `print()` calls across 12 files; only `src/cache.py` uses `logging` at all. No levels, no JSON, no request correlation. Add a JSON formatter + a request-ID contextvar middleware echoed in responses. `print()`s inside PROTECTED files stay as-is and are recorded here as accepted debt rather than silently left unexplained. |
+| 38 | Error tracking + uptime alerting | `src/app.py`, `src/worker.py` | Sentry (free tier) on API + worker, tagged with 37's request id; an uptime monitor against 28's real health endpoint. Nothing today reports an exception anywhere. |
+| 39 | Cross-machine metrics + cold-start decision | `src/metrics.py`, `fly.toml` | `metrics.py`'s counters are per-process in-memory, so at 2+ machines `/admin/metrics` shows only whichever machine answered the poll (totals visibly jump between refreshes), and everything resets on each deploy. Back them with Redis via `cache.py`, fail-open to in-memory so single-process dev is unchanged. Also: `min_machines_running = 0` + `auto_stop_machines` means the reranker's one-time model load (a **68-second** first-call outlier, measured in component 16) recurs on every scale-from-zero — set it to 1 and document the cost trade-off. |
+| 40 | RUNBOOK.md + backup/DR | `RUNBOOK.md` (new) | Documentation-only, and a genuine hole: there is NO backup, restore, retention, or DR documentation anywhere in the repo. Neon PITR settings, Qdrant snapshot schedule, bucket versioning, RPO/RTO, plus incident playbooks (LLM 429 storm, Qdrant down, frozen worker, bad-deploy rollback) — and one ACTUALLY EXECUTED restore drill logged in EVIDENCE.md, since an untested backup is a guess. |
+
+**Phase D — CI & supply chain**
+
+| # | Component | File | Notes |
+|---|-----------|------|-------|
+| 41 | CI pipeline + test-isolation fix | `.github/workflows/ci.yml` (new), `tests/conftest.py`, `src/config.py`, `requirements-dev.txt` | There is no test CI at all — the only workflow is the (broken) deploy one, despite README calling `bench.py` "a CI check". Add test+lint on push/PR, with deploy gated behind it. Fix the previously-logged isolation gap: `config.py`'s unconditional `load_dotenv()` overrides `conftest.py`'s `os.environ.setdefault`, so every "real Qdrant" test — **including the tenant-isolation regression test itself** — runs against the PRODUCTION Qdrant cluster. Add a guard test that fails if the suite is pointed at the cloud URL. |
+| 42 | Supply chain + browser hardening | `requirements.txt`, `Dockerfile`, `ui/index.html`, `src/app.py` | Floating lower-bound deps with no lockfile/hashes; floating `python:3.11-slim` base; Tailwind + Inter loaded from third-party CDNs with no SRI onto a page that stores the admin token in `localStorage`; no CSP/HSTS/X-Frame-Options and no CORS policy anywhere. Lockfile + digest-pinned base + `pip-audit`/`bandit` in CI; self-host or SRI-pin the CDN assets; security-headers middleware + explicit CORS allowlist. |
+
+**Phase E — conditional performance.** Components 21-22 (§3d) build ONLY if
+component 29's in-region numbers justify them. 22 additionally depends on 34, whose
+delete paths are where its `corpus_version` bumps belong.
+
+**Deliberately NOT doing** (recorded so the absence is a decision, not an oversight):
+multi-region / Kubernetes (one region, single-region SLAs); SSO/SAML/OIDC — instead
+DOCUMENT that `X-User-Id` tenancy is data partitioning, **not a security boundary**
+(an honest disclosure beats a half-built JWT system); secret-manager migration (Fly
+secrets are encrypted at rest — 27 fixes the actual process gap); hand-rolled
+encryption for per-tenant LLM keys (the real leak vector was the ungated
+`GET /api/llm`, closed in 25); OTel tracing / self-hosted Prometheus+Grafana
+(request IDs + Sentry + the existing `/metrics` suit a 3-process system); WAF and
+SOC2-style audit logging (no compliance driver).
+
+Primary eval per component, mirrored into `CLAUDE.md` §7:
+- **23** — unit: tenant A registering a `storage://` key owned by tenant B is rejected (RED today: 202 accepted); own-key path still 202.
+- **24** — unit: `169.254.169.254`, a private/loopback host, a redirect-into-internal, an oversized body, and an HTML content-type are each rejected; a normal public PDF URL still passes.
+- **25** — `tests/test_security_authz.py`: route × credential matrix — every mutating route 401s with missing/wrong token; fails closed with `ADMIN_TOKEN` unset under `ENV=production`; `GET /api/llm` 401s unauthenticated.
+- **26** — unit/probe: over-limit burst returns 429 with `Retry-After`; `top_k=10000` → 422; no limiting when `REDIS_URL` is unset (fail-open preserved).
+- **27** — live: with `ADMIN_TOKEN` set, every UI action (register/retry/delete/document) succeeds — RED today, all 401.
+- **28** — contract probes pass against the live Fly URL; `fly checks list` green; health reports degraded (not crash) with a dependency down.
+- **29** — `bench.py` measures and gates every key declared in `sla.json`, `error_rate_max_pct` included; in-region numbers recorded verbatim next to the local ones.
+- **30** — the file exists and passes, including a 502 that is RED against a deliberately broken enqueue.
+- **31** — `PRODUCT_EVAL.md` generated from real runs; README section present; demo recorded.
+- **32** — fault-injection unit tests: a mocked 429-then-success yields one answer with N attempts; a provider failure returns 502, never a raw 500; `/ask_stream` emits a terminal error event.
+- **33** — with Qdrant stopped, `/api/ask` returns a degraded 200 (abstain), not 500; app boots with Postgres down; a route that raises still increments metrics.
+- **34** — `DELETE /admin/documents/{id}` removes row + object + vectors and the content stops appearing in `/api/ask`; the janitor purges a seeded orphan within one sweep (RED today: a mocked purge failure leaves searchable vectors behind a successful-looking delete).
+- **35** — a `SIGSTOP`ped worker is flagged stale within the detection window.
+- **36** — the nonsense-query fixture returns `abstained:true` with no citations, and the false-premise fixture abstains; `answer_quality.py` relevancy/faithfulness must not regress.
+- **37** — one structured JSON line per request carrying a request id; `grep "print("` in `src/` hits only protected files.
+- **38** — a deliberately-raised exception appears in Sentry tagged with its request id.
+- **39** — counters survive a process restart and aggregate across two processes when Redis is up; fail-open to in-memory when it isn't.
+- **40** — spec-guardian review of the runbook + a real restore drill transcript in EVIDENCE.md.
+- **41** — CI green on a PR; the isolation guard test is RED against current behavior before the fix.
+- **42** — CI fails on a known-vulnerable pin; security headers asserted in `tests/test_contract.py`.
+
 ## 4. Corpus & scale plan (right-sized — DECIDED)
 
 The product ships **pre-built with the 8 curated triplets** in `benchmark/corpus.json`
