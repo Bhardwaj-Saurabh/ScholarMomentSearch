@@ -162,6 +162,28 @@ def test_fails_closed_in_production_even_with_a_token_presented(client, monkeypa
     assert resp.status_code == 503
 
 
+@pytest.mark.parametrize("env", ["production", "prod", "prd", "staging",
+                                 "Production", " production ", "typo-env", ""])
+def test_fails_closed_for_any_non_dev_environment(client, monkeypatch, env):
+    """spec-guardian finding: the first cut compared `ENV == "production"`, so
+    `prod`/`staging`/a typo all failed OPEN — a safety default that depends on
+    spelling one magic word correctly is not a safety default. The check is
+    now an allowlist of dev environment names; everything else fails closed."""
+    monkeypatch.setattr(config, "ADMIN_TOKEN", "")
+    monkeypatch.setattr(config, "ENV", env.strip().lower())
+    assert _call(client, "DELETE", "/api/videos/vid_x", None).status_code == 503
+
+
+@pytest.mark.parametrize("env", ["development", "dev", "local", "test", "testing"])
+def test_dev_environments_still_allow_an_unset_token(client, monkeypatch, env):
+    from src.api import videos as videos_module
+
+    monkeypatch.setattr(config, "ADMIN_TOKEN", "")
+    monkeypatch.setattr(config, "ENV", env)
+    monkeypatch.setattr(videos_module, "ADMIN_TOKEN", "")
+    assert _call(client, "DELETE", "/api/videos/vid_x", None).status_code != 503
+
+
 def test_dev_convenience_preserved_when_token_unset(client, monkeypatch):
     """Unset token outside production keeps today's open behavior, so a fresh
     cloner can still run the stack with no configuration.

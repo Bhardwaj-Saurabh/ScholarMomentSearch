@@ -277,6 +277,21 @@ EMBED_CACHE_TTL_S = _int("EMBED_CACHE_TTL_S", 7 * 24 * 3600)   # query embedding
 FRAME_CACHE_TTL_S = _int("FRAME_CACHE_TTL_S", 3600)            # frame JPEGs: immutable once written
 POLL_CACHE_TTL_S = _int("POLL_CACHE_TTL_S", 2)                 # list_videos/list_sources
 
+# --- Request bounds + rate limiting (DESIGN.md §3e, component 26) -------------
+# ASK_MAX_TOP_K matters most: top_k is client-controlled and each unit costs a
+# storage fetch plus another image in ONE multimodal LLM call, so an unbounded
+# value is a request-amplification primitive on an endpoint needing no auth.
+ASK_MAX_TOP_K = _int("ASK_MAX_TOP_K", 20)
+ASK_MAX_QUESTION_CHARS = _int("ASK_MAX_QUESTION_CHARS", 2000)
+ASK_MAX_VIDEO_IDS = _int("ASK_MAX_VIDEO_IDS", 50)
+# Fixed-window limiter over Redis. Rides src/cache.py, so it inherits fail-open:
+# no Redis (or a broken one) means NO limiting rather than a broken API —
+# availability over enforcement, same call as every other degrade here.
+RATE_LIMIT_ENABLED = _envbool("RATE_LIMIT_ENABLED", True)
+RATE_LIMIT_WINDOW_S = _int("RATE_LIMIT_WINDOW_S", 60)
+RATE_LIMIT_MAX = _int("RATE_LIMIT_MAX", 120)        # general endpoints
+RATE_LIMIT_ASK_MAX = _int("RATE_LIMIT_ASK_MAX", 20)  # /api/ask + /ask_stream (LLM cost)
+
 # --- YouTube download hardening ---------------------------------------------------
 # YouTube increasingly answers yt-dlp's default web client with "Sign in to
 # confirm you're not a bot". Mitigations, in order of reliability:

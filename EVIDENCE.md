@@ -3066,3 +3066,121 @@ video) before re-verification.
 
 **Commit**: pending — `src/security.py`, `src/app.py`, `src/config.py`,
 `tests/test_security_authz.py`.
+
+---
+
+### 2026-07-29 — Component 25 closeout: spec-guardian review
+
+`spec-guardian` reviewed commit `9fc2ea6`: **PASS-with-warnings**, and this time
+**both EVIDENCE numbers reproduced exactly** (63 and 354) — no E4 violation,
+after two consecutive ones.
+
+It found no bypass. Tried against the live stack with `curl --path-as-is`:
+casing variants (`/ADMIN/documents`, `/Api/Videos/x` → 404, Starlette routing is
+case-sensitive so they never reach a handler), `//admin/documents`,
+`/admin//documents`, `/%61dmin/documents`, `/admin/%2e%2e/api/ask`, trailing
+slashes on `/api/llm/` and `/metrics/`, query strings, `PATCH`/`TRACE`, and
+`X-HTTP-Method-Override` — all 401 or 404, none reaching a protected handler.
+The structural reason percent-encoding can't split the two: uvicorn unquotes
+into `scope["path"]` and `URL.path` reads that same key, so router and
+middleware cannot diverge. It also enumerated every registered route under
+`ADMIN_TOKEN=""` and confirmed all 8 `Depends(require_auth)` routes plus
+`GET /api/llm` return 503 — no route where the handler expects auth but the
+middleware waves it through.
+
+It independently verified the middleware-ordering claim I made rather than
+taking it on trust — both in Starlette's source (`applications.py` inserts at
+index 0 and wraps over `reversed(...)`, so last-added is outermost) and
+empirically (`/admin/metrics` showed `401: 25` after an unauthenticated burst).
+The `<unmatched>` change was confirmed not to regress component 18: 
+`/api/videos/{video_id}` still buckets by template and `record_request` keys
+only on route + int status, leaving no attacker-controlled dimension.
+
+**Two warnings fixed in this commit, because together they made the whole
+fail-closed guarantee inert in production:**
+
+- **W2 (the substantive one)**: the check was `config.ENV == "production"`, so
+  `prod`, `prd`, `staging`, or any typo failed **OPEN** — silently restoring
+  exactly the behavior this component exists to remove. A safety default that
+  depends on spelling one magic word correctly is not a safety default.
+  Inverted to an allowlist: `development|dev|local|test|testing` tolerate an
+  unset token; **everything else fails closed**. 13 new parametrized cases
+  cover both directions.
+- **W1**: `ENV` was configured nowhere — absent from `fly.toml`,
+  `docker-compose.yml`, `.env.example` and `DEPLOYMENT.md — so on the real
+  deployment the guarantee would never have engaged. Now set in `fly.toml`
+  (`ENV = 'production'`) and documented in `.env.example`. With W2's inversion
+  these are belt-and-braces: even an operator who never sets `ENV` gets
+  fail-closed, since an unset value isn't in the dev allowlist... except that
+  `config.ENV` defaults to `"development"`, so W1's explicit setting is what
+  actually engages it on Fly. Both were needed.
+
+Noted, not fixed: `/docs`, `/redoc`, `/openapi.json` remain public and
+enumerate the entire admin surface (pre-existing, out of this component's
+scope). And rejections on real routes now land in the `<unmatched>` metrics
+bucket, losing their per-route latency row — the prior entry framed that
+trade-off as affecting only genuinely-unmatched paths, which was imprecise.
+
+---
+
+### 2026-07-29 — Component 26: request bounds + rate limiting
+
+Final Phase-0 component (`DESIGN.md` §3e).
+
+**The holes**: `AskRequest.top_k` was an unbounded client-controlled int, and
+every unit becomes another object-storage fetch plus another image inside a
+SINGLE multimodal LLM call — request amplification on an endpoint needing no
+credentials. `question` and `video_ids` were likewise unbounded. And nothing
+rate-limited anything: `/api/ask` and `/ask_stream` are public and each runs
+retrieval + cross-encoder rerank + an LLM call. Component 18 had even shipped a
+"rate limited" counter wired to 429s the app could never emit.
+
+**RED**: `tests/test_rate_limit.py` written first → **21 errors** (the config
+knobs and `cache.incr_with_expiry` did not exist).
+
+**IMPLEMENT**: bounds via Pydantic `Field` on `AskRequest` and `Query` on
+`/ask_stream`. `cache.incr_with_expiry()` — INCR + EXPIRE issued in ONE pipeline
+so a process death between them can't strand a counter with no TTL (which would
+ban a caller permanently rather than for one window), with `EXPIRE ... NX` so
+only the first request in a window sets the deadline; refreshing on every hit
+would silently become a sliding window that never resets under sustained load.
+`security.rate_limit_check()` keyed by IP **and** tenant, with both ask
+endpoints deliberately sharing one budget (separate counters would let a caller
+double the cheaper limit by alternating). Wired into `_auth_middleware` after
+the auth check, so anonymous noise can't spend an authenticated caller's budget.
+
+**GREEN**:
+- `uv run pytest tests/test_rate_limit.py -q` → **21 passed**.
+- `uv run pytest tests/test_security_authz.py tests/test_rate_limit.py -q` →
+  **97 passed**.
+- Full suite: `uv run pytest tests/ -q` → **388 passed** (was 354; +21 rate
+  limit, +13 the W2 environment cases), 0 regressions.
+- **Live** (`docker compose up -d --build api`):
+  - bounds: `top_k=10000` → **422**, `top_k=0` → **422**, 5000-char question →
+    **422**.
+  - rate limiting: **30 concurrent** `/ask_stream` requests → exactly **20×200
+    and 10×429**; Redis counter read back as `30`, TTL `50`s. A 429 carries
+    `retry-after: 60`.
+  - `/admin/metrics` now reports `rate_limited: 11` and `429: 11` — component
+    18's counter showing real data for the first time.
+
+**A measurement mistake worth recording**: my first live attempt fired 25
+requests SEQUENTIALLY and saw 25×200, which looked like the limiter was dead. It
+wasn't — each `/ask_stream` does a real ~10s LLM call, so 25 sequential requests
+spanned several 60-second windows and never accumulated past 20 in any one of
+them. Diagnosed by inspecting the actual Redis key (`rl:ask:192.168.65.1:default`
+existed, so counting WAS happening) rather than assuming a bug, then re-tested
+concurrently. Recording it because "the security control appears to do nothing"
+is exactly the observation one is tempted to explain away.
+
+**Full-suite flake, disclosed**: one run reported a single ERROR in
+`tests/test_cross_source_search.py::test_ask_stream_accepts_video_ids_plural_query_params`.
+It did not reproduce across three subsequent full runs (375, then 388 twice) and
+passes in isolation. That test exercises the real Qdrant Cloud instance — the
+known, previously-logged test-isolation gap (component 41) — which makes it
+network-dependent and the most likely cause. Reported as an unexplained
+one-off rather than silently dropped.
+
+**Commit**: pending — `src/security.py`, `src/app.py`, `src/config.py`,
+`src/cache.py`, `src/api/search.py`, `fly.toml`, `.env.example`,
+`tests/test_rate_limit.py`, `tests/test_security_authz.py`.

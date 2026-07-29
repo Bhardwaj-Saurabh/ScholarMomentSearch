@@ -110,3 +110,26 @@ def delete(key: str) -> None:
         _client().delete(key)
     except Exception as exc:
         _warn_once(exc)
+
+
+def incr_with_expiry(key: str, ttl: int) -> int | None:
+    """Fixed-window counter primitive for the rate limiter (component 26):
+    increment `key` and make sure it expires, returning the new count.
+
+    INCR and EXPIRE go out in one pipeline so a process death between them
+    can't strand a counter with no TTL — which would ban that caller
+    permanently instead of for one window. EXPIRE uses NX so only the first
+    request in a window sets the deadline; refreshing it on every hit would
+    silently turn this into a sliding window that never resets under sustained
+    load. Fails open like everything else here: None means "couldn't count",
+    and the caller must treat that as "don't limit"."""
+    if not enabled():
+        return None
+    try:
+        pipe = _client().pipeline()
+        pipe.incr(key)
+        pipe.expire(key, ttl, nx=True)
+        return pipe.execute()[0]
+    except Exception as exc:
+        _warn_once(exc)
+        return None

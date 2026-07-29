@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .. import config, db, llm, storage
 from ..rag import search as rag_search
@@ -131,10 +131,16 @@ def delete_llm(uid: str = Depends(user_id_dep)):
 # ── Ask ──────────────────────────────────────────────────────────────────────
 
 class AskRequest(BaseModel):
-    question: str
-    video_id: str | None = None        # single-video scope (legacy)
-    video_ids: list[str] | None = None  # multi-select scope (checked videos)
-    top_k: int | None = None
+    """Bounds added by DESIGN.md §3e component 26. `top_k` is the one that
+    actually mattered: it was an unbounded client-controlled int, and every
+    unit of it becomes another object-storage fetch plus another image inside
+    a SINGLE multimodal LLM call — request amplification on an endpoint that
+    needs no credentials."""
+    question: str = Field(min_length=1, max_length=config.ASK_MAX_QUESTION_CHARS)
+    video_id: str | None = Field(default=None, max_length=128)  # single-video scope (legacy)
+    video_ids: list[str] | None = Field(              # multi-select scope (checked videos)
+        default=None, max_length=config.ASK_MAX_VIDEO_IDS)
+    top_k: int | None = Field(default=None, ge=1, le=config.ASK_MAX_TOP_K)
 
 
 @router.post("/api/ask")
@@ -154,9 +160,11 @@ def _sse(event: str, data: dict) -> str:
 
 
 @router.get("/ask_stream")
-def ask_stream(q: str, x_user_id: str | None = Header(default=None),
-              video_id: str | None = None,
-              video_ids: list[str] | None = Query(default=None)):
+def ask_stream(q: str = Query(min_length=1, max_length=config.ASK_MAX_QUESTION_CHARS),
+              x_user_id: str | None = Header(default=None),
+              video_id: str | None = Query(default=None, max_length=128),
+              video_ids: list[str] | None = Query(default=None,
+                                                  max_length=config.ASK_MAX_VIDEO_IDS)):
     """SSE wrapper around the existing ask() path (DESIGN.md component 7):
     trace -> citations (kind + locator, cross-source) -> answer -> done. No
     token-by-token generation — llm.answer() is a single blocking call, so

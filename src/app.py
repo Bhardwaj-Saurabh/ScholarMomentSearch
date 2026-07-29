@@ -73,6 +73,18 @@ async def _auth_middleware(request, call_next):
     if failure is not None:
         status, detail = failure
         return JSONResponse({"detail": detail}, status_code=status)
+
+    # Component 26: admission control, after auth so an authenticated caller's
+    # budget isn't spent by anonymous noise. Keyed by IP + tenant; fails open.
+    retry_after = security.rate_limit_check(
+        request.url.path,
+        request.client.host if request.client else "unknown",
+        (request.headers.get("x-user-id") or config.DEFAULT_USER_ID).strip(),
+    )
+    if retry_after is not None:
+        return JSONResponse(
+            {"detail": "Rate limit exceeded. Slow down and retry."},
+            status_code=429, headers={"Retry-After": str(retry_after)})
     return await call_next(request)
 
 

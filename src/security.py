@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import hmac
 
-from . import config
+from . import cache, config
 
 # Any non-safe method under these prefixes needs the admin token.
 _PROTECTED_PREFIXES = ("/api/videos", "/admin", "/api/llm")
@@ -50,6 +50,13 @@ _PROTECTED_READS = frozenset({
 })
 
 _BEARER = "Bearer "
+
+# Environments where an unset ADMIN_TOKEN is tolerated. Everything ELSE fails
+# closed — the check is deliberately inverted (allowlist of dev names) rather
+# than `ENV == "production"`, which spec-guardian flagged: that form silently
+# failed OPEN for `prod`, `prd`, `staging`, or a typo. A safety default that
+# depends on spelling one magic word correctly is not a safety default.
+_DEV_ENVS = frozenset({"development", "dev", "local", "test", "testing"})
 
 
 def token_ok(authorization: str | None) -> bool:
@@ -76,13 +83,48 @@ def auth_failure(method: str, path: str, authorization: str | None) -> tuple[int
     if not requires_auth(method, path):
         return None
     if not config.ADMIN_TOKEN:
-        if config.ENV == "production":
+        if config.ENV not in _DEV_ENVS:
             # Deliberately 503, not 401: the client did nothing wrong — the
             # server is missing a secret it requires. Failing closed here is
             # the entire point; silently serving would be the old behavior.
             return (503, "Server is missing ADMIN_TOKEN — refusing to serve "
-                         "protected routes in production.")
+                         "protected routes outside a development environment.")
         return None      # dev convenience, matching the inherited behavior
     if not token_ok(authorization):
         return (401, "Missing or invalid bearer token.")
     return None
+
+
+# ── Rate limiting (DESIGN.md §3e component 26) ───────────────────────────────
+# Both ask endpoints share ONE budget: they run the same expensive path
+# (retrieval + rerank + an LLM call), so giving them separate counters would
+# let a caller trivially double the cheaper limit by alternating between them.
+_ASK_PATHS = frozenset({"/api/ask", "/ask_stream"})
+
+
+def _bucket(path: str) -> tuple[str, int]:
+    """(bucket name, max requests per window) for this path."""
+    if path.rstrip("/") in _ASK_PATHS:
+        return ("ask", config.RATE_LIMIT_ASK_MAX)
+    return ("gen", config.RATE_LIMIT_MAX)
+
+
+def rate_limit_check(path: str, client_ip: str, user_id: str) -> int | None:
+    """Returns Retry-After seconds when this request should be refused, else
+    None.
+
+    Keyed by IP **and** tenant so neither dimension alone can exhaust another
+    caller's budget. Fails OPEN in every uncertain case — disabled by flag, no
+    Redis configured, or `incr_with_expiry` returning None because Redis is
+    unreachable. That is the deliberate trade-off: a Redis outage degrades to
+    unlimited rather than to a dead API, consistent with `src/cache.py`'s
+    contract and with how a Qdrant outage is handled at boot.
+    """
+    if not config.RATE_LIMIT_ENABLED or not cache.enabled():
+        return None
+    name, limit = _bucket(path)
+    count = cache.incr_with_expiry(f"rl:{name}:{client_ip}:{user_id}",
+                                   config.RATE_LIMIT_WINDOW_S)
+    if count is None:          # couldn't count -> don't limit
+        return None
+    return config.RATE_LIMIT_WINDOW_S if count > limit else None
