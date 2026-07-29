@@ -5011,3 +5011,170 @@ better evidence to ground each claim in, rather than being forced onto
 video-only transcripts for questions that actually named a paper or deck.
 
 **Commit**: pending.
+
+---
+
+### 2026-07-29 — grounding-auditor on the live app (mandatory after components 49/50), and the fix that followed
+
+Per CLAUDE.md's cross-cutting rule ("`grounding-auditor` after 7/8/10" and after
+any retrieval/citation/prompt change), ran a full adversarial audit against the
+live, whole-corpus app. 20+ live probes across all attack classes. Full
+findings below, most severe first — **none were caused by today's changes**
+(components 49/50); all three were pre-existing behavior this audit surfaced.
+
+**CRITICAL — fabricated numeric attribution stitched from two real citations.**
+Query: *"In the LoRA paper comparison table, what scores does GPT-3 Fine-Tuned
+get versus GPT-3 with LoRA, for WikiSQL and MultiNLI?"* Answer confidently
+stated specific numbers (89.5/88.6/91.7) citing `[1, 6]` — both real,
+in-bounds citations — but neither actually supports that WikiSQL claim: `[1]`
+is genuinely Table 16 (MNLI subset sizes, no WikiSQL column exists), `[6]` is
+prose about a different table entirely. Root cause: component 14's paper-table
+extraction produced a column-unlabeled chunk for this specific table, and the
+LLM inferred column semantics that weren't in evidence. **Not fixed tonight** —
+this needs a general post-answer faithfulness check (numbers/claims verified
+against cited text), which is DESIGN.md §3e's already-scoped, not-yet-built
+**component 36** ("post-answer faithfulness self-check reusing the chunk text
+the judge already uses"). Reproduction preserved in this entry for that future
+work.
+
+**HIGH — named-source misattribution when the question names a kind the
+retrieval never returned.** Query: *"What does the CLIP ICML slide deck say
+about the pretraining dataset size?"* Retrieval returned 6 `kind:paper`
+citations (the deck was never retrieved); answer opened *"The CLIP ICML slide
+deck states that..."* — exactly the failure mode `_check_named_source_attribution`
+exists to catch, but it didn't fire. Root cause, found by direct
+reproduction (not guessing): TWO compounding bugs in `src/rag/search.py`:
+
+1. `_short_name()` only reduces a title at a colon/paren. The seeded deck's
+   title has neither ("Official ICML 2021 author slides for the CLIP paper"),
+   so `_short_name()` returned the WHOLE sentence unchanged.
+2. `_cited()`'s loose bidirectional substring check (`short in c or c in
+   short`) then treated that whole sentence as "already cited," because the
+   cited paper's short name ("clip") is a literal substring of it — silently
+   **removing the deck from `uncited` before the matching loop ever ran.**
+
+**Fixed, RED->GREEN:**
+- New test `test_check_named_source_catches_a_descriptive_title_with_no_short_form`
+  in `tests/test_grounding_guard.py`, reproducing the live case exactly. RED
+  confirmed (`assert result != answer` failed).
+- `_cited()` now only applies the loose substring check when the reduced short
+  name is <=6 words (a genuine colloquial short form); above that, it requires
+  exact equality — a full descriptive sentence can no longer be silently
+  absorbed as "cited" via incidental substring containment.
+- `_NAMED_SOURCE_RE` now also captures the trailing kind noun (paper/deck/
+  talk/video/slides), normalized via `_KIND_ALIASES` to the same `kind` values
+  `list_sources()`/citations use.
+- New `_identity_tokens()`: which words in the named phrase look like a real
+  identity marker (ALL CAPS, or alphanumeric with a digit) rather than a
+  generic descriptor the regex's case-insensitive character class also swept
+  up (e.g. "slide" in "CLIP ICML slide deck").
+- The matching loop's fallback (used only when the plain substring check
+  fails): requires the candidate's real `kind` to match the regex's OWN named
+  kind, AND every identity token present as a whole word in the real title.
+  The kind-match is the key discriminator — this corpus deliberately has
+  paper+deck+video **sharing identity by design** (aligned triplets,
+  DESIGN.md §4), so "CLIP" alone is ambiguous; "the model said DECK, and this
+  candidate genuinely IS a deck with matching identity tokens" is not.
+- First implementation attempt (token overlap + "must not already be in a
+  cited source's short name") was itself wrong and is recorded as a
+  correction rather than silently discarded: it suppressed the exact case it
+  was meant to catch, because "clip" being the CITED paper's short name is
+  precisely why the scenario is ambiguous, not a reason to exclude it.
+
+**GREEN**: `uv run pytest tests/test_grounding_guard.py -q` -> 8 passed.
+`uv run pytest tests/ -q` -> **614 passed** (was 613). Verified no false
+positive: a genuinely-cited long-titled deck (same kind, same title) is left
+unchanged. **Verified live** against the exact failing query — the fix now
+correctly withholds:
+
+    Q: "What does the CLIP ICML slide deck say about the pretraining dataset size?"
+    A: "I couldn't find that in your videos... (The generated answer named
+        'CLIP slide' as a source, but 'Official ICML 2021 author slides for
+        the CLIP paper' was not actually among what was retrieved for this
+        question — withheld rather than risk presenting unsupported content
+        as fact.)"
+
+**MEDIUM — abstain-style answers still surface non-empty citations.** A
+nonsense query and a real-but-absent-paper query ("the Mamba paper") both got
+an honest "I couldn't find..." answer text, but `citations` carried 6 real,
+valid-locator entries every time (no locator fabrication — every checked page/
+slide/timestamp was real) and `abstained` was absent/false, since the hard
+confidence gate almost never fires (bge/CLIP cosine floors sit above
+`CONFIDENCE_THRESHOLD`/`TEXT_CONFIDENCE_THRESHOLD` for nearly any short text
+pair) — abstention is entirely delegated to the LLM's own free-text judgment,
+and the citations dict is never cleared when it does. **Not fixed tonight** —
+this is exactly DESIGN.md §3e component 36's OTHER named gap ("a nonsense
+query still returns citations with abstained:false... a post-retrieval score
+floor"), already scoped, not yet built.
+
+**Verified sound, no finding**: fence markers (`<<<...>>>`) and the `¶`
+separator never leaked into any of 14 sampled live answers; in-question
+injection payload not obeyed (`_validate_citations`'s bounds check holds);
+`injection_detected` was not observed noisy across 10 ordinary questions
+including two deliberately phrased near the documented false-positive risk;
+multi-line table/formula numbers (Attention, GPT-3, BERT) survived the
+sanitizer's `\n -> ¶` flattening byte-for-byte against the real PDFs; ≥3
+locator spot-checks against real PDFs/YouTube durations all correct; a
+false-premise question was correctly rejected; tenant anti-spoofing
+(component 43) holds against several never-used tenant strings; component 50
+confirmed genuinely inert with the flag off (the boost branch is never
+entered — `graph.enabled()` itself is a harmless `getattr`, not a live effect).
+
+**Disclosed, not a grounding bug**: `doc_pipeline.py`'s entity extraction and
+`graph.record_mentions()` write DO run unconditionally at ingest regardless of
+`GRAPH_RETRIEVAL_ENABLED` (only the READ-side boost is gated) — the module
+docstring's "nothing here runs" slightly overstates it, though nothing ever
+reads those rows back while the flag is off, so it has no bearing on any
+answer or citation.
+
+**Commit**: pending — `src/rag/search.py`, `tests/test_grounding_guard.py`.
+
+---
+
+### 2026-07-29 — Full bench.py SLA run: an honest reading, with a genuine confound disclosed
+
+    python benchmark/bench.py
+    [FAIL] accept_latency_p95_ms: 1794.6 (target 300)
+    [PASS] search_p95_during_ingest_ratio: 1.12 (target 1.3)
+    [PASS] recall_at_10: 0.771 (target 0.7)
+    [FAIL] ingest_throughput_chunks_per_s: 0.0 (target 8)
+
+**`recall_at_10: 0.771 PASS`** — trustworthy, corrects the historical record
+the same way precision@10 did: a pure retrieval measurement, unaffected by
+ingest contention.
+
+**`accept_latency_p95_ms: 1794.6 FAIL`** — pre-existing and already
+root-caused in this file (Neon+Prefect round-trip from a local laptop dev
+machine); component 29 (in-region re-measure, gated behind the un-shipped Fly
+deploy) is what would actually move this number. Not a regression from
+tonight's work.
+
+**`ingest_throughput_chunks_per_s: 0.0` — genuinely confounded, disclosed
+rather than reported at face value.** This run's own accept-latency probe
+recreated 30 `probe N` documents under `default` (the exact pathology from
+earlier tonight); purging them and restarting the worker showed the
+`WORKER_CONCURRENCY=2` single-replica worker permanently pinned at
+`"200 scheduled runs skipped (at capacity)"`. Investigated further: **this
+persists independent of Postgres** — `ms_documents` is confirmed clean at
+exactly 16 rows (the seeded corpus), yet the worker log still shows 200
+scheduled runs at capacity. Root cause: **Prefect Cloud retains its own
+scheduled-run queue separate from Postgres** — deleting a document's Postgres
+row does not cancel its already-scheduled Prefect flow run, and this
+session's own repeated `bench.py` invocations (registering fresh throwaway
+docs each time) accumulated a large backlog of these that fail fast
+individually but collectively saturate a low-concurrency worker for a long
+time. `ingest_throughput_chunks_per_s: 0.0` is very likely measuring queue
+starvation from this backlog, not the pipeline's real throughput — it is
+**not reported as a trustworthy number** and should be re-measured on a
+freshly-started worker with no accumulated Prefect Cloud backlog.
+
+**New operational finding, disclosed for future work (not built tonight)**:
+`bench.py`'s load/throughput/resilience measurements have no cleanup path for
+their own throwaway tenants or the Prefect flow runs they schedule, and the
+reconciler restarts stale runs indefinitely regardless of tenant. A benchmark
+run leaves debris that degrades a LATER benchmark run's own numbers — worth a
+follow-up (cancel scheduled Prefect runs on cleanup, or have the reconciler
+skip `bench-*`/ephemeral tenants), separate from anything scoped tonight.
+
+**Commit**: pending — this entry only (no code changes from the bench run
+itself).

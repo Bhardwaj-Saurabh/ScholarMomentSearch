@@ -399,14 +399,36 @@ def _validate_citations(answer: str, n_frames: int) -> str:
 
 
 _NAMED_SOURCE_RE = re.compile(
-    r"\bthe\s+([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){0,4})\s+(?:paper|deck|talk|video|slides?)\b",
+    r"\bthe\s+([A-Z][\w\-]*(?:\s+[A-Z0-9][\w\-]*){0,4})\s+(paper|deck|talk|video|slides?)\b",
     re.IGNORECASE)
+
+# The regex's trailing noun, normalized to the `kind` values list_sources()
+# and citations actually use ("talk"/"video" both mean a video source;
+# "slides" is the colloquial word for a deck).
+_KIND_ALIASES = {"paper": "paper", "deck": "deck", "slide": "deck",
+                 "slides": "deck", "talk": "video", "video": "video"}
 
 
 def _short_name(title: str) -> str:
     """'CLIP (Radford et al. 2021)' -> 'CLIP'; 'GPT-3: Language Models...'
     -> 'GPT-3' — the casual short form people (and the LLM) actually use."""
     return re.split(r"[:(]", title, maxsplit=1)[0].strip()
+
+
+def _identity_tokens(named: str) -> set[str]:
+    """Which words in a matched "the X paper/deck/..." phrase look like an
+    actual identity marker — an acronym (ALL CAPS) or an alphanumeric model
+    name (contains a digit) — rather than a generic descriptor word that
+    `_NAMED_SOURCE_RE`'s case-insensitive character class also happened to
+    sweep up (e.g. "slide" in "the CLIP ICML slide deck").
+
+    Found live (grounding-auditor, 2026-07-29): a source whose real title
+    never reduces to a short form (no colon/paren for `_short_name` to split
+    on — e.g. "Official ICML 2021 author slides for the CLIP paper") shares
+    no CONTIGUOUS substring with what the model wrote ("CLIP ICML slide"),
+    even though both plainly name the same source via "CLIP". Pure substring
+    containment misses this; token-level identity overlap catches it."""
+    return {w for w in named.split() if len(w) >= 2 and (w.isupper() or any(c.isdigit() for c in w))}
 
 
 def _check_named_source_attribution(answer: str, citations: list[dict[str, Any]],
@@ -433,7 +455,23 @@ def _check_named_source_attribution(answer: str, citations: list[dict[str, Any]]
 
     cited_short = {_short_name(c["title"]).lower() for c in citations if c.get("title")}
 
+    # Above this many words, `_short_name()` almost certainly failed to
+    # reduce anything (no colon/paren in the real title — e.g. a deck titled
+    # as a full descriptive sentence, "Official ICML 2021 author slides for
+    # the CLIP paper") and is returning the WHOLE title back. Loose substring
+    # containment is fine between two genuinely short colloquial forms
+    # ("chain-of-thought" / "Chain-of-Thought Prompting"); it stops being
+    # meaningful once one side is a full sentence, where a short cited name
+    # can appear as an incidental substring of an UNRELATED, differently-
+    # kinded source's title and get it wrongly treated as "already cited"
+    # (found live: this silently removed the CLIP deck from `uncited`
+    # entirely, before the matching loop below ever ran — grounding-auditor,
+    # 2026-07-29).
+    _SHORT_NAME_WORD_LIMIT = 6
+
     def _cited(short: str) -> bool:
+        if len(short.split()) > _SHORT_NAME_WORD_LIMIT:
+            return short in cited_short
         # Prefix/substring, not exact equality: the model's own colloquial
         # short form ("the chain-of-thought paper") frequently doesn't
         # exactly match _short_name()'s derivation from the real title
@@ -441,17 +479,36 @@ def _check_named_source_attribution(answer: str, citations: list[dict[str, Any]]
         # check missed a real violation with this exact mismatch shape.
         return any(short in c or c in short for c in cited_short)
 
-    uncited = [s["title"] for s in all_sources
+    uncited = [(s["title"], s.get("kind")) for s in all_sources
               if s.get("title") and not _cited(_short_name(s["title"]).lower())]
     if not uncited:
         return answer
 
     for m in _NAMED_SOURCE_RE.finditer(answer):
-        named = m.group(1).strip().lower()
-        for real_title in uncited:
+        raw_named = m.group(1).strip()
+        named = raw_named.lower()
+        named_kind = _KIND_ALIASES.get(m.group(2).lower())
+        ident_tokens = {t.lower() for t in _identity_tokens(raw_named)}
+        for real_title, real_kind in uncited:
             short = _short_name(real_title).lower()
-            if named in short or short in named:
-                return (ABSTAIN + f' (The generated answer named "{m.group(1).strip()}" '
+            matched = named in short or short in named
+            if not matched and ident_tokens and real_kind and named_kind == real_kind:
+                # Fallback for a source whose real title never reduces to a
+                # short form (see _identity_tokens' docstring): a paper and
+                # its companion deck/video legitimately SHARE identity tokens
+                # in this corpus (aligned triplets, DESIGN.md §4), so a bare
+                # token match would be ambiguous — "CLIP" alone can't tell
+                # you whether the model means the paper or the deck. The
+                # regex's OWN trailing noun already says which one it means
+                # ("the CLIP ICML slide DECK"); requiring the candidate's
+                # real `kind` to match THAT is what makes this precise
+                # instead of noisy, and it's a signal the plain substring
+                # check above has no access to at all. Still requires EVERY
+                # identity token present as a whole word, not just one.
+                full = real_title.lower()
+                matched = all(re.search(rf"\b{re.escape(tok)}\b", full) for tok in ident_tokens)
+            if matched:
+                return (ABSTAIN + f' (The generated answer named "{raw_named}" '
                         f"as a source, but {real_title!r} was not actually among what "
                         "was retrieved for this question — withheld rather than risk "
                         "presenting unsupported content as fact.)")

@@ -78,6 +78,29 @@ def test_check_named_source_catches_a_colloquial_short_name_mismatch(monkeypatch
     assert "Chain-of-Thought" in result
 
 
+def test_check_named_source_catches_a_descriptive_title_with_no_short_form(monkeypatch):
+    """Live repro from grounding-auditor (2026-07-29): asked about "the CLIP
+    ICML slide deck"; retrieval returned 6 kind=paper citations (the deck was
+    never retrieved), but the answer opened with "The CLIP ICML slide deck
+    states that...". _short_name() only reduces a title at a colon/paren
+    ("CLIP (Radford et al. 2021)" -> "CLIP"); the real seeded deck title has
+    neither ("Official ICML 2021 author slides for the CLIP paper"), so
+    _short_name() returns it UNCHANGED — a full descriptive sentence that
+    shares no contiguous substring with what the model wrote ("CLIP ICML
+    slide"), even though both plainly refer to the same source via the
+    shared identity token "CLIP". Pure substring containment misses this."""
+    monkeypatch.setattr(search.db, "list_sources", lambda uid: [
+        {"title": "CLIP (Radford et al. 2021)", "kind": "paper"},
+        {"title": "Official ICML 2021 author slides for the CLIP paper", "kind": "deck"},
+    ])
+    citations = [{"title": "CLIP (Radford et al. 2021)", "kind": "paper"}]  # paper only, deck never retrieved
+    answer = ("The CLIP ICML slide deck states that the pretraining dataset "
+             "size for WIT is 400 million (image, text) pairs [2, 4].")
+    result = search._check_named_source_attribution(answer, citations, "default")
+    assert result != answer
+    assert "ICML" in result or "slides" in result
+
+
 def test_check_named_source_ignores_names_that_arent_in_the_corpus_at_all(monkeypatch):
     """Mamba isn't in this tenant's corpus at all (not even uncited) — the
     prompt-level fix already handles this well (verified live); this
