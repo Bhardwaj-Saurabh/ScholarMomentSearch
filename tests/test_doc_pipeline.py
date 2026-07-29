@@ -23,6 +23,7 @@ SLA relevance: this component IS the crash-safety story (benchmark/sla.json's
 from __future__ import annotations
 
 import hashlib
+import io
 import uuid
 from pathlib import Path
 
@@ -99,31 +100,61 @@ def _build_pdf_deck(path, slides_lines):
 
 # ── _download (the one real network boundary) ───────────────────────────────
 
-def test_download_writes_scratch_file_from_url(monkeypatch, tmp_path):
-    body = b"%PDF-1.4 fake paper bytes for the download test"
+def _fake_http(monkeypatch, body=b"%PDF-1.4 fake paper bytes for the download test",
+               content_type="application/pdf"):
+    """Stub the network at urlguard's seam (component 24 routes _download
+    through it instead of calling urllib directly) and make DNS resolve to a
+    public IP so the SSRF guard lets the fetch proceed."""
+    import socket
+
+    from src.ingest import urlguard
 
     class _FakeResponse:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
+        def __init__(self):
+            self._buf = io.BytesIO(body)
+            self.status = 200
 
         def getheader(self, name, default=None):
-            return "application/pdf" if name == "Content-Type" else default
+            return content_type if name == "Content-Type" else default
 
         def read(self, n=-1):
-            nonlocal body
-            chunk, body = body[:n if n > 0 else len(body)], body[n if n > 0 else len(body):]
-            return chunk
+            return self._buf.read(n)
 
-    monkeypatch.setattr(doc_pipeline.urllib.request, "urlopen",
-                        lambda *a, **k: _FakeResponse())
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))])
+    monkeypatch.setattr(urlguard, "_urlopen_no_redirect",
+                        lambda url, timeout: _FakeResponse())
+
+
+def test_download_writes_scratch_file_from_url(monkeypatch, tmp_path):
+    _fake_http(monkeypatch)
     dest = doc_pipeline._download("https://example.com/probe.pdf", "doc_dl_test")
     assert dest.exists()
     assert dest.suffix == ".pdf"
     assert dest.read_bytes() == b"%PDF-1.4 fake paper bytes for the download test"
     dest.unlink(missing_ok=True)
+
+
+def test_download_picks_pptx_extension_from_content_type(monkeypatch):
+    """Regression guard for component 24's rewrite: deck.parse_deck dispatches
+    on the file SUFFIX and raises on anything but .pdf/.pptx, so a URL with no
+    usable suffix that serves a PPTX must still be named .pptx. Deriving the
+    extension from the URL path alone would have silently broken this."""
+    _fake_http(monkeypatch, body=b"PK\x03\x04 fake pptx",
+               content_type="application/vnd.openxmlformats-officedocument."
+                            "presentationml.presentation")
+    dest = doc_pipeline._download("https://example.com/talk", "doc_pptx_test")
+    assert dest.suffix == ".pptx"
+    dest.unlink(missing_ok=True)
+
+
+def test_download_refuses_internal_address(monkeypatch):
+    """The SSRF guard is wired into the real ingest path, not just unit-tested
+    in isolation (component 24)."""
+    from src.ingest import urlguard
+
+    with pytest.raises(urlguard.BlockedUrlError):
+        doc_pipeline._download("http://169.254.169.254/latest/meta-data/", "doc_ssrf_test")
 
 
 # ── t_fetch: dispatch, hash + persist, duplicate detection ──────────────────

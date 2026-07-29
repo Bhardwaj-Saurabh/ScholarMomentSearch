@@ -25,9 +25,8 @@ in a non-terminal state instead of a false positive (DESIGN.md component 4).
 """
 from __future__ import annotations
 
-import mimetypes
-import urllib.request
 from pathlib import Path
+from urllib.parse import urlparse
 
 from prefect import flow, task
 
@@ -38,22 +37,48 @@ from ..rag.embeddings import embed_docs
 from . import deck as deck_mod
 from . import fetch as fetch_mod
 from . import paper as paper_mod
+from . import urlguard
 
 _DOWNLOAD_TIMEOUT_S = 60
 _ALLOWED_EXTS = (".pdf", ".pptx")
+# Explicit, platform-independent Content-Type -> extension map (see _download).
+_CTYPE_EXT = {
+    "application/pdf": ".pdf",
+    "application/x-pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/vnd.ms-powerpoint": ".pptx",
+}
 
 
 def _download(uri: str, doc_id: str) -> Path:
-    """A paper/deck named by an http(s) URL -> worker scratch file."""
-    with urllib.request.urlopen(uri, timeout=_DOWNLOAD_TIMEOUT_S) as resp:
-        content_type = resp.getheader("Content-Type", "")
-        ext = mimetypes.guess_extension(content_type.split(";")[0].strip()) or ""
-        if ext not in _ALLOWED_EXTS:
-            ext = Path(uri).suffix or ".pdf"
-        dest = fetch_mod.scratch_dir() / f"{doc_id}{ext}"
-        with dest.open("wb") as out:
-            while chunk := resp.read(1 << 20):
-                out.write(chunk)
+    """A paper/deck named by an http(s) URL -> worker scratch file.
+
+    The URI comes straight from a `POST /admin/documents` caller, so the fetch
+    goes through `urlguard` (DESIGN.md §3e component 24) rather than a bare
+    urlopen: scheme + resolved-IP allowlisting, per-hop redirect re-validation,
+    a streaming size cap, and content-type enforcement. Without it this is an
+    SSRF whose response body gets parsed, embedded into the caller's tenant,
+    and read back via /api/ask.
+
+    Extension selection keeps the ORIGINAL precedence (Content-Type first,
+    URL suffix second, .pdf last) because `deck.parse_deck` dispatches on the
+    file suffix and raises on anything but .pdf/.pptx — a suffix-less URL
+    serving a PPTX would break if we only looked at the path. The mapping is
+    an explicit table rather than `mimetypes.guess_extension`, whose result
+    for the OOXML presentation type depends on the platform's MIME database.
+    """
+    tmp = fetch_mod.scratch_dir() / f"{doc_id}.part"
+    fetched = urlguard.download_to(uri, tmp, timeout=_DOWNLOAD_TIMEOUT_S)
+
+    ctype = (fetched.content_type or "").split(";")[0].strip().lower()
+    ext = _CTYPE_EXT.get(ctype, "")
+    if ext not in _ALLOWED_EXTS:
+        ext = Path(urlparse(uri).path).suffix.lower()
+    if ext not in _ALLOWED_EXTS:
+        ext = ".pdf"
+
+    dest = fetch_mod.scratch_dir() / f"{doc_id}{ext}"
+    fetched.path.replace(dest)
     return dest
 
 

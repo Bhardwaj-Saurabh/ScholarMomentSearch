@@ -95,6 +95,21 @@ def test_rejects_another_tenants_key_case_insensitively(client):
 
 
 @pytest.mark.parametrize("uri", [
+    "storage:// docs/victim/doc_secret.pdf",     # leading space
+    "storage://\tdocs/victim/doc_secret.pdf",    # leading tab
+    "storage://docs/victim/doc_secret.pdf ",     # trailing space
+    "storage://docs\\victim\\doc_secret.pdf",    # backslash separators
+])
+def test_rejects_whitespace_and_backslash_evasions(client, uri):
+    """Found by spec-guardian on the first cut: emptiness was checked on
+    key.strip() while the prefix match used the raw key, so ' docs/victim/x'
+    was waved through as shared content. It reads nothing (object stores treat
+    that as a different key) — but this function's job is to reject the shape,
+    not to depend on which variants happen not to resolve."""
+    assert _post(client, uri).status_code == 403
+
+
+@pytest.mark.parametrize("uri", [
     "storage://docs/../docs/victim/doc_secret.pdf",
     "storage://docs/attacker/../victim/doc_secret.pdf",
     "storage:///docs/victim/doc_secret.pdf",

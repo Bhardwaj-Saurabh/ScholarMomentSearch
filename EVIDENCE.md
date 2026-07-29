@@ -2784,3 +2784,129 @@ CLAUDE.md-protected file, so this is an in-place fix rather than a wrapper.
     /admin/documents` route exists yet (that gap is component 34).
 
 **Commit**: pending — `src/api/admin.py`, `tests/test_storage_ref_ownership.py`.
+
+---
+
+### 2026-07-29 — Component 23 closeout: spec-guardian review (real bypass found + fixed)
+
+`spec-guardian` reviewed commit `faa9219`: **PASS-with-warnings**. It probed the
+real function adversarially and confirmed no bypass that actually READS another
+tenant's object: `docs/bobby/x` vs uid `bob` correctly 403s (the `split("/",1)[0]`
+compares whole segments — no prefix confusion, and the converse also 403s);
+`docs//victim/x`, `docs/./victim/x`, `docs/bob/../../docs/victim/x`,
+`/docs/victim/x`, `//docs/victim/x`, `DOCS/victim/x`, `docs/%2e%2e/victim/x` all
+403; `docs/bob`, `docs/bob/`, `decks/kdd-keynote.pdf` correctly allowed. It also
+verified the check runs BEFORE `upsert_pending_document` and `enqueue_document`
+(only a `uuid4()` precedes it), so a rejected request has zero side effects, and
+that `src/seeding.py` never emits `storage://` URIs so seeding can't be broken by
+this. It independently reproduced **11 passed** and **243 passed**, and confirmed
+the component-20 E4 correction is accurate.
+
+**Real finding, fixed in this commit**: emptiness was tested on `key.strip()`
+while the prefix match ran on the RAW key, so **`" docs/victim/doc_secret.pdf"`**
+(leading space/tab/newline) was ALLOWED — classified as "shared content" instead
+of another tenant's namespace. It reads nothing today, because object stores
+treat `" docs/x"` as a genuinely distinct key from `"docs/x"`, so this was not
+exploitable. But it directly contradicted the function's own stated rationale
+("rejecting the shape outright beats reasoning about which case variants happen
+to resolve"), which is exactly the reasoning that rots. Fixed by rejecting any
+key where `key != key.strip()`, plus backslash-containing keys (never a
+legitimate reference to our own layout). Four new cases in
+`tests/test_storage_ref_ownership.py::test_rejects_whitespace_and_backslash_evasions`.
+
+Also noted by spec-guardian and accepted as-is: `docs/bob/%2e%2e/%2e%2e/docs/victim/x`
+is allowed (owner segment is `bob`) and is safe ONLY because nothing in the
+storage path ever percent-decodes the key — verified across `storage.py`,
+`ingest/fetch.py`, `ingest/doc_pipeline.py`. Recorded here because it becomes
+live the moment a decode is introduced anywhere in that chain.
+
+Process note, also flagged and owned: commit `faa9219` bundled an unrelated
+DESIGN.md/CLAUDE.md rewording of component 30's description (correcting a false
+"never probed" claim about the 502 — it IS unit-tested in
+`tests/test_admin_api.py`) which the commit message didn't mention. An accuracy
+correction rather than a scope change, but per CLAUDE.md §1 it should have been
+its own commit.
+
+---
+
+### 2026-07-29 — Component 24: SSRF guard on document fetch
+
+Second Phase-0 component (`DESIGN.md` §3e). Closes the SSRF described in the
+§3e preamble.
+
+**The hole**: `doc_pipeline._download` was `urllib.request.urlopen(uri)` with no
+host/IP restriction, silent redirect following, no size cap, and `Content-Type`
+read only to guess a file extension. Because the fetched bytes are parsed,
+embedded under the caller's tenant and served back through `/api/ask`, the SSRF
+is also an exfiltration channel — the attacker reads the response.
+
+**RED**: `tests/test_urlguard.py` written first — collection failed with
+`ImportError: cannot import name 'urlguard' from 'src.ingest'`.
+
+**IMPLEMENT**: `src/ingest/urlguard.py` (new) — scheme allowlist; every resolved
+address checked against private/loopback/link-local/reserved/multicast/
+unspecified plus RFC-6598 CGNAT and IPv4-mapped-IPv6 (which would otherwise
+dodge the v4 checks); ALL addresses of a multi-record hostname checked, not just
+the first; redirects followed MANUALLY with each hop re-validated (an allowed
+public host is free to 302 into internal space) and bounded at 5; size cap
+enforced inside the read loop with the partial file removed on breach;
+content-type allowlist enforced (permissive on `application/octet-stream` and on
+a missing header, since academic hosts legitimately do both — what it blocks is
+the affirmative `text/html`/`application/json`/`image/*` case that an SSRF
+response body looks like). `doc_pipeline._download` now routes through it.
+
+**Regression caught while wiring it**: my first cut derived the file extension
+from the URL path only. `deck.parse_deck` dispatches on the file SUFFIX and
+raises `Unsupported deck format` on anything else, so a suffix-less URL serving
+a PPTX would have broken. Fixed by returning the server's Content-Type
+alongside the path (`urlguard.Fetched`) and keeping the ORIGINAL precedence
+(Content-Type → URL suffix → `.pdf`), via an explicit mapping table rather than
+`mimetypes.guess_extension`, whose OOXML answer depends on the platform MIME
+database. Locked down by
+`test_download_picks_pptx_extension_from_content_type`.
+
+**Test bug of my own, caught by the suite**: `_FakeResp.__init__` used
+`headers or {...}`, so an explicitly-empty `headers={}` (a real case — a server
+sending no Content-Type) silently fell back to the default and the
+missing-content-type test asserted nothing. Fixed to `is None`.
+
+**GREEN**:
+- `uv run pytest tests/test_urlguard.py -q` → **39 passed**.
+- `uv run pytest tests/test_urlguard.py tests/test_doc_pipeline.py
+  tests/test_storage_ref_ownership.py -q` → **71 passed**.
+- Full suite: `uv run pytest tests/ -q` → **289 passed** (was 243; +39 urlguard,
+  +3 doc_pipeline including the SSRF wiring + PPTX regression guards, +4
+  whitespace-evasion cases from the component-23 fix), 0 regressions.
+- **Live, in the running api container** — the wired ingest path
+  (`doc_pipeline._download`), not just the guard module in isolation:
+  - `http://169.254.169.254/latest/meta-data/` → blocked, *"resolves to
+    non-public address 169.254.169.254"*
+  - `http://redis:6379/` → blocked, *"resolves to non-public address
+    172.20.0.2"* — a REAL in-environment resolution of the compose service
+    name, not a synthetic fixture
+  - `http://localhost:8000/api/health` → blocked (`::1`)
+  - `http://[fd00::1]/x.pdf` → blocked (Fly's 6PN range)
+  - `file:///etc/passwd` → blocked (scheme)
+  - `https://arxiv.org/pdf/1706.03762` → **allowed**, correctly
+- Attempted a full end-to-end through the queue as well (register an
+  SSRF URI, poll to a terminal state). It stayed `pending` for 2 minutes and
+  the run was abandoned: the worker was logging *"scheduled runs skipped (at
+  capacity)"* because orphaned Prefect flow runs from documents I had deleted
+  during the component-23 live probes were occupying both concurrency slots on
+  120-second retry backoffs. That is my own test debris plus the known
+  worker-capacity behavior (component 35's territory), NOT a defect in this
+  component — reported as a skipped step rather than quietly dropped, and the
+  wired-path check above covers the same code with certainty.
+
+**Known residual limitation, disclosed in the module docstring**: this validates
+the addresses a hostname resolves to, then hands the URL to urllib, which
+resolves it again — a DNS entry that changes between those lookups (classic
+rebinding) would slip past. Closing it properly means pinning the connection to
+the validated IP while preserving TLS SNI/cert validation, i.e. a custom
+transport. Exposure is narrow (attacker-controlled authoritative DNS, near-zero
+TTL, winning a race on the worker) and every other layer still applies, so it is
+recorded as accepted residual risk rather than silently ignored.
+
+**Commit**: pending — `src/ingest/urlguard.py`, `src/ingest/doc_pipeline.py`,
+`src/api/admin.py`, `tests/test_urlguard.py`, `tests/test_doc_pipeline.py`,
+`tests/test_storage_ref_ownership.py`.

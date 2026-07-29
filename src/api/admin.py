@@ -50,6 +50,16 @@ def _check_storage_key_ownership(key: str, uid: str) -> None:
     # the caller's namespace while still satisfying a naive startswith().
     if key.startswith("/") or ".." in key.split("/"):
         raise HTTPException(403, "Key must be a plain relative bucket key.")
+    # Found by spec-guardian review of the first cut: emptiness was tested on
+    # key.strip() but the prefix match ran on the RAW key, so " docs/victim/x"
+    # (leading space/tab/newline) sailed through as "shared content". It reads
+    # nothing today — object stores treat " docs/x" as a genuinely different
+    # key — but the whole point of this function is to reject the SHAPE rather
+    # than rely on which variants happen not to resolve. Backslashes get the
+    # same treatment: they are not path separators here, so a key containing
+    # one is never a legitimate reference to our own layout.
+    if key != key.strip() or "\\" in key:
+        raise HTTPException(403, "Key must be a plain relative bucket key.")
     lowered = key.lower()
     for prefix in _TENANT_SCOPED_PREFIXES:
         if lowered.startswith(prefix.lower()):
