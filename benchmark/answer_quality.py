@@ -69,6 +69,9 @@ JUDGE_SYSTEM = (
     '[{"n": <int>, "supported": <true|false>}, ...]}\n\n'
 )
 
+JUDGE_PROMPT_VERSION = _register_judge_prompt()
+
+
 def _build_judge_prompt(question: str, answer: str, citations: list[dict]) -> str:
     """Deterministic prompt construction — pure, unit-tested. Each numbered
     source line carries whatever retrieved text the answering LLM itself saw
@@ -188,11 +191,35 @@ def main():
          f"(target {QUALITY['answer_relevancy_min']})")
     print(f"[{'PASS' if ok_faithfulness else 'FAIL'}] answer_faithfulness: {faithfulness} "
          f"(target {QUALITY['answer_faithfulness_min']})")
+
+    # Component 48: record the run in Opik so this score is comparable to the
+    # next one. Deliberately AFTER the pass/fail decision and unable to change
+    # it — quality_gates.json is the judge, Opik is only the record. No-op
+    # unless OPIK_API_KEY is set.
+    try:
+        from benchmark import opik_dataset              # `python -m benchmark.answer_quality`
+    except ImportError:
+        try:
+            import opik_dataset                        # direct-script invocation
+        except Exception:
+            opik_dataset = None
+    except Exception:      # see the note in bench.py: import itself can fail
+        opik_dataset = None
+    if opik_dataset is None:
+        sys.exit(0 if (ok_relevancy and ok_faithfulness) else 1)
+    opik_dataset.push_labeled_queries()
+    exp = opik_dataset.log_experiment("answer_quality", {
+        "mean_relevancy": relevancy,
+        "faithfulness_rate": faithfulness,
+        "queries_judged": result["queries_judged"],
+        "citations_checked": result["citations_checked"],
+    })
+    if exp:
+        print(f"recorded in Opik: experiment {exp} (dataset {opik_dataset.DATASET_NAME})")
+
     sys.exit(0 if (ok_relevancy and ok_faithfulness) else 1)
 
 
 if __name__ == "__main__":
     main()
 
-
-JUDGE_PROMPT_VERSION = _register_judge_prompt()

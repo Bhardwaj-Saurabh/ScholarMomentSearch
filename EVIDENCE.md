@@ -3868,3 +3868,83 @@ fixed too.
 
 **Commit**: pending — `src/prompts.py`, `src/rag/search.py`,
 `src/api/search.py`, `benchmark/answer_quality.py`, `tests/test_prompts.py`.
+
+---
+
+### 2026-07-29 — Component 48: Opik eval dataset + experiment versioning
+
+Suggested by the user on top of §3g, scoped in commit `fe74723`. Component 47
+made prompts versionable; this makes eval RESULTS comparable. Before it,
+`answer_quality.py` printed faithfulness 0.96 and that was the end of it —
+nothing recorded which prompt, embeddings, or retrieval flags produced the
+number, and nothing to diff a later run against.
+
+**RED**: `tests/test_opik_dataset.py` → collection error (`benchmark.opik_dataset`
+absent).
+
+**IMPLEMENT**: `benchmark/opik_dataset.py` — `push_labeled_queries()` upserts
+all 16 labeled queries into a named Opik Dataset (Opik versions datasets itself
+and dedupes by content, so re-pushing is idempotent — which depends on our items
+being byte-stable, hence a test forbidding any clock/uuid inside an item), and
+`log_experiment()` records a run with full provenance. Wired into
+`answer_quality.py` and `bench.py --quality`, in both cases AFTER the pass/fail
+decision.
+
+**Opik is the record, never the gate** — asserted structurally, not just
+asserted in prose: a test parses the module's AST, strips docstrings, and fails
+if the code references `quality_gates` or can raise `SystemExit`. (The first
+version of that test grepped raw source and matched its own docstring — the
+second time I made that exact mistake in this session, now fixed by comparing
+code rather than text.)
+
+**THE BUG THAT MATTERED, found only by running the real command.** My
+"telemetry never gates" claim was false as shipped. `from benchmark import
+opik_dataset` fails under the documented invocation `python benchmark/bench.py`
+(that puts `benchmark/` on `sys.path`, not the repo root), and it crashed
+**after** the gate had already printed:
+
+    [FAIL] precision_at_10: 0.594 (target 0.7)
+    ModuleNotFoundError: No module named 'benchmark'
+
+A failing gate masked it — but on a PASSING run that traceback would have turned
+a green SLA into a non-zero exit. My fail-open tests wrapped the *calls* and
+never the *import*, so they could not have caught it.
+
+Fixing it properly took two goes, and the first was worse than useless:
+guarding the import made the crash disappear but left the feature **silently
+inert** — no "recorded in Opik" line, nothing written, no error. The real cause
+was one level down: `opik_dataset.py` imports `from src import …`, which is also
+unavailable when only `benchmark/` is on the path. Fixed at the source by
+putting the repo root on `sys.path` inside that module, so every invocation
+works rather than every caller compensating.
+
+**GREEN**:
+- `uv run pytest tests/test_opik_dataset.py -q` → **14 passed**.
+- Full suite: `uv run pytest tests/ -q` → **467 passed** (was 453; +14), 0
+  regressions.
+- **Live, the documented command** `python benchmark/bench.py --quality`:
+  `[FAIL] precision_at_10: 0.594 (target 0.7)` then
+  `recorded in Opik: experiment 019fae55-c15b-731d-8788-481c69b870cd`, **EXIT=1**
+  — the gate still decides, telemetry only records.
+- **Verified in Opik via its REST API**: dataset
+  `scholarmomentsearch-labeled-queries` with **items=16**; experiment
+  `precision-20260729-144443` carrying
+  `metrics {'precision_at_10': 0.594}`,
+  `prompts {'answer': '69f1121dc865', 'query_enhance': '7dff17393d70'}`,
+  `embed clip-ViT-B-32-v1`, `chunker b24275569024`,
+  `flags hybrid=True rerank=True qenh=False`.
+
+**A finding that contradicts an earlier entry, reported rather than smoothed
+over.** Three consecutive `--quality` runs against an unchanged corpus gave
+**0.594, 0.604, 0.594**. Component 12's entry recorded 0.635 as "identical both
+runs (deterministic)". So precision@10 is NOT deterministic run-to-run, and the
+current value is below both previously recorded figures (0.635, then 0.625 after
+components 15-17). I have **not** diagnosed the cause and will not speculate
+here; nothing in components 44-48 touches retrieval, and no probe data polluted
+the tenant (checked: `default` holds 12 videos, no leftovers from this session's
+live tests). It is logged as an open question. The gate was already red and
+disclosed, so this changes no pass/fail claim — but "deterministic" was wrong
+and should not stand uncorrected.
+
+**Commit**: pending — `benchmark/opik_dataset.py`, `benchmark/bench.py`,
+`benchmark/answer_quality.py`, `tests/test_opik_dataset.py`.

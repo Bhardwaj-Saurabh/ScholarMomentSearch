@@ -385,6 +385,31 @@ def main():
         precision = round(measure_precision(), 3)
         gate("precision_at_10", precision, precision >= QUALITY["precision_at_10_min"],
              QUALITY["precision_at_10_min"])
+        # Component 48: record, never gate. Runs after the decision above and
+        # cannot alter the exit code; a no-op unless OPIK_API_KEY is set.
+        # Guarded: bench.py runs as a SCRIPT (`python benchmark/bench.py`), so
+        # the repo root isn't on sys.path and this import fails there. It
+        # crashed a real run AFTER the gate had printed, which would have turned
+        # a passing SLA into a non-zero exit — the exact thing "telemetry never
+        # gates" was supposed to prevent. My fail-open tests wrapped the CALLS
+        # and not the IMPORT, so they could not catch it.
+        try:
+            from benchmark import opik_dataset          # `python -m benchmark.bench`
+        except ImportError:
+            try:
+                import opik_dataset                     # `python benchmark/bench.py`
+            except Exception:
+                opik_dataset = None
+        except Exception:
+            opik_dataset = None
+        if opik_dataset is not None:
+            opik_dataset.push_labeled_queries()
+            exp = opik_dataset.log_experiment("precision", {"precision_at_10": precision})
+        else:
+            exp = None
+        if exp:
+            print(f"recorded in Opik: experiment {exp} "
+                 f"(dataset {opik_dataset.DATASET_NAME})")
         return sys.exit(1 if failures else 0)
 
     # 1. accept latency

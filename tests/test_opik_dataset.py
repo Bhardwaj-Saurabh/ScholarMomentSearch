@@ -1,0 +1,208 @@
+"""Component 48 (DESIGN.md §3g) — Opik eval dataset + experiment versioning.
+
+The gap component 47 alone leaves open: prompts are versioned now, but
+`answer_quality.py`'s faithfulness 0.96 / relevancy 5.0 still live in a terminal
+scrollback with nothing to compare a later run *against*. Pushing the labeled
+query set to Opik as a versioned Dataset and logging each run as an Experiment
+carrying full provenance makes the question answerable: "did that prompt edit
+help, and which queries regressed?"
+
+Two properties matter more than the plumbing:
+
+  * **Opik is the RECORD, never the gate.** `benchmark/quality_gates.json`
+    remains the only thing that decides pass/fail. A telemetry backend must
+    never be able to change whether a build is green.
+  * **Strictly opt-in.** With `OPIK_API_KEY` unset both benchmarks behave
+    byte-identically to today, so the frozen SLA path is untouched.
+
+No test here touches the network — the Opik client is stubbed.
+"""
+from __future__ import annotations
+
+import pytest
+
+from benchmark import opik_dataset
+from src import config
+
+
+class _FakeDataset:
+    def __init__(self, name):
+        self.name = name
+        self.inserted: list[list[dict]] = []
+
+    def insert(self, items):
+        self.inserted.append(list(items))
+
+    def get_current_version_name(self):
+        return "v3"
+
+
+class _FakeExperiment:
+    def __init__(self, **kw):
+        self.kw = kw
+        self.id = "exp-1"
+
+
+class _FakeClient:
+    def __init__(self):
+        self.datasets: dict[str, _FakeDataset] = {}
+        self.experiments: list[_FakeExperiment] = []
+
+    def get_or_create_dataset(self, name, description=None, project_name=None):
+        return self.datasets.setdefault(name, _FakeDataset(name))
+
+    def create_experiment(self, **kw):
+        e = _FakeExperiment(**kw)
+        self.experiments.append(e)
+        return e
+
+
+@pytest.fixture
+def client(monkeypatch):
+    monkeypatch.setattr(config, "OPIK_API_KEY", "test-key")
+    c = _FakeClient()
+    monkeypatch.setattr(opik_dataset, "_client", lambda: c)
+    return c
+
+
+# ── Opt-in: unset key means genuinely nothing happens ────────────────────────
+
+def test_disabled_when_no_api_key(monkeypatch):
+    monkeypatch.setattr(config, "OPIK_API_KEY", "")
+    assert opik_dataset.enabled() is False
+    assert opik_dataset.push_labeled_queries() is None
+    assert opik_dataset.log_experiment("answer_quality", {"x": 1}) is None
+
+
+def test_disabled_path_touches_no_client(monkeypatch):
+    def _boom():
+        raise AssertionError("client built while disabled")
+
+    monkeypatch.setattr(config, "OPIK_API_KEY", "")
+    monkeypatch.setattr(opik_dataset, "_client", _boom)
+    opik_dataset.push_labeled_queries()
+    opik_dataset.log_experiment("answer_quality", {"x": 1})
+
+
+# ── Dataset push ─────────────────────────────────────────────────────────────
+
+def test_push_sends_every_labeled_query(client):
+    info = opik_dataset.push_labeled_queries()
+    assert info is not None
+    ds = client.datasets[opik_dataset.DATASET_NAME]
+    (items,) = ds.inserted
+    assert len(items) == 16, f"expected all 16 labeled queries, got {len(items)}"
+
+
+def test_pushed_items_carry_the_expectations_not_just_the_question(client):
+    """A dataset of bare questions would be useless for comparing runs — the
+    expected corpus_id and kinds are what make a per-query regression legible."""
+    opik_dataset.push_labeled_queries()
+    items = client.datasets[opik_dataset.DATASET_NAME].inserted[0]
+    first = items[0]
+    assert "query" in first and "corpus_id" in first and "expect_kinds" in first
+
+
+def test_item_construction_is_deterministic(client):
+    """Opik dedupes items by content, so idempotency depends on us emitting
+    byte-identical items each time — a timestamp or uuid in an item would
+    silently create duplicates on every push."""
+    a = opik_dataset._dataset_items()
+    b = opik_dataset._dataset_items()
+    assert a == b
+
+
+def test_repushing_does_not_change_the_items(client):
+    opik_dataset.push_labeled_queries()
+    opik_dataset.push_labeled_queries()
+    ds = client.datasets[opik_dataset.DATASET_NAME]
+    assert ds.inserted[0] == ds.inserted[1]
+
+
+# ── Experiment provenance ────────────────────────────────────────────────────
+
+def test_experiment_records_full_provenance(client):
+    opik_dataset.log_experiment("answer_quality",
+                                {"mean_relevancy": 5.0, "faithfulness_rate": 0.96})
+    (exp,) = client.experiments
+    cfg = exp.kw["experiment_config"]
+    for key in ("prompts", "embed_version", "text_embed_version", "chunker_version"):
+        assert key in cfg, f"missing provenance: {key}"
+    # The retrieval flags actually in force — without them a score change is
+    # unattributable between "prompt edit" and "someone flipped the reranker".
+    for flag in ("hybrid_text_search", "rerank_enabled", "query_enhancement_enabled"):
+        assert flag in cfg, f"missing retrieval flag: {flag}"
+
+
+def test_experiment_records_the_metrics_it_was_given(client):
+    opik_dataset.log_experiment("answer_quality", {"mean_relevancy": 4.5})
+    cfg = client.experiments[0].kw["experiment_config"]
+    assert cfg["metrics"]["mean_relevancy"] == 4.5
+
+
+def test_experiment_is_linked_to_the_dataset(client):
+    opik_dataset.log_experiment("answer_quality", {"x": 1})
+    assert client.experiments[0].kw["dataset_name"] == opik_dataset.DATASET_NAME
+
+
+def test_experiment_name_is_unique_per_run(client):
+    """Two runs must not collide into one experiment, or the before/after
+    comparison this component exists for is impossible."""
+    opik_dataset.log_experiment("answer_quality", {"x": 1}, run_id="run-a")
+    opik_dataset.log_experiment("answer_quality", {"x": 1}, run_id="run-b")
+    names = {e.kw.get("name") for e in client.experiments}
+    assert len(names) == 2, names
+
+
+# ── Fail-open: telemetry must never break a benchmark ────────────────────────
+
+def test_push_fails_open_when_opik_raises(monkeypatch):
+    class _Broken:
+        def get_or_create_dataset(self, *a, **k): raise RuntimeError("opik down")
+
+    monkeypatch.setattr(config, "OPIK_API_KEY", "test-key")
+    monkeypatch.setattr(opik_dataset, "_client", lambda: _Broken())
+    assert opik_dataset.push_labeled_queries() is None     # must not raise
+
+
+def test_log_experiment_fails_open_when_opik_raises(monkeypatch):
+    class _Broken:
+        def create_experiment(self, *a, **k): raise RuntimeError("opik down")
+
+    monkeypatch.setattr(config, "OPIK_API_KEY", "test-key")
+    monkeypatch.setattr(opik_dataset, "_client", lambda: _Broken())
+    assert opik_dataset.log_experiment("answer_quality", {"x": 1}) is None
+
+
+def test_opik_is_never_the_gate():
+    """Structural guarantee: this module must not read the quality gates or be
+    able to end a process. Opik records; `quality_gates.json` judges.
+
+    Checked against the module's CODE with docstrings stripped — an earlier
+    version of this test grepped the raw source and matched its own explanatory
+    docstring, which is a false positive I have now written twice."""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(opik_dataset))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            if (node.body and isinstance(node.body[0], ast.Expr)
+                    and isinstance(node.body[0].value, ast.Constant)
+                    and isinstance(node.body[0].value.value, str)):
+                node.body.pop(0)                     # drop the docstring
+    code = ast.unparse(tree)
+    assert "quality_gates" not in code, "the recorder is reading the gate file"
+    assert "sys.exit" not in code and "SystemExit" not in code
+
+
+def test_no_function_can_terminate_the_benchmark(client):
+    """Belt and braces on the same property, behaviorally: a telemetry call
+    that can raise SystemExit could turn a passing SLA run red."""
+    for call in (lambda: opik_dataset.push_labeled_queries(),
+                 lambda: opik_dataset.log_experiment("x", {"y": 1})):
+        try:
+            call()
+        except SystemExit:                            # pragma: no cover
+            pytest.fail("telemetry raised SystemExit")
