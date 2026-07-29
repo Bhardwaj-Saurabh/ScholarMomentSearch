@@ -3667,3 +3667,67 @@ Recorded as outstanding, not implied done.
 **Commit**: pending — `src/tracing.py`, `src/tracing_opik.py`,
 `src/tracing_otel.py`, `src/config.py`, `tests/test_tracing.py`,
 `requirements.txt`, `.env.example`.
+
+---
+
+### 2026-07-29 — Component 44 live-verified against a real Opik workspace (+ a data-loss bug the vendor caught)
+
+The previous entry listed "nothing has been exported to a real Opik workspace"
+as outstanding. The user supplied credentials, so that is now closed — and
+doing it live surfaced two real problems that the passing unit suite had no way
+to see.
+
+**Problem 1 — wrong workspace, and the facade's fail-open proved itself.** The
+first export returned `400 {'code': 400, 'message': 'No such workspace!'}` three
+times and `Opik flush completed with data loss: 3 message(s) / 6 item(s)
+dropped`. `OPIK_WORKSPACE` had been set to `RAGFDE`, which is a **project**
+name, not a workspace. Diagnosed by querying Comet's own API with the key
+rather than guessing: `GET /api/rest/v2/account-details` →
+`username: aryansaurabhbhardwaj`, and `/api/rest/v2/workspaces` →
+`{'workspaceNames': ['aryansaurabhbhardwaj']}`. Corrected to
+`OPIK_WORKSPACE=aryansaurabhbhardwaj` with `OPIK_PROJECT_NAME=RAGFDE`, which is
+evidently what was intended. Worth recording: throughout those failures the
+**app raised nothing** — Opik's SDK logged, the spans were dropped, execution
+continued. That is component 44's central guarantee behaving correctly under a
+real misconfiguration, not a simulated one.
+
+**Problem 2 — a genuine data-loss risk in MY backend, flagged by Opik itself:**
+
+    Calling Trace.end() shortly after creation with batching enabled may cause
+    data loss.
+
+The first implementation created the Opik trace when the root span opened,
+attached children as they closed, then ended the trace. Opik batches
+asynchronously, so a create-then-immediately-end pair landing in one batch
+window can race — and RAG spans are milliseconds apart, which is precisely
+where this app operates. Nothing was lost in the probe only because I flushed
+explicitly; under real load without a flush it could be.
+
+Fixed by restructuring `tracing_opik.py` to **buffer every record for a trace
+and submit the whole thing once when the root closes** — trace plus all spans,
+each with its real start and end timestamp, in a single write. No
+update-after-create, so batching has nothing to lose. This required an additive
+change to the facade: records now carry absolute `start_ts`/`end_ts` (previously
+only `duration_ms`), which also gives the OTel backend real span bounds. The
+buffer is keyed by trace id and popped on root completion, so a long-lived API
+process cannot accumulate one entry per request.
+
+**GREEN**:
+- `uv run pytest tests/test_tracing.py -q` → **10 passed**.
+- Full suite: `uv run pytest tests/ -q` → **430 passed**, unchanged, 0
+  regressions.
+- **Live export to the real workspace**, a 5-span nested trace (ask →
+  embed_query → search_text → rerank → llm_answer) with realistic attributes:
+  `OPIK: Started logging traces to the "RAGFDE" project`, then
+  `FlushResult(flushed=True, remaining_queue_size=0, dropped_messages=0,
+  dropped_items=0, failures=())` — **zero drops, and the batching warning no
+  longer appears.**
+- Hygiene: verified the Opik API key appears in neither the staged diff nor the
+  working diff (`.env` is gitignored).
+
+**Still outstanding**: the OTel backend has never exported to a live collector
+(no `OTEL_EXPORTER_OTLP_ENDPOINT` configured) — its code path is unexercised
+beyond import. And these spans are still synthetic: nothing in `src/rag/` calls
+`span()` yet. That is component 45.
+
+**Commit**: pending — `src/tracing.py`, `src/tracing_opik.py`, `EVIDENCE.md`.

@@ -197,6 +197,10 @@ def span(name: str, *, trace_id: str | None = None, **attrs):
         "attrs": dict(attrs),
         "error": None,
         "duration_ms": 0.0,
+        # Absolute wall-clock bounds, so a backend can submit a span with its
+        # real start AND end in ONE call rather than create-then-update.
+        "start_ts": None,
+        "end_ts": None,
     }
     handle = _Span(rec)
     for b in backends:
@@ -206,6 +210,7 @@ def span(name: str, *, trace_id: str | None = None, **attrs):
             _warn_once(exc)
 
     st.append(rec)
+    rec["start_ts"] = time.time()
     t0 = time.perf_counter()
     try:
         yield handle
@@ -216,6 +221,7 @@ def span(name: str, *, trace_id: str | None = None, **attrs):
         raise
     finally:
         rec["duration_ms"] = (time.perf_counter() - t0) * 1000
+        rec["end_ts"] = time.time()
         st.pop()
         for b in backends:
             try:
