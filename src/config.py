@@ -61,6 +61,18 @@ AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN", "").strip()
 AUTH0_CLIENT_ID = os.getenv("AUTH0_CLIENT_ID", "").strip()
 AUTH0_AUDIENCE = os.getenv("AUTH0_AUDIENCE", "").strip()
 
+# --- RAG tracing (DESIGN.md §3g, component 44) --------------------------------
+# Both backends optional and independent; neither configured => tracing is a
+# genuine no-op (same convention as REDIS_URL / AUTH0_* / CLIP_SERVICE_URL).
+# Traces carry FULL fidelity — the question and retrieved chunk text — decided
+# with the user for debuggability. That means user content leaves the system
+# once a backend is set, which is why it is off unless explicitly enabled.
+OPIK_API_KEY = os.getenv("OPIK_API_KEY", "").strip()
+OPIK_WORKSPACE = os.getenv("OPIK_WORKSPACE", "").strip()
+OPIK_PROJECT_NAME = os.getenv("OPIK_PROJECT_NAME", "scholarmomentsearch").strip()
+OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
+OTEL_SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "scholarmomentsearch").strip()
+
 # --- Object storage (videos + frame thumbnails) ------------------------------
 # STORAGE_PROVIDER: local | aws | gcp | gcp_native | flyio
 # aws/gcp/flyio share one boto3 S3 client (different endpoints); gcp_native

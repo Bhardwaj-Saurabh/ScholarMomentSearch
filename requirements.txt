@@ -42,3 +42,10 @@ redis>=5.0
 # Auth0 access-token validation (DESIGN.md §3f). [crypto] pulls `cryptography`,
 # which PyJWT needs for RS256 — the plain install cannot verify Auth0 tokens.
 pyjwt[crypto]>=2.8
+
+# RAG tracing (DESIGN.md §3g). BOTH optional — src/tracing.py imports them
+# lazily and degrades to "no backend" if absent, so the app runs without them.
+# opik pulls ~26 transitive packages (incl. litellm); the OTel trio is light.
+opik>=2.2
+opentelemetry-sdk>=1.25
+opentelemetry-exporter-otlp-proto-http>=1.25

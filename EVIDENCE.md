@@ -3603,3 +3603,67 @@ change (`adminTokenBoxVisible` did not exist).
   The Metrics token entry is present either way.
 
 **Commit**: pending — `ui/index.html`, `ui/auth.test.js`, `EVIDENCE.md`.
+
+---
+
+### 2026-07-29 — Component 44: tracing facade + Opik/OTel backends
+
+Scoped in `DESIGN.md` §3g (commit `1fdee94`). Supersedes §3e's "explicitly NOT
+doing → OTel tracing" deferral at the user's request — that deferral argued
+request-IDs + Sentry were proportionate for a 3-process system, which is a weak
+argument for a RAG system whose failure modes are *decisions* (which chunk won,
+why it abstained) that aggregates cannot express.
+
+**Two facts verified BEFORE scoping, both of which changed the design:**
+- `opik` (2.2.11) pulls **no** OpenTelemetry packages — 26 transitive deps
+  including `litellm`, but no OTel. So "Opik + OTel" means two independent
+  SDKs, not one library with two exporters. Hence a facade: the RAG code is
+  instrumented ONCE and imports neither SDK.
+- `src/ingest/pipeline.py` (video tasks) is CLAUDE.md-protected, so spans
+  cannot go inside it. Recorded now as a known asymmetry for component 46
+  (documents get per-task spans; video gets flow-level only) rather than
+  discovered mid-build.
+
+**RED**: `tests/test_tracing.py` written first → collection error
+(`src.tracing` absent).
+
+**IMPLEMENT**: `src/tracing.py` — `span()` context manager with a thread-local
+stack (Starlette dispatches sync handlers across a 40-thread pool, so nesting
+must be per-thread), `set_attrs`, `record_error`, `current_trace_id`.
+`src/tracing_opik.py` and `src/tracing_otel.py` hold the vendor code and are
+imported **lazily**, only when their config is present, so a missing SDK cannot
+break app import. OTel uses `BatchSpanProcessor` to keep export off the request
+path. `config.py` gained `OPIK_*` and `OTEL_*`.
+
+**A design correction the tests forced**: the first cut had tests reach into
+the private `_BACKENDS` global, which the lazy `_backends()` then rebuilt from
+config and clobbered. Rather than work around it in the fixture, I added
+`set_backends()` as a real injection point — the awkwardness was a genuine API
+gap, not a test problem.
+
+**GREEN**:
+- `uv run pytest tests/test_tracing.py -q` → **10 passed**.
+- Full suite: `uv run pytest tests/ -q` → **430 passed** (was 420; +10), 0
+  regressions.
+- **Live fail-open check, the realistic misconfiguration** (secrets set but the
+  SDKs not installed in this venv): `enabled()` → `True`, backend construction
+  → `[]`, one log line
+  `[tracing] backend error (ModuleNotFoundError("No module named 'opik'")) — continuing untraced`,
+  and a nested `span()` block completed with **no exception**. A broken tracing
+  config cannot take the app down.
+
+Unit-proven guarantees, each with its own test: unconfigured ⇒ genuine no-op;
+a backend raising on `start`/`end` never reaches the caller; one broken backend
+does not suppress a healthy one; an unserializable attribute degrades to a
+marker instead of exploding; a span records an exception and **re-raises it
+unchanged** (observability must not alter control flow); spans nest into one
+trace id.
+
+**NOT verified**: nothing has been exported to a real Opik workspace or OTLP
+collector yet — that needs the user's `OPIK_API_KEY`, and the SDKs installed in
+the image. The facade's contract is proven; the vendor adapters are not.
+Recorded as outstanding, not implied done.
+
+**Commit**: pending — `src/tracing.py`, `src/tracing_opik.py`,
+`src/tracing_otel.py`, `src/config.py`, `tests/test_tracing.py`,
+`requirements.txt`, `.env.example`.
