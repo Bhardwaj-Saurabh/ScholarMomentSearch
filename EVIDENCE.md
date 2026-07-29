@@ -4846,3 +4846,80 @@ follow in the next entry.
 
 **Commit**: pending — `src/seeding.py`, `src/rag/vector_store.py`,
 `tests/test_seeding_integrity.py`, `DESIGN.md`, `CLAUDE.md`.
+
+---
+
+### 2026-07-29 — Retrieval quality re-measured on the WHOLE, repaired corpus
+
+The number that mattered most, now that component 51 fixed the pipeline and
+all 16 seeded papers/decks are actually indexed (12 videos + 8 papers + 8
+decks = 28 sources, confirmed via `/admin/sources`):
+
+    python benchmark/bench.py --quality
+    [PASS] precision_at_10: 0.865 (target 0.7)
+
+This is a genuine PASS, not a tuned one — `quality_gates.json` is unedited.
+**Every prior precision@10 reading in this file (0.635 -> 0.594 -> 0.567 ->
+0.542, and this session's own 0.544/0.542/0.524 baseline) was measuring a
+video-only corpus and undersold the system by a wide margin.** The retrieval
+pipeline itself was never the problem; the missing vectors were. This
+supersedes every earlier precision@10 entry — none of them should be read as
+describing this system's actual retrieval quality.
+
+`recall_at_10` and `answer_quality.py` (relevancy/faithfulness) on the whole
+corpus follow below, alongside component 50's on/off comparison.
+
+**Commit**: pending.
+
+---
+
+### 2026-07-29 — Component 50 fix: neighbour fan-out found live, before any ON/OFF measurement
+
+While preparing the live on/off comparison (backfilled the graph on the whole
+repaired corpus: 28 sources, 5524 edges), a direct check of the query path
+surfaced a real defect that would have made the pending eval meaningless:
+
+    query: "What does the BERT paper say about masked language modeling?"
+    entities: ['bert', 'language', 'language modeling', 'masked language modeling']
+    hops=0 matched: 6 sources   (bert_paper, bert_deck, gpt3_paper, gpt3_deck, rag_deck, react_deck)
+    neighbours(hops=1), UNCAPPED: 1889 candidates
+    hops=1 matched: 26 of 28 sources
+
+`hops=0` (direct entity match) is exactly the tight, on-topic set the
+component is meant to produce. The 1-hop expansion, as originally implemented,
+is what breaks: a single 189-chunk paper mentions hundreds of distinct
+low-frequency terms, so their neighbour set is huge; each one individually
+survives `discriminating()`'s per-entity IDF filter (none of them alone is
+common), but the UNION of sources mentioning ANY of ~1889 terms covers nearly
+the whole 28-source corpus. IDF bounds how common one entity may be — it
+cannot bound how large the neighbour SET becomes, which is what actually
+caused the fan-out.
+
+**Fix**: `db.graph_neighbours` now caps at 20 and ranks by how many of the
+seed entities each neighbour shares (`GROUP BY ... ORDER BY shared DESC`), so
+a term tied to several query entities outranks one that merely co-occurred
+once. Re-checked: neighbours dropped from 1889 to the capped 20, and they are
+now genuinely on-topic (`albert`, `bert-base`, `bert-large`, `elmo`,
+`jacob devlin`) rather than noise. Matched sources with the fix: **18 of 28**
+— better than 26, but still broader than the direct-match set.
+
+**Decision, made from live evidence rather than guessed in advance**: the live
+read path (`src/rag/search.py`) now calls `matched_sources(..., hops=0)`,
+i.e. direct entity match only. The 1-hop capability stays implemented and
+unit-tested (`tests/test_graph.py`) — it is a real feature the component's
+own justification names (reaching a source that never mentions the query
+entity directly) — but is not wired into the live boost until it can be made
+more selective than "18 of 28 sources for one question." Verified across three
+real queries with the direct-match wiring:
+
+    "What does the BERT paper say..."          -> 6 sources  (bert_*, gpt3_*, rag_deck, react_deck)
+    "How does CLIP learn transferable..."       -> 2 sources  (clip_paper, clip_deck)
+    "What is chain-of-thought prompting?"       -> 4 sources  (cot_*, lora_deck, react_paper)
+
+These are the selective, on-topic matches the component was scoped to
+produce. New tests: neighbour capping/ranking, and a regression pin on the
+`hops=0` live wiring so this cannot silently revert.
+
+**GREEN**: `uv run pytest tests/ -q` -> **612 passed** (was 609).
+
+**Commit**: pending — `src/db.py`, `src/rag/search.py`, `tests/test_graph.py`.

@@ -460,22 +460,36 @@ def graph_entity_source_counts(user_id: str, entities: list[str]) -> dict[str, i
     return {r["entity"]: int(r["n"]) for r in rows}
 
 
-def graph_neighbours(user_id: str, entities: list[str]) -> list[str]:
-    """1-hop co-occurrence: entities sharing a source with any of `entities`.
-    The self-join IS the graph edge — see the schema comment for why the edges
-    are derived rather than stored."""
+def graph_neighbours(user_id: str, entities: list[str], limit: int = 20) -> list[str]:
+    """1-hop co-occurrence: entities sharing a source with any of `entities`,
+    ranked by how many of `entities` each neighbour co-occurs with (a
+    neighbour tied to several seed entities is a much stronger signal than one
+    tied to a single one) and capped at `limit`.
+
+    The cap is load-bearing, not cosmetic. A single 189-chunk paper mentions
+    hundreds of distinct low-frequency terms, so an UNRANKED, uncapped
+    expansion returned **1889 neighbours** for a 3-entity query in a live
+    check against the real corpus — each individually rare enough to survive
+    the per-entity IDF filter in graph.discriminating(), but their UNION
+    matched 26 of 28 sources. IDF bounds how common one entity may be; it
+    cannot bound how large the neighbour SET becomes, which is what actually
+    caused the fan-out. Ranking by shared-seed-count plus this cap is what
+    keeps a hop a hop rather than "everything roughly nearby.\""""
     if not entities:
         return []
     with pool().connection() as conn:
         rows = conn.execute(
             """
-            SELECT DISTINCT m2.entity
+            SELECT m2.entity, count(DISTINCT m1.entity) AS shared
             FROM ms_graph_mentions m1
             JOIN ms_graph_mentions m2
               ON m1.user_id = m2.user_id AND m1.source_id = m2.source_id
             WHERE m1.user_id = %s AND m1.entity = ANY(%s) AND m2.entity <> m1.entity
+            GROUP BY m2.entity
+            ORDER BY shared DESC, m2.entity ASC
+            LIMIT %s
             """,
-            (user_id, list(entities)),
+            (user_id, list(entities), limit),
         ).fetchall()
     return [r["entity"] for r in rows]
 

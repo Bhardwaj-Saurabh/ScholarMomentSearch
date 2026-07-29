@@ -182,6 +182,30 @@ def test_neighbours_fails_open(monkeypatch):
     assert graph.neighbours("u1", ["clip"]) == set()
 
 
+def test_neighbours_are_capped_and_ranked_by_shared_seed_count(cleanup):
+    """Found live against the real corpus: an UNCAPPED, unranked expansion
+    returned 1889 neighbours for a 3-entity query (a single 189-chunk paper
+    mentions hundreds of distinct low-frequency terms), and their union
+    matched 26 of 28 sources — each neighbour was individually rare enough to
+    survive per-entity IDF, but the SIZE of the set is what caused the
+    fan-out. `db.graph_neighbours` now caps the result and ranks by how many
+    seed entities each neighbour shares, so a term genuinely tied to several
+    of the query's entities outranks one that merely co-occurred once."""
+    graph.record_mentions("graphtest_e2", "src_a", "paper", ["bert", "elmo", "glue"])
+    graph.record_mentions("graphtest_e2", "src_b", "paper", ["bert", "squad"])
+    graph.record_mentions("graphtest_e2", "src_c", "paper", ["language", "elmo"])
+    # "elmo" co-occurs with BOTH seed entities (via src_a and src_c);
+    # "squad"/"glue" co-occur with only one each — elmo should rank first.
+    nb = graph.neighbours("graphtest_e2", ["bert", "language"])
+    assert "elmo" in nb
+
+
+def test_neighbours_cap_is_bounded():
+    """The absolute ceiling that stops the fan-out, independent of ranking."""
+    import inspect
+    assert "limit" in inspect.signature(graph.db.graph_neighbours).parameters
+
+
 def test_deleting_a_document_purges_its_graph_rows(cleanup):
     from src import db
 
@@ -349,3 +373,17 @@ def test_graph_is_consulted_only_when_the_flag_is_on(monkeypatch, flag, expect_c
     rag_search._retrieve_impl("what about clip?", "u_test", top_k=5)
 
     assert bool(called) is expect_called, called
+
+
+def test_live_path_uses_direct_matches_only(monkeypatch):
+    """Pinned after a live check found hops=1 matching 18-26 of 28 real
+    sources for an ordinary question, even after the neighbour cap/ranking fix
+    — broader than "boost the source the question names" was meant to be
+    (EVIDENCE.md, 2026-07-29). hops=1 stays implemented and unit-tested above;
+    this guards that the LIVE wiring does not silently switch back to it."""
+    import inspect
+
+    from src.rag import search as rag_search
+
+    src = inspect.getsource(rag_search._retrieve_impl)
+    assert "graph.matched_sources(user_id, q_entities, hops=0)" in src

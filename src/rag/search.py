@@ -259,7 +259,16 @@ def _retrieve_impl(question: str, user_id: str, *, top_k: int | None = None,
     if graph.enabled() and windows:
         with tracing.span("graph_boost") as _sg:
             q_entities = graph.extract_query_entities(user_id, question)
-            matched = graph.matched_sources(user_id, q_entities, hops=1)
+            # hops=0 (direct entity match only). A live check against the real
+            # corpus found hops=1 matching 18-26 of 28 sources for an ordinary
+            # question — even after capping/ranking neighbours() (EVIDENCE.md,
+            # 2026-07-29) — which is broader than "boost the source the
+            # question actually names" was meant to be. The 1-hop capability
+            # stays implemented and unit-tested (a real gap this component
+            # names: reaching a source that never mentions the query entity
+            # directly), but is not wired into the live path until it can be
+            # made more selective. Recorded as a limitation, not hidden.
+            matched = graph.matched_sources(user_id, q_entities, hops=0)
             before_top = _hit_key(windows[0]["text"]) if windows[0].get("text") else None
             windows = graph.boost_windows(windows, matched)
             after_top = _hit_key(windows[0]["text"]) if windows[0].get("text") else None
