@@ -157,6 +157,10 @@ A component is DONE only when: its tests are green, relevant SLA rows pass,
 | 41 | CI pipeline + test-isolation fix | CI green on a PR; the isolation guard test is RED against current behavior first |
 | 42 | Supply chain + browser hardening | CI fails on a known-vulnerable pin; security headers asserted in `tests/test_contract.py` |
 | 43 | Auth0 authentication (OIDC, email+password) | unit vs a self-signed JWKS: valid token → expected tenant; expired/wrong-aud/wrong-iss/bad-sig/`alg=none`/HS256-confusion all rejected; spoofed `X-User-Id` ignored when a JWT is present; admin-token machine path still honors `X-User-Id` (bench must not break); `AUTH0_*` unset ⇒ behavior byte-identical to today |
+| 44 | Tracing facade + backends (Opik / OTel) | unit: no backend configured ⇒ every call a no-op; an exporter that raises never reaches the caller; nested spans nest |
+| 45 | RAG read-path spans | unit: one ask emits the expected span tree with decision attributes (gate score, rerank reordering, abstain reason); live: a real `/ask_stream` is one Opik trace whose step timings sum to observed latency |
+| 46 | Ingest tracing + cross-process correlation | unit: Redis trace-context round-trip; a missing context degrades to an uncorrelated trace, never an error; live: one document registration = one trace across API + worker |
+| 47 | Prompt & data versioning | unit: editing prompt text changes its version automatically; version appears on the LLM span and in the `/ask` payload; two `answer_quality.py` runs under different prompts are distinguishable |
 
 Cross-cutting, always: `grounding-auditor` after 7/8/10; search-during-ingest ratio
 ≤ 1.3× after 4/5; provided-endpoint regression (probe 6) after everything.

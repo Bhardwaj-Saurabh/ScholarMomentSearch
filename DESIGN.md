@@ -353,6 +353,61 @@ Primary eval, mirrored into `CLAUDE.md` §7:
   Live (after the tenant exists): a real email+password login reaches an empty
   workspace, ingests one source, and sees it — while a second account does not.
 
+### 3g. RAG observability: tracing, prompt & data versioning (added 2026-07-29, DECIDED)
+
+Supersedes §3e's "explicitly NOT doing → OTel distributed tracing" deferral, at
+the user's request. That deferral argued request-IDs + Sentry were proportionate
+for a 3-process system; the argument is weak for a RAG system, where the
+failure modes are *decisions* (which chunk won, why it abstained) rather than
+crashes, and aggregates cannot express them.
+
+**What exists today.** `src/metrics.py` gives per-route latency, status codes,
+token counts, estimated cost and abstain rate — all **aggregates**. They can say
+`/ask_stream` averages 13.6 s; they cannot say why one answer was wrong.
+`EMBED_VERSION`/`TEXT_EMBED_VERSION` are stamped on every Qdrant point, so data
+versioning is partly real already. Prompt versioning does not exist at all,
+which is the sharper gap: `benchmark/answer_quality.py` reported faithfulness
+0.96 / relevancy 5.0, and those numbers are attributable to nothing — editing a
+prompt silently makes them uncomparable.
+
+Decided with the user: **full-fidelity traces** (question + chunk text, so a
+trace can actually be debugged), **read path AND ingest with cross-process
+correlation**, and **content-hash prompt versioning stamped on traces and on
+answers**, pushed to Opik's prompt library.
+
+**Two constraints verified before scoping, both shaping the design:**
+1. `opik` (2.2.11) pulls **no** OpenTelemetry packages — it is a standalone SDK
+   with its own tracing model. "Opik + OTel" therefore means two backends, not
+   one library. So the business logic is instrumented ONCE against a local
+   facade that fans out; nothing in `search.py` imports either SDK.
+2. `src/ingest/pipeline.py` (the VIDEO tasks) is CLAUDE.md-protected, so spans
+   cannot be added inside it. Document ingest (`doc_pipeline.py`, ours) gets
+   full per-task spans; **video ingest gets flow-level spans only** — recorded
+   here as a known asymmetry rather than discovered later.
+
+| # | Component | File | Notes |
+|---|-----------|------|-------|
+| 44 | Tracing facade + backends | `src/tracing.py` (new), `src/config.py`, `requirements.txt` | One local API — `span(name, **attrs)` context manager, `set_attrs()`, `record_error()` — that fans out to whichever backends are configured: Opik (`OPIK_API_KEY`/`OPIK_WORKSPACE`/`OPIK_PROJECT_NAME`) and/or OTel (`OTEL_EXPORTER_OTLP_ENDPOINT`). Both unset ⇒ every call is a no-op and the app behaves exactly as today, the same convention as `REDIS_URL`/`AUTH0_*`/`CLIP_SERVICE_URL`. **Fails open on everything**: a backend that is down, slow or throwing must never surface in a response — telemetry is not allowed to break the product. Export is batched/async so it stays off the request path, which matters because `accept_latency_p95_ms` is already red. |
+| 45 | RAG read-path spans | `src/rag/search.py`, `src/rag/rerank.py`, `src/rag/query_enhance.py`, `src/llm.py` | One trace per ask, with a span per real step: query-enhance → embed (CLIP / dense / sparse, each tagged cache hit-or-miss) → visual search → hybrid dense+sparse search → RRF fuse → cross-encoder rerank → confidence gate → frame fetch → LLM answer → citation validation + both grounding backstops. Attributes are the **decisions**, not just timings: candidate ids and scores at each stage (so rerank reordering is visible), the gate's score and whether it abstained, which backstop stripped what, tokens/cost/model, and the embed+prompt versions in force. Tenant id is attached; per the user's decision the question and chunk text are captured in full. |
+| 46 | Ingest tracing + cross-process correlation | `src/ingest/doc_pipeline.py`, `src/jobs.py`, `src/worker.py` | Per-task spans for the four document tasks. **Correlation without touching protected files or Prefect signatures**: the enqueuing request stashes its trace context in Redis under `trace:{kind}:{id}` (`jobs.py` is extendable) and the worker picks it up, so registration → fetch → parse → caption → embed → indexed is ONE trace across two processes. Changing `ingest_document`'s parameters would alter a Prefect deployment signature, and `ingest_video`'s is protected outright — the Redis side-channel avoids both, and inherits `cache.py`'s fail-open contract so a missing context just yields an uncorrelated (not broken) trace. Video ingest gets a flow-level span only, per the constraint above. |
+| 47 | Prompt & data versioning | `src/prompts.py` (new), `src/llm.py`, `src/rag/query_enhance.py`, `benchmark/answer_quality.py`, `src/api/search.py` | A small registry: every prompt is registered by name with its text, and its version is the **content hash** — so it cannot drift out of date the way a hand-bumped constant can (the failure mode this exists to prevent). The version is attached to every LLM span, returned in the `/ask` payload, and pushed to Opik's prompt library so a trace links to the exact text. Data versioning extends what exists: alongside `EMBED_VERSION`/`TEXT_EMBED_VERSION`, record a **chunker version** (component 14 changed paper chunking with table/figure extraction and nothing recorded it) and the corpus revision, so an eval score is attributable to exact prompt + exact data. |
+
+Primary eval per component, mirrored into `CLAUDE.md` §7:
+- **44** — unit: with no backend configured every call is a no-op and adds no
+  measurable latency; a backend that raises on export never propagates to the
+  caller; nested spans nest.
+- **45** — unit: one ask emits the expected span tree with the decision
+  attributes present (gate score, rerank reordering, abstain reason); an
+  abstaining ask still emits a complete trace. Live: a real `/ask_stream`
+  appears in Opik as one trace with per-step timings that sum to the observed
+  latency.
+- **46** — unit: the Redis side-channel round-trips a trace context and a
+  missing one degrades to an uncorrelated trace rather than an error. Live: one
+  document registration produces a single trace spanning API and worker.
+- **47** — unit: editing a prompt's text changes its version automatically;
+  the version appears on the LLM span and in the `/ask` response; two runs of
+  `answer_quality.py` under different prompts are distinguishable by version.
+
 ## 4. Corpus & scale plan (right-sized — DECIDED)
 
 The product ships **pre-built with the 8 curated triplets** in `benchmark/corpus.json`
