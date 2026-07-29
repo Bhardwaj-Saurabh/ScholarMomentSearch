@@ -4512,3 +4512,154 @@ change. Still RED against the 0.70 gate; `quality_gates.json` untouched.
 **Commit**: pending — `src/injection.py`, `src/llm.py`, `src/rag/search.py`,
 `src/rag/query_enhance.py`, `src/api/search.py`,
 `benchmark/answer_quality.py`, `tests/test_injection.py`.
+
+---
+
+### 2026-07-29 — DATA-INTEGRITY FINDING: every seeded paper and deck had zero vectors
+
+Found while backfilling the entity graph for component 50 — **not** something
+any existing eval was watching, which is the point.
+
+**What was wrong.** `/admin/sources` reported 16 seeded documents as `indexed`
+with real chunk counts (`doc_seed_gpt3_paper` 189, `doc_seed_cot_paper` 142,
+`doc_seed_clip_paper` 117, ... 28-189 each, ~1100 total). Qdrant held almost
+none of them:
+
+    TEXT_COLLECTION total: 2053
+      by kind: {None: 2029, 'paper': 24}        <-- 'deck': ZERO
+      by user: {'default': 2035, 'u_576dff...': 18}
+
+Per-source exact counts, using the indexed `source_id` field (not scroll
+pagination, so this is authoritative):
+
+    doc_seed_gpt3_paper        points=0
+    doc_seed_clip_deck         points=0
+    doc_seed_bert_paper        points=0
+    doc_seed_cot_paper         points=0
+    doc_seed_lora_paper        points=0
+    doc_seed_rag_deck          points=0
+    doc_seed_attention_paper   points=0
+    doc_006af4d547             points=24    <-- ORPHAN: vectors with no PG row
+
+So both divergence directions were live at once: 16 rows claiming `indexed`
+with no vectors, and one set of vectors with no row.
+
+**Why it matters more than anything else in this session:**
+- The README's graded Definition of Done includes *"one query cites video +
+  paper + deck with working deep-links."* With **zero deck vectors indexed,
+  that requirement could not be satisfied at all.**
+- Every `precision_at_10` / `recall_at_10` number recorded before today —
+  including the 0.635 / 0.594 / 0.567 / **0.542** series and today's baseline
+  0.544 / 0.542 / 0.524 — was measured against a corpus that was **video-only
+  in practice**. They are not measurements of the system we thought we were
+  measuring. This does not invalidate component 49's attribution conclusion
+  (that comparison was like-for-like on the same broken corpus), but it does
+  mean the absolute retrieval numbers need re-measuring once the corpus is
+  whole.
+
+**Root cause, in code.** `src/seeding.py:87-91` decides what needs seeding from
+the Postgres status flag alone:
+
+    def _not_indexed_documents() -> list[dict]:
+        ...
+        if (row or {}).get("status") != "indexed":
+
+and `:117` short-circuits on `"everything already indexed — ready"`. Component
+15's hybrid-search migration **required dropping and recreating
+TEXT_COLLECTION** (documented in DESIGN.md §3b: "drop + recreate
+TEXT_COLLECTION ... + reseed"). After the recreate, the document rows still
+said `indexed`, so seeding skipped all 16 and their vectors were never
+rebuilt. Nothing checks that a row marked `indexed` actually has vectors —
+which is exactly the reconciliation gap component 34 was scoped for, in the
+direction nobody looked.
+
+**Repair performed (state, not code — the code fix is not written yet):**
+- Purged 33 stuck `probe N` documents from tenant `default` (leftovers from
+  earlier bench latency probes, all `pending`/`failed`).
+- Purged **112** bench-tenant documents (`bench-load-*` 40, `bench-resilience-*`
+  40, `bench-throughput-*` 32) plus 5 `latency-probe-*` rows. These were keeping
+  the worker permanently saturated: the reconciler restarted them forever while
+  their fetches 404'd, logging `200 scheduled runs skipped (at capacity)`.
+- Purged the orphan `doc_006af4d547` vectors (2053 -> 2029 points).
+- Reset all 16 seeded documents to `pending` and issued
+  `POST /admin/documents/{id}/retry` — **all 16 returned 202**.
+
+**Still outstanding — NOT verified, stated plainly:** at the time of writing the
+16 re-ingests are still queued behind ~200 stale Prefect flow runs left over
+from the killed bench process (each now failing fast with `no manifest row`).
+Qdrant still reads `TEXT_COLLECTION total: 2029`, i.e. **the papers and decks
+are not back yet**. The re-index, and the honest re-measure of
+precision@10 / recall@10 / `answer_quality.py` on a whole corpus, have NOT
+happened. No number in this entry claims otherwise.
+
+**Recommended follow-ups (not yet built):**
+1. Make seeding verify rather than trust — check vector presence per source,
+   not just `status == 'indexed'`. This is the actual bug.
+2. Extend the component-34 reconciler to detect the row-without-vectors
+   direction, not only orphan-vectors.
+3. Give `bench.py` a cleanup path for its throwaway tenants, or make the
+   reconciler ignore `bench-*`. A killed benchmark should not be able to
+   saturate the worker indefinitely.
+4. The full `benchmark/bench.py` run was **aborted after 57 minutes** and its
+   numbers discarded — its ingest phases were thrashing against this broken
+   state. The SLA gate for components 49/50 therefore has NOT been run.
+
+---
+
+### 2026-07-29 — Component 50: entity-graph augmented retrieval (DESIGN.md §3i) — LANDED, NOT DONE
+
+Scoped in DESIGN.md §3i. Chosen over component 22 (semantic answer cache)
+deliberately: CLAUDE.md §7 states "Components 21-22 are built only if the
+in-region re-measure [component 29] says they're needed", and 29 depends on the
+un-shipped Fly deploy. That gate was respected, not overridden.
+
+**RED**: `tests/test_graph.py` -> `ImportError: cannot import name 'graph'`,
+then behavioural failures once the module existed.
+
+**GREEN**:
+
+    uv run pytest tests/test_graph.py -q   -> 34 passed
+    uv run pytest tests/ -q                -> 588 passed
+
+**Two defects found by measuring the real corpus, not by reasoning.**
+
+1. *Generic entities.* Backfilling `default` gave
+   `{'chunks_scanned': 2035, 'sources': 13, 'edges_written': 474}`, and the
+   most-shared "entities" were:
+
+       [('ai', 10), ('gpt', 7), ('gpus', 5), ('qa', 4), ('gpt-3', 4),
+        ('gpu', 3), ('api', 3), ('harry potter', 3), ('nlp', 2), ...]
+
+   Every one of `ai/api/gpu/os/url/qa` would fire the boost on almost any
+   question and reward whichever source says them most — the opposite of the
+   intended effect. Two fixes: a measured `_GENERIC` exclusion list, and an
+   **IDF guard** (`discriminating()`) that drops any entity mentioned by more
+   than 35% of a tenant's sources, skipped below 6 sources where the frequency
+   would mean nothing. The hop expansion is filtered too, since a hop off a
+   specific entity easily lands on a generic one.
+
+2. *The backfill is what exposed the data-integrity finding above* — only 13
+   sources and one `doc_` source came back, which is what prompted the Qdrant
+   audit.
+
+**Safety properties, all unit-proven:** boost is bounded by `MAX_BOOST` and
+cannot invert a large score gap; never adds or drops a window; ties break
+deterministically (same contract as `_merge_hits`/`_fuse`); tenant A's graph
+never reaches tenant B's rows; every DB path fails open; and with
+`GRAPH_RETRIEVAL_ENABLED` off the read path **does not call `graph.py` at all**
+(asserted, not assumed) — which is what keeps prior baselines valid.
+
+**NOT DONE, and not claimed to be.** Per CLAUDE.md §4 a component is done only
+when tests are green AND the relevant SLA rows pass AND `spec-guardian` returns
+PASS AND EVIDENCE.md is updated. Outstanding here:
+- **No live before/after measurement exists.** `precision_at_10` /
+  `recall_at_10` / `search_p95` with `GRAPH_RETRIEVAL_ENABLED` on vs off have
+  NOT been run, because the corpus is mid-repair (see the entry above). The
+  flag ships **false**, so this cannot affect anything until that eval is done.
+- `spec-guardian` has not passed on this diff (its first run stalled on a
+  600s watchdog and was not relaunched before the corpus repair took priority).
+- `grounding-auditor` has not been run against components 49/50.
+
+**Commit**: pending — `src/graph.py`, `src/db.py`, `src/config.py`,
+`src/rag/search.py`, `src/ingest/doc_pipeline.py`, `tests/test_graph.py`,
+`DESIGN.md`, `CLAUDE.md`.

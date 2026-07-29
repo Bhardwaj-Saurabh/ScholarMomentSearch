@@ -13,8 +13,8 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from .. import (cache, config, db, injection, llm, metrics, prompts, storage,
-                tracing)
+from .. import (cache, config, db, graph, injection, llm, metrics, prompts,
+                storage, tracing)
 from ..config import (BRANCH_TOP_K, CONFIDENCE_THRESHOLD, CROSS_MODAL_BOOST,
                       FUSION_WINDOW_S, RRF_K, TEXT_CONFIDENCE_THRESHOLD, TOP_K)
 from . import vector_store
@@ -249,6 +249,24 @@ def _retrieve_impl(question: str, user_id: str, *, top_k: int | None = None,
         windows = _fuse(vhits, thits)
         _sf.set_attrs(windows=len(windows),
                       top_rrf=round(windows[0]["rrf"], 6) if windows else 0.0)
+
+    # Component 50 (DESIGN.md §3i): symbolic entity signal on top of fusion.
+    # Placed AFTER fuse and BEFORE rerank so the cross-encoder still gets to
+    # judge the reordered set. Opt-in and bounded: with the flag off this block
+    # does not execute at all, so every baseline number recorded in EVIDENCE.md
+    # stays valid, and even when on it can only RAISE a score by MAX_BOOST —
+    # never filter, so a correct answer can't be dropped (AGENTS.md #5).
+    if graph.enabled() and windows:
+        with tracing.span("graph_boost") as _sg:
+            q_entities = graph.extract_entities(question)
+            matched = graph.matched_sources(user_id, q_entities, hops=1)
+            before_top = _hit_key(windows[0]["text"]) if windows[0].get("text") else None
+            windows = graph.boost_windows(windows, matched)
+            after_top = _hit_key(windows[0]["text"]) if windows[0].get("text") else None
+            _sg.set_attrs(question_entities=",".join(q_entities[:10]) or "none",
+                          matched_sources=len(matched),
+                          boosted=sum(1 for w in windows if w.get("graph_boosted")),
+                          changed_top_hit=str(before_top) != str(after_top))
 
     if config.RERANK_ENABLED:
         # Component 16: RRF is rank-based (score-agnostic) — a cross-encoder

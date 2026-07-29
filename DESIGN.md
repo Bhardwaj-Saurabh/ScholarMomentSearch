@@ -487,6 +487,74 @@ Primary eval:
   `grounding-auditor` confirms no fabricated citation results; `answer_quality.py`
   is re-run so the post-change relevancy/faithfulness are recorded, not inherited.
 
+### 3i. Entity-graph augmented retrieval (added 2026-07-29, DECIDED — own scope, own gates)
+
+Scoped from the same architecture comparison as §3h, which found "Knowledge
+Graph / GraphRAG" and "Reason: agentic plan / reflect / graph hops" entirely
+absent. This is the component that attacks the one number we have never moved:
+`precision_at_10` measured **0.542 / 0.542 / 0.542** on 2026-07-29 against a
+0.70 gate (baseline without §3h: 0.544 / 0.542 / 0.524 — see EVIDENCE.md).
+
+**Why the semantic cache was NOT chosen instead.** CLAUDE.md §7 states the rule
+plainly: "Components 21–22 are built only if the in-region re-measure
+[component 29] says they're needed — never *because caching is good*."
+Component 29 depends on the Fly deploy (28), which has not shipped. Building 22
+now would break an ordering rule this repo set deliberately, so §3i takes the
+other branch. Component 22 stays exactly where it is: gated behind 29.
+
+**The failure mode this targets, concretely.** Dense retrieval cannot tell
+"about entity X" from "similar to text that discusses entity X". A question
+naming a specific paper pulls in topically adjacent chunks from *other* papers
+in the same field, which is precisely the cross-triplet adjacency already
+diagnosed as a precision@10 cause, and precisely what the two grounding
+violations in EVIDENCE.md's Part-0 audit were made of. An entity index adds a
+**symbolic** signal that similarity cannot supply.
+
+**Four decisions, each with its cost stated:**
+
+1. **Postgres, not Neo4j.** No new service for the user to provision, pay for,
+   or add to `fly.toml`; the manifests already live in Postgres and the graph
+   is small (8 curated triplets → low thousands of nodes). *Cost, disclosed:*
+   no Cypher and no cheap deep traversal. We do 1-hop neighbour lookup in SQL,
+   which is what the re-scoring boost actually consumes. Recorded threshold
+   rather than a "never": if the corpus grows past roughly 10⁵ edges, or if
+   multi-hop path queries become the dominant read, that is when a graph
+   database earns its place.
+2. **No LLM extraction pass over the corpus.** An LLM call per chunk is
+   thousands of calls with unpredictable cost, and it would directly threaten
+   the `ingest_throughput` ≥ 8 chunks/s SLA gate. Entities instead come from
+   (a) source titles, which are already curated and high-precision, (b) a
+   deterministic capitalized-phrase/acronym extractor over chunk text, and
+   (c) `benchmark/corpus.json`'s triplet metadata. Edges are `mentions`
+   (chunk → entity) and `co_occurs` (entity ↔ entity in the same chunk).
+   *Cost, disclosed:* this is an **entity index with co-occurrence edges, not
+   LLM-extracted semantic relations**. It is weaker than full GraphRAG and the
+   name should not imply otherwise.
+3. **Boost, never filter.** The graph signal only ever *raises* a window's
+   score, post-fusion and pre-rerank, by a bounded amount. It can therefore
+   never remove a correct answer from the candidate set, which keeps
+   grounded-or-silent (AGENTS.md #5) structurally safe rather than
+   argumentatively safe.
+4. **Flag-gated, default OFF** (`GRAPH_RETRIEVAL_ENABLED`), exactly like
+   component 17. The baseline latency and recall numbers a reviewer sees must
+   be byte-identical with the flag unset.
+
+| # | Component | File | Notes |
+|---|-----------|------|-------|
+| 50 | Entity-graph augmented retrieval | `src/graph.py` (new), `src/db.py`, `src/rag/search.py`, `src/ingest/doc_pipeline.py`, `src/config.py` | Two new tenanted tables (`graph_entities`, `graph_mentions`) created in `db.init_schema()` alongside the existing ones. A deterministic extractor (`graph.extract_entities(text, title)`) runs at ingest for documents and is backfillable for already-indexed content, writing `mentions` rows keyed by the chunk's own locator so a boost is always traceable to a real citation. At query time, with the flag on: extract entities from the question, look up their 1-hop neighbours, and add a bounded boost to any fused window whose chunk mentions a question entity or one of its neighbours. Every row and every query carries `user_id`. Extraction failures, a missing table, or a Postgres error all degrade to "no boost" — never an error on the read path, same fail-open contract as `src/cache.py` and `src/injection.py`. |
+
+Primary eval:
+- **50** — unit: the extractor is deterministic and tenant-scoped; a question
+  naming an entity ranks the chunk that *mentions* it above a topically-similar
+  chunk that does not; the boost is **bounded** (cannot by itself invert a large
+  score gap); tenant A's graph never matches tenant B's rows; **with the flag
+  off, the fused ordering is byte-identical to today's** (the property that
+  protects every recorded baseline number). Live: `precision_at_10` and
+  `recall_at_10` with the flag ON vs OFF, verbatim both ways including a null
+  or negative result, plus `search_p95` on vs off so the latency cost is
+  disclosed rather than hidden. `quality_gates.json` stays the judge and stays
+  unedited — if the graph does not help, that gets recorded, not tuned away.
+
 ## 4. Corpus & scale plan (right-sized — DECIDED)
 
 The product ships **pre-built with the 8 curated triplets** in `benchmark/corpus.json`

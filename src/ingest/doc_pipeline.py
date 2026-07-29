@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 
 from prefect import flow, task
 
-from .. import db, llm, storage, trace_link, tracing
+from .. import db, graph, llm, storage, trace_link, tracing
 from ..config import TEXT_EMBED_VERSION
 from ..rag import vector_store
 from ..rag.embeddings import embed_docs
@@ -184,6 +184,22 @@ def t_embed_index(doc_id: str, user_id: str, kind: str, chunks: list[dict]) -> i
     vector_store.upsert_document_chunks(user_id, doc_id, kind, vectors, payloads)
     db.set_document_status(doc_id, "indexed", chunk_count=len(chunks),
                            embed_version=TEXT_EMBED_VERSION, progress=1.0)
+
+    # Component 50 (DESIGN.md §3i): index this document's entities for the
+    # graph boost. Deliberately AFTER the status flip to 'indexed' — the
+    # crash-safety invariant above is what the whole pipeline is built around,
+    # and a graph write is not allowed to sit between the upsert and the flip.
+    # `record_mentions` swallows its own errors, so this cannot fail an ingest;
+    # a missed write just means no boost for this source until it is re-indexed.
+    row = db.get_document(doc_id) or {}
+    entities: list[str] = []
+    seen: set[str] = set()
+    for c in chunks:
+        for e in graph.extract_entities(c.get("text"), title=row.get("title")):
+            if e not in seen:
+                seen.add(e)
+                entities.append(e)
+    graph.record_mentions(user_id, doc_id, kind, entities)
     return len(chunks)
 
 

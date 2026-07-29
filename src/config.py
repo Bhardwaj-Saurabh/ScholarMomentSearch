@@ -274,6 +274,12 @@ RERANK_MODEL = os.getenv("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 # become the baseline latency graders/reviewers see unless explicitly turned on.
 QUERY_ENHANCEMENT_ENABLED = _envbool("QUERY_ENHANCEMENT_ENABLED", False)
 
+# DESIGN.md §3i component 50 — entity-graph retrieval boost. Default FALSE for
+# the same reason as QUERY_ENHANCEMENT_ENABLED above: an opt-in retrieval change
+# must never move the baseline numbers a reviewer sees unless explicitly turned
+# on. With this off, src/graph.py is never called from the read path.
+GRAPH_RETRIEVAL_ENABLED = _envbool("GRAPH_RETRIEVAL_ENABLED", False)
+
 # --- Redis cache (DESIGN.md §3d, component 19) --------------------------------
 # REDIS_URL unset -> caching is disabled entirely (src/cache.py's enabled() is
 # False, every function becomes a no-op) rather than attempting -- and

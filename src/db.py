@@ -100,6 +100,23 @@ ALTER TABLE ms_documents ADD COLUMN IF NOT EXISTS flow_run_id TEXT;
 -- Bring-your-own-model: a tenant's hosted LLM endpoint (vLLM / Ollama / any
 -- OpenAI-compatible server, NVIDIA NIM, or Anthropic). When a row exists the
 -- read path answers with THIS model instead of the server's LLM_* env config.
+-- DESIGN.md §3i component 50: entity -> source edges for graph-augmented
+-- retrieval. One row per (tenant, entity, source); co-occurrence "edges" are
+-- derived by self-joining on source_id rather than stored, which keeps writes
+-- idempotent and avoids a second table that could disagree with this one.
+-- Tenanted like every other table here. Only read when
+-- GRAPH_RETRIEVAL_ENABLED is on; always safe to leave populated and unused.
+CREATE TABLE IF NOT EXISTS ms_graph_mentions (
+    user_id     TEXT NOT NULL,
+    entity      TEXT NOT NULL,               -- normalized (lowercased, trimmed)
+    source_id   TEXT NOT NULL,               -- ms_documents.id or ms_videos.id
+    source_kind TEXT NOT NULL,               -- paper | deck | video
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, entity, source_id)
+);
+CREATE INDEX IF NOT EXISTS ms_graph_entity_idx ON ms_graph_mentions (user_id, entity);
+CREATE INDEX IF NOT EXISTS ms_graph_source_idx ON ms_graph_mentions (user_id, source_id);
+
 CREATE TABLE IF NOT EXISTS ms_user_llms (
     user_id    TEXT PRIMARY KEY,
     provider   TEXT NOT NULL DEFAULT 'openai',  -- openai | nvidia | anthropic
@@ -361,9 +378,118 @@ def documents_by_ids(ids: list[str]) -> dict[str, dict]:
     return {r["id"]: r for r in rows}
 
 
+# ── Entity graph (DESIGN.md §3i component 50) ────────────────────────────────
+# Every function here filters by user_id. src/graph.py wraps all three in
+# try/except so a Postgres error degrades to "no boost" rather than a 500 on
+# the read path.
+
+def graph_upsert_mentions(user_id: str, source_id: str, source_kind: str,
+                          entities: list[str]) -> int:
+    """Idempotent bulk insert of entity -> source edges."""
+    if not entities:
+        return 0
+    rows = [(user_id, e, source_id, source_kind) for e in dict.fromkeys(entities)]
+    with pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO ms_graph_mentions (user_id, entity, source_id, source_kind)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (user_id, entity, source_id) DO NOTHING
+                """,
+                rows,
+            )
+    return len(rows)
+
+
+def graph_sources_for_entities(user_id: str, entities: list[str]) -> list[str]:
+    if not entities:
+        return []
+    with pool().connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT source_id FROM ms_graph_mentions
+            WHERE user_id = %s AND entity = ANY(%s)
+            """,
+            (user_id, list(entities)),
+        ).fetchall()
+    return [r["source_id"] for r in rows]
+
+
+def graph_source_count(user_id: str) -> int:
+    """How many distinct sources this tenant has in the graph — the
+    denominator for graph.discriminating()'s IDF guard."""
+    with pool().connection() as conn:
+        row = conn.execute(
+            "SELECT count(DISTINCT source_id) AS n FROM ms_graph_mentions WHERE user_id = %s",
+            (user_id,),
+        ).fetchone()
+    return int((row or {}).get("n") or 0)
+
+
+def graph_entity_source_counts(user_id: str, entities: list[str]) -> dict[str, int]:
+    """entity -> how many distinct sources mention it."""
+    if not entities:
+        return {}
+    with pool().connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT entity, count(DISTINCT source_id) AS n FROM ms_graph_mentions
+            WHERE user_id = %s AND entity = ANY(%s)
+            GROUP BY entity
+            """,
+            (user_id, list(entities)),
+        ).fetchall()
+    return {r["entity"]: int(r["n"]) for r in rows}
+
+
+def graph_neighbours(user_id: str, entities: list[str]) -> list[str]:
+    """1-hop co-occurrence: entities sharing a source with any of `entities`.
+    The self-join IS the graph edge — see the schema comment for why the edges
+    are derived rather than stored."""
+    if not entities:
+        return []
+    with pool().connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT m2.entity
+            FROM ms_graph_mentions m1
+            JOIN ms_graph_mentions m2
+              ON m1.user_id = m2.user_id AND m1.source_id = m2.source_id
+            WHERE m1.user_id = %s AND m1.entity = ANY(%s) AND m2.entity <> m1.entity
+            """,
+            (user_id, list(entities)),
+        ).fetchall()
+    return [r["entity"] for r in rows]
+
+
+def graph_delete_source(source_id: str) -> None:
+    """Drop a source's entity edges when its content stops being searchable.
+
+    Keyed on source_id alone because `delete_document(doc_id)` has no user_id
+    in scope and source ids are globally unique (`doc_<hash>`) — this deletes
+    rows for exactly the source being removed, never another tenant's.
+
+    Worth stating: stale rows here are **inert**, not dangerous. A boost only
+    applies to a window that retrieval already returned, so an entity pointing
+    at a source with no vectors left matches nothing. This is hygiene, not a
+    correctness fix."""
+    with pool().connection() as conn:
+        conn.execute(
+            "DELETE FROM ms_graph_mentions WHERE source_id = %s", (source_id,))
+
+
 def delete_document(doc_id: str) -> None:
     with pool().connection() as conn:
         conn.execute("DELETE FROM ms_documents WHERE id = %s", (doc_id,))
+    # Component 50: additive cleanup of the new graph table only — the
+    # document delete above is unchanged. Swallowed because a graph-hygiene
+    # failure must not turn a successful delete into an error, and stale rows
+    # are inert anyway (see graph_delete_source).
+    try:
+        graph_delete_source(doc_id)
+    except Exception:
+        pass
 
 
 def _pct(progress: float | None) -> int | None:

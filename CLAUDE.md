@@ -162,6 +162,7 @@ A component is DONE only when: its tests are green, relevant SLA rows pass,
 | 46 | Ingest tracing + cross-process correlation | unit: Redis trace-context round-trip; a missing context degrades to an uncorrelated trace, never an error; live: one document registration = one trace across API + worker |
 | 48 | Eval dataset + experiment versioning in Opik | unit: dataset push idempotent; experiment metadata carries dataset + all prompt/embed/chunker versions + retrieval flags; `OPIK_API_KEY` unset ⇒ benchmarks byte-identical. Opik is the RECORD, never the gate — `quality_gates.json` stays the judge |
 | 47 | Prompt & data versioning | unit: editing prompt text changes its version automatically; version appears on the LLM span and in the `/ask` payload; two `answer_quality.py` runs under different prompts are distinguishable |
+| 50 | Entity-graph augmented retrieval | unit: extractor deterministic + stopword-filtered; boost is BOUNDED (cannot invert a large score gap) and never adds/drops a window; tenant A's graph never matches tenant B's rows; 1-hop co-occurrence reaches a source that never mentions the query entity; **flag off ⇒ read path never calls graph.py at all**; live: `precision_at_10` + `recall_at_10` + `search_p95` with `GRAPH_RETRIEVAL_ENABLED` on vs off, verbatim both ways including a null result |
 | 49 | Indirect prompt-injection guardrail | unit: a chunk carrying a forged `[n] … — excerpt:` line cannot add a moment line to the built prompt; control tokens/newlines/over-length neutralized; a benign excerpt with real brackets/quotes survives byte-unchanged; live: adversarial doc registered → `grounding-auditor` finds no fabricated citation, and `answer_quality.py` is RE-MEASURED (the `SYSTEM` edit invalidates component 13's old numbers) |
 
 Component 49 (DESIGN.md §3h, added 2026-07-29) treats the CORPUS as an untrusted
@@ -176,6 +177,23 @@ Non-negotiables:
   produces our own eval numbers; leaving it unsanitized makes those numbers
   attacker-influencable, which is an E4 problem, not just a security one.
 - **Fails open.** A sanitizer error must never break the read path.
+
+Component 50 (DESIGN.md §3i, added 2026-07-29) is the GraphRAG branch, taken
+BECAUSE component 22 is gated: the semantic-cache rule above ("21-22 only if
+29's re-measure says so") still holds and was not overridden. Non-negotiables:
+- **`GRAPH_RETRIEVAL_ENABLED` defaults false**, and with it off the read path
+  must not call `src/graph.py` at all — not "calls it and gets nothing". This
+  is what keeps every recorded precision@10/recall@10 number valid.
+- **Boost, never filter.** Bounded by `graph.MAX_BOOST`. The graph may only
+  raise a score, so it can never drop a correct answer (AGENTS.md #5).
+- **Not full GraphRAG, and never described as such.** Deterministic regex
+  extraction + co-occurrence edges, no LLM pass (an LLM call per chunk would
+  threaten the `ingest_throughput` ≥ 8 chunks/s gate).
+- **Video sources get title-level entities only** — `src/ingest/pipeline.py` is
+  protected, so per-chunk extraction cannot be added there. Same asymmetry as
+  component 46's tracing.
+- If the graph does not improve precision@10, that gets **recorded**, not
+  tuned away. `quality_gates.json` stays frozen.
 
 Cross-cutting, always: `grounding-auditor` after 7/8/10; search-during-ingest ratio
 ≤ 1.3× after 4/5; provided-endpoint regression (probe 6) after everything.
