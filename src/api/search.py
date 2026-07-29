@@ -54,6 +54,16 @@ def get_config(x_user_id: str | None = Header(default=None)):
         "top_k": config.TOP_K,
         "upload_mode": "presigned" if storage.presign_capable() else "direct",
         "max_upload_mb": config.MAX_UPLOAD_MB,
+        # Component 43. All three are PUBLIC values in an Authorization Code +
+        # PKCE flow — the SPA needs them to talk to Auth0 at all, and there is
+        # no client secret anywhere in this application. `enabled` false means
+        # the UI hides its Sign-in button entirely.
+        "auth0": {
+            "enabled": bool(config.AUTH0_DOMAIN and config.AUTH0_AUDIENCE),
+            "domain": config.AUTH0_DOMAIN,
+            "client_id": config.AUTH0_CLIENT_ID,
+            "audience": config.AUTH0_AUDIENCE,
+        },
     }
 
 

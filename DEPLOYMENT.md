@@ -142,6 +142,50 @@ fly secrets list          # names + digests only; values are never shown back
 > `TRUST_PROXY_HEADERS=false` — otherwise `X-Forwarded-For` is
 > client-controlled and rotating it defeats the limiter.
 
+### 3b. Auth0 user login (optional — DESIGN.md §3f component 43)
+
+Leave `AUTH0_*` unset and the app runs exactly as it did before this existed:
+no Sign-in button, `ADMIN_TOKEN` remains the only credential. To turn on real
+email+password accounts:
+
+1. **Auth0 → Applications → Create Application** → *Single Page Web
+   Application*. Note its **Domain** and **Client ID**.
+2. In that application's **Settings**, set all three of these to your origins
+   (comma-separated; include every URL the UI is served from):
+   - *Allowed Callback URLs*: `http://localhost:8000, http://localhost:8000/get-started, https://<app>.fly.dev, https://<app>.fly.dev/get-started`
+   - *Allowed Logout URLs*: same list
+   - *Allowed Web Origins*: `http://localhost:8000, https://<app>.fly.dev`
+3. **Auth0 → APIs → Create API**. The **Identifier** you choose (e.g.
+   `https://momentsearch/api`) becomes `AUTH0_AUDIENCE`. It is an identifier,
+   not an address — nothing ever fetches it.
+4. **Auth0 → Authentication → Database**: the default
+   *Username-Password-Authentication* connection is what provides email +
+   password. Confirm it is **enabled for the application** from step 1.
+5. Set the three public values (no secret — this is a PKCE flow):
+
+```powershell
+fly secrets set `
+  AUTH0_DOMAIN="your-tenant.us.auth0.com" `
+  AUTH0_CLIENT_ID="…" `
+  AUTH0_AUDIENCE="https://momentsearch/api"
+```
+
+**What login changes, and what it deliberately does not:**
+
+- **Search stays public.** `/api/ask`, `/ask_stream` and the read endpoints
+  work with no account, so the deployed demo still answers cross-source for a
+  first-time visitor (a graded README requirement).
+- **Mutations accept EITHER** a signed-in user's token **or** `ADMIN_TOKEN`.
+  The latter stays for machines — `benchmark/bench.py` and `eval/eval.py`
+  authenticate that way, and it keeps honoring `X-User-Id`, which makes it a
+  deliberately cross-tenant operator credential. Treat it accordingly.
+- **Tenancy becomes real.** A signed-in user's tenant is derived from their
+  verified token and OVERWRITES any `X-User-Id` they send. Before this,
+  that header was an unauthenticated free-for-all.
+- **New accounts start empty.** Isolation is strict: the seeded demo corpus is
+  not shared into user workspaces, so a fresh login sees an empty library until
+  that user ingests something. This is intentional; the UI says so.
+
 ### 4. Deploy
 
 ```powershell

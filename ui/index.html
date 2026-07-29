@@ -10,6 +10,10 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
+<!-- Auth0 SPA SDK (component 43). Authorization Code + PKCE — no client
+     secret ever reaches the browser. Loaded from a CDN like Tailwind/Inter
+     above; pinning these with SRI is component 42's scope. -->
+<script src="https://cdn.auth0.com/js/auth0-spa-js/2.1/auth0-spa-js.production.js"></script>
 <script>
   tailwind.config = { theme: { extend: {
     fontFamily: { sans:['Inter','system-ui','sans-serif'] },
@@ -66,6 +70,14 @@
       <!-- Admin token (component 27). Lives in the sidebar so it is reachable
            from every view: adding sources, retrying and deleting all need it,
            not just the Metrics page where it used to live. -->
+      <!-- Auth0 sign-in (component 43). Hidden entirely when AUTH0_* is
+           unset, so a stack without a tenant configured looks exactly as it
+           did before this existed. -->
+      <div id="authBox" class="hidden space-y-1.5">
+        <div id="authedAs" class="hidden text-[11px] leading-snug text-slate-500 break-all"></div>
+        <button id="loginBtn" class="hidden w-full rounded-lg bg-indigo-600 hover:bg-indigo-700 px-2 py-1.5 text-[11px] font-medium text-white transition">Sign in</button>
+        <button id="logoutBtn" class="hidden w-full rounded-lg border border-slate-200 hover:bg-slate-50 px-2 py-1.5 text-[11px] font-medium text-slate-600 transition">Sign out</button>
+      </div>
       <div data-full-only class="space-y-1.5">
         <label class="block text-[11px] font-medium text-slate-500">Admin token</label>
         <div class="flex gap-1.5">
@@ -407,9 +419,17 @@ function setAdminToken(v){
   document.querySelectorAll("[data-admin-token]").forEach(el=>el.value=adminToken());
   syncTokenHint();
 }
+/* A signed-in user's access token WINS over the admin token: the JWT carries a
+   real identity the server can verify, whereas the admin token is an operator
+   credential that leaves the tenant to a header. If both are present, sending
+   the JWT is what makes the request act as that user. */
+async function bearerToken(){
+  const t=await auth0AccessToken();
+  return t || adminToken();
+}
 async function authFetch(url, opts){
   const o=Object.assign({}, opts||{});
-  o.headers=withAuth(o.headers, adminToken());
+  o.headers=withAuth(o.headers, await bearerToken());
   return fetch(url, o);
 }
 /* Turn a failed mutation into an actionable sentence rather than a bare code.
@@ -423,6 +443,60 @@ function syncTokenHint(){
   const hint=$("#tokenHint"); if(!hint) return;
   hint.classList.toggle("hidden", !!adminToken());
 }
+
+/* ---------- Auth0 (DESIGN.md §3f component 43) ----------
+   Authorization Code + PKCE via the SPA SDK: no client secret in the browser.
+   Everything degrades to "signed out" on any failure — the app must stay
+   usable (search is public) even if Auth0 is unreachable or misconfigured. */
+let _auth0=null, _auth0User=null;
+
+async function initAuth0(cfg){
+  const a=cfg&&cfg.auth0;
+  if(!a||!a.enabled||!window.auth0) return;      // feature off -> UI stays hidden
+  try{
+    _auth0=await auth0.createAuth0Client({
+      domain:a.domain, clientId:a.client_id,
+      authorizationParams:{redirect_uri:window.location.origin+window.location.pathname,
+                           audience:a.audience},
+      cacheLocation:"localstorage", useRefreshTokens:true,
+    });
+    // Returning from the Auth0 redirect: consume ?code&state, then strip them
+    // so a refresh doesn't replay a one-time code.
+    if(location.search.includes("code=")&&location.search.includes("state=")){
+      try{ await _auth0.handleRedirectCallback(); }catch(e){}
+      history.replaceState({}, document.title, location.pathname);
+    }
+    if(await _auth0.isAuthenticated()) _auth0User=await _auth0.getUser();
+  }catch(e){ _auth0=null; }
+  renderAuth();
+}
+
+async function auth0AccessToken(){
+  if(!_auth0) return "";
+  try{
+    if(!(await _auth0.isAuthenticated())) return "";
+    return await _auth0.getTokenSilently();
+  }catch(e){ return ""; }        // expired session -> treat as signed out
+}
+
+function renderAuth(){
+  const box=$("#authBox"); if(!box) return;
+  if(!_auth0){ box.classList.add("hidden"); return; }
+  box.classList.remove("hidden");
+  const signedIn=!!_auth0User;
+  $("#loginBtn").classList.toggle("hidden", signedIn);
+  $("#logoutBtn").classList.toggle("hidden", !signedIn);
+  const who=$("#authedAs");
+  who.classList.toggle("hidden", !signedIn);
+  // The email comes from the SDK's own id token — the server never stores a
+  // sub->tenant mapping, so this label is the only place it exists.
+  if(signedIn) who.textContent="Signed in as "+(_auth0User.email||_auth0User.name||"user");
+}
+
+$("#loginBtn").onclick=()=>{ if(_auth0) _auth0.loginWithRedirect(); };
+$("#logoutBtn").onclick=()=>{
+  if(_auth0) _auth0.logout({logoutParams:{returnTo:window.location.origin+window.location.pathname}});
+};
 
 /* ---------- icons (Lucide 24x24 paths, one definition each) ---------- */
 const ICONS={
@@ -493,6 +567,7 @@ function applyMode(){
 /* ---------- config + corpus data ---------- */
 async function loadConfig(){
   try{ const c=await (await fetch("/api/config")).json(); const b=$("#llmBadge");
+    initAuth0(c).then(()=>{ loadVideos(); loadDocuments(); });  // re-scope to the signed-in tenant
     if(c.llm_configured){ b.textContent="LLM · "+(c.llm_model||c.llm_provider);
       b.className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700"; }
     else { b.textContent="No LLM — retrieval only";
@@ -511,7 +586,7 @@ let VIDEOS=[], DOCS=[];
 const _INFLIGHT=["pending","queued","fetching","sampling","embedding","parsing"];
 
 async function loadVideos(){
-  const {videos}=await (await fetch("/api/videos")).json();
+  const {videos}=await (await authFetch("/api/videos")).json();
   VIDEOS = FULL ? videos : videos.filter(v=>v.is_sample);
   SAMPLE_INDEXED = videos.filter(v=>v.is_sample && v.status==="indexed").map(v=>v.id);
   // sync selection: new indexed videos default to selected; drop vanished ones
@@ -522,7 +597,7 @@ async function loadVideos(){
   return videos;
 }
 async function loadDocuments(){
-  const {sources}=await (await fetch("/admin/sources")).json();
+  const {sources}=await (await authFetch("/admin/sources")).json();
   const docs=sources.filter(s=>s.kind!=="video");
   // Demo corpus shows only the curated seed documents (the papers/decks that
   // pair with the sample talks), mirroring the is_sample filter for videos.
@@ -597,9 +672,15 @@ function renderLibrary(){
     ${FULL?`<th class="px-4 py-2.5 text-right text-[11px] font-medium uppercase tracking-wider text-slate-500 w-24">Actions</th>`:""}
   </tr>`;
   if(!rows.length){
-    $("#libraryBody").innerHTML=`<tr><td colspan="6" class="px-4 py-12 text-center text-slate-400">${FULL
-      ? "No sources yet — add a talk, paper, or deck from <b class='font-medium'>Add sources</b>."
-      : "The demo corpus indexes itself on first start — sources appear here within a few minutes."}</td></tr>`;
+    // Component 43 uses STRICT tenant isolation: a signed-in user starts with
+    // an empty workspace and does NOT inherit the shared demo corpus. Say so
+    // explicitly — otherwise signing in looks like it broke the app.
+    const emptyMsg = FULL
+      ? (_auth0User
+          ? "Your workspace is empty. Sources you add are private to your account — the demo corpus isn’t shared into it. Add a talk, paper, or deck from <b class='font-medium'>Add sources</b>, or <a href='/' class='text-indigo-600 hover:underline'>browse the public demo corpus</a>."
+          : "No sources yet — add a talk, paper, or deck from <b class='font-medium'>Add sources</b>.")
+      : "The demo corpus indexes itself on first start — sources appear here within a few minutes.";
+    $("#libraryBody").innerHTML=`<tr><td colspan="6" class="px-4 py-12 text-center text-slate-400">${emptyMsg}</td></tr>`;
   } else {
     $("#libraryBody").innerHTML=rows.map(r=>{
       const sel=SELECTED.has(r.id);
@@ -756,7 +837,7 @@ qEl.addEventListener("keydown",e=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventD
 async function askViaStream(q, video_ids){
   const params=new URLSearchParams({q});
   (video_ids||[]).forEach(id=>params.append("video_ids", id));
-  const resp=await fetch("/ask_stream?"+params.toString());
+  const resp=await authFetch("/ask_stream?"+params.toString());
   if(!resp.ok){ const e=await resp.json().catch(()=>({})); throw new Error(e.detail||resp.statusText); }
   const reader=resp.body.getReader(), decoder=new TextDecoder();
   let buf="", out={citations:[], answer:"", note:null, abstained:false};

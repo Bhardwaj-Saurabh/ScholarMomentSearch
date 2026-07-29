@@ -3375,3 +3375,92 @@ Phase A component 28 (Fly deploy + real health checks), which also unblocks
 component 29's in-region SLA re-measure.
 
 **Commit**: pending — `.env.example`, `DEPLOYMENT.md`, `EVIDENCE.md`.
+
+---
+
+### 2026-07-29 — Component 43: Auth0 authentication (email + password)
+
+Scoped in `DESIGN.md` §3f (commit `ad91c00`). Supersedes §3e's "NOT doing:
+SSO/OIDC" deferral at the user's direct request. This is the component that
+turns tenancy from *data partitioning* into an actual *security boundary* —
+`X-User-Id` was previously an unauthenticated header any caller could set to
+any value, and Phase 0 could only document that, not fix it.
+
+Decided with the user: **strict isolation** (a new account starts empty; the
+seeded corpus is NOT shared into user workspaces), **search stays public**
+(login gates mutations only, preserving README's graded "public UI answers
+cross-source"), and **build env-driven** since no Auth0 tenant exists yet.
+
+**Two constraints found in the code that dictated the design** — both recorded
+because either one, missed, would have produced a broken or insecure result:
+1. `src/api/videos.py::user_id` is CLAUDE.md-protected AND its
+   `^[A-Za-z0-9_-]{1,64}$` regex **rejects Auth0 subject format** (`auth0|abc…`
+   contains a `|`). So `sub` cannot be the tenant id.
+2. There are **two independent tenancy implementations** — that protected
+   dependency and `search.py::_uid()`. Fixing one would silently leave the
+   other on the spoofable header.
+
+Both are solved by resolving identity in middleware and rewriting `x-user-id`
+in the ASGI scope before routing, so both implementations read an authenticated
+value. Tenant id is `u_<sha256(sub)[:32]>` — deterministic, opaque, and always
+inside the protected regex.
+
+**RED**: `tests/test_auth0.py` written first → **19 errors** (`src.auth0` absent).
+
+**IMPLEMENT**: `src/auth0.py` (new) — JWKS fetch + cache with a single refetch
+on unknown `kid` (Auth0 rotates keys; a stale cache must not lock everyone out
+until restart), and `jwt.decode` with **`algorithms=["RS256"]` pinned**,
+audience and issuer checked. `src/security.py` gains `resolve_tenant`,
+`force_user_id`, `require_auth_dep`. `src/app.py` resolves identity before
+routing. `/api/config` exposes the three PUBLIC Auth0 values. UI gets the
+auth0-spa-js PKCE flow, Sign in/out, token-bearing `authFetch`, and a strict-
+isolation empty state.
+
+**A real architectural consequence found by the tests, not by inspection**: the
+route-level `Depends(require_auth)` *inside the protected file* compares the
+bearer against `ADMIN_TOKEN` specifically, so it rejected a valid user JWT
+**after** the middleware had allowed it — a 401 on every signed-in mutation.
+Component 25 had described that leftover dependency as "redundant, harmless";
+it stops being harmless the moment a second valid credential type exists.
+Resolved with FastAPI `dependency_overrides` keyed on the function object,
+which `admin.py` and `search.py` both import — one line, every router covered,
+protected file untouched.
+
+**Attack coverage** (all against a self-signed keypair + fake JWKS, so no live
+tenant and no network): expired, wrong-audience, wrong-issuer, bad-signature,
+unknown-kid, `alg=none`, and **RS256→HS256 confusion** are each rejected. The
+HS256 forgery is assembled BY HAND rather than with `jwt.encode`, because PyJWT
+refuses to encode with an asymmetric key as an HMAC secret — a real attacker
+has no such scruples, and the point is to test our verifier, not their library.
+
+**GREEN**:
+- `uv run pytest tests/test_auth0.py -q` → **19 passed**.
+- `node --test ui/auth.test.js ui/citation.test.js ui/ingest.test.js` →
+  **25 passed**; `<!--MS_MODE-->` still exactly once; zero occurrences of
+  `client_secret` in the UI (PKCE — there is no secret in this app).
+- Full suite: `uv run pytest tests/ -q` → **412 passed** (was 393; +19), 0
+  regressions. The pre-existing admin-token tests still pass, which is the
+  check that matters for `bench.py`/`eval.py` not breaking.
+- **Live, Auth0 UNSET** (the current `.env`): `/api/config` reports
+  `auth0.enabled: False`; `GET /api/videos` → **200**; admin-token mutation →
+  **202**; no-credential mutation → **401**; the sign-in box ships hidden
+  (`id="authBox" class="hidden …"`). Byte-identical to pre-component behavior.
+- **Live, Auth0 ENABLED** (stand-in tenant values injected into the container):
+  `/api/config` returns
+  `{'enabled': True, 'domain': 'demo-tenant.us.auth0.com', 'client_id': 'abc123', 'audience': 'https://momentsearch/api'}`,
+  issuer resolves to `https://demo-tenant.us.auth0.com/`, a garbage token is
+  rejected, a forged JWT on a mutation → **401**, and no secret appears in the
+  config payload.
+
+**NOT verified, and cannot be until a tenant exists**: a real email+password
+login round-trip (redirect → callback → `getTokenSilently` → a request carrying
+a genuine Auth0-signed token). Every layer beneath it is covered by the
+self-signed-JWKS suite, but the actual browser redirect flow against a real
+tenant is untested. Reported as an outstanding step, not implied to be done —
+`DEPLOYMENT.md` §3b has the exact dashboard setup, and the live check is: sign
+in, land on an EMPTY workspace, ingest one source, see it; then confirm a
+second account does not.
+
+**Commit**: pending — `src/auth0.py`, `src/security.py`, `src/app.py`,
+`src/config.py`, `src/api/search.py`, `ui/index.html`, `tests/test_auth0.py`,
+`requirements.txt`, `.env.example`, `DEPLOYMENT.md`.

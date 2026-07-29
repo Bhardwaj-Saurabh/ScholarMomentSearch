@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import hmac
 
+from fastapi import Header, HTTPException
+
 from . import cache, config
 
 # Any non-safe method under these prefixes needs the admin token.
@@ -78,9 +80,84 @@ def requires_auth(method: str, path: str) -> bool:
     return any(path == p or path.startswith(p + "/") for p in _PROTECTED_PREFIXES)
 
 
+def bearer(authorization: str | None) -> str:
+    """The raw credential out of an `Authorization: Bearer …` header."""
+    if not authorization or not authorization.startswith(_BEARER):
+        return ""
+    return authorization[len(_BEARER):].strip()
+
+
+def resolve_tenant(authorization: str | None) -> str | None:
+    """The authenticated tenant for this request, or None if the caller isn't
+    a logged-in user (component 43).
+
+    Precedence is deliberately narrow: ONLY a valid Auth0 access token yields a
+    tenant here. The admin token intentionally does NOT, because it must keep
+    honoring a caller-supplied `X-User-Id` — `benchmark/bench.py` and
+    `eval/eval.py` select tenants that way and the graded SLA gates would break
+    otherwise. That makes the admin token an operator/machine credential which
+    is cross-tenant by design, never a user login.
+    """
+    from . import auth0
+
+    if not auth0.enabled():
+        return None
+    return auth0.tenant_for_token(bearer(authorization))
+
+
+def require_auth_dep(authorization: str | None = Header(default=None)) -> None:
+    """Route-level replacement for `src/api/videos.py::require_auth`, installed
+    via FastAPI's `dependency_overrides` (component 43).
+
+    Why this exists: that protected dependency compares the bearer against
+    `ADMIN_TOKEN` specifically, so once a SECOND valid credential type (a user
+    JWT) exists it rejects legitimately-signed-in users at the route — after
+    the middleware has already allowed them. Component 25 called that leftover
+    dependency "redundant, harmless"; it stops being harmless the moment a
+    second credential type appears.
+
+    `dependency_overrides` keys on the function object, and `admin.py` and
+    `search.py` both import that same object, so one override covers every
+    router without editing the protected file.
+
+    Behavior is a strict superset of the original: a valid Auth0 token passes,
+    and everything else follows the inherited admin-token rules exactly.
+    """
+    if resolve_tenant(authorization) is not None:
+        return
+    if not config.ADMIN_TOKEN:
+        return          # inherited dev-convenience; middleware fails closed in prod
+    if not token_ok(authorization):
+        raise HTTPException(401, "Missing or invalid bearer token.")
+
+
+def force_user_id(scope: dict, tenant: str) -> None:
+    """Overwrite `X-User-Id` in the raw ASGI scope with the authenticated
+    tenant, before routing.
+
+    This is how a JWT identity reaches the request handlers WITHOUT editing
+    `src/api/videos.py`, which is CLAUDE.md-protected. It also solves a second
+    problem a dependency override would not: there are TWO independent tenancy
+    implementations in this codebase — that protected `user_id()` dependency
+    and `src/api/search.py::_uid()` — and both read this same header, so
+    rewriting it covers both uniformly and can't drift apart later.
+
+    Any client-supplied value is DROPPED, not merged. If the header could still
+    win, the spoof this component exists to close would still be open.
+    """
+    headers = [(k, v) for (k, v) in scope["headers"] if k.lower() != b"x-user-id"]
+    headers.append((b"x-user-id", tenant.encode()))
+    scope["headers"] = headers
+
+
 def auth_failure(method: str, path: str, authorization: str | None) -> tuple[int, str] | None:
     """(status, detail) when the request must be refused, else None."""
     if not requires_auth(method, path):
+        return None
+    # Component 43: a valid user login is sufficient for a mutation — the admin
+    # token is no longer the only way in. Checked first so a signed-in user is
+    # never refused just because ADMIN_TOKEN happens to be unset.
+    if resolve_tenant(authorization) is not None:
         return None
     if not config.ADMIN_TOKEN:
         if config.ENV not in _DEV_ENVS:

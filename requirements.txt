@@ -38,3 +38,7 @@ openai>=1.30
 # to redis-stack-server for both plain get/set (components 19-21) and
 # RediSearch vector search (component 22's semantic answer cache).
 redis>=5.0
+
+# Auth0 access-token validation (DESIGN.md §3f). [crypto] pulls `cryptography`,
+# which PyJWT needs for RS256 — the plain install cannot verify Auth0 tokens.
+pyjwt[crypto]>=2.8

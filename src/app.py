@@ -29,6 +29,7 @@ from . import config, db, metrics, security
 from .api.admin import router as admin_router
 from .api.metrics import router as metrics_router
 from .api.search import router as search_router
+from .api.videos import require_auth as videos_require_auth
 from .api.videos import router as videos_router
 from .rag import vector_store
 
@@ -68,8 +69,19 @@ async def _auth_middleware(request, call_next):
     here fixes both without touching the protected file, and makes "someone
     adds a route under /admin and forgets the Depends" structurally safe.
     """
+    authorization = request.headers.get("authorization")
+
+    # Component 43: resolve the logged-in user BEFORE routing and stamp their
+    # tenant into the scope, so both tenancy implementations (the protected
+    # videos.py dependency and search.py's own _uid) read an authenticated
+    # value instead of a header the client chose. Applies to reads too — a
+    # signed-in user's library must be theirs, not whatever they asked for.
+    tenant = security.resolve_tenant(authorization)
+    if tenant is not None:
+        security.force_user_id(request.scope, tenant)
+
     failure = security.auth_failure(
-        request.method, request.url.path, request.headers.get("authorization"))
+        request.method, request.url.path, authorization)
     if failure is not None:
         status, detail = failure
         return JSONResponse({"detail": detail}, status_code=status)
@@ -141,6 +153,12 @@ async def _metrics_middleware(request, call_next):
     response.body_iterator = _timed_body()
     return response
 
+
+# Component 43: replace the protected file's route-level auth dependency with
+# one that ALSO accepts a user JWT. dependency_overrides keys on the function
+# object, and admin.py/search.py import that same object, so this single line
+# covers every router that uses it — without editing src/api/videos.py.
+app.dependency_overrides[videos_require_auth] = security.require_auth_dep
 
 app.include_router(videos_router)
 app.include_router(admin_router)

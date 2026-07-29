@@ -52,6 +52,15 @@ DEFAULT_USER_ID = os.getenv("DEFAULT_USER_ID", "default")
 # with no configuration at all.
 ENV = os.getenv("ENV", "development").strip().lower()
 
+# --- Auth0 user authentication (DESIGN.md §3f, component 43) ------------------
+# Unset DOMAIN/AUDIENCE => the feature is OFF and the app behaves exactly as it
+# did before it existed (same convention as REDIS_URL / CLIP_SERVICE_URL).
+# All three of these are PUBLIC values: the browser uses Authorization Code with
+# PKCE, so there is no client secret in this application at all — do not add one.
+AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN", "").strip()
+AUTH0_CLIENT_ID = os.getenv("AUTH0_CLIENT_ID", "").strip()
+AUTH0_AUDIENCE = os.getenv("AUTH0_AUDIENCE", "").strip()
+
 # --- Object storage (videos + frame thumbnails) ------------------------------
 # STORAGE_PROVIDER: local | aws | gcp | gcp_native | flyio
 # aws/gcp/flyio share one boto3 S3 client (different endpoints); gcp_native
