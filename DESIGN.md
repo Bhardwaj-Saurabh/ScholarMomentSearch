@@ -574,6 +574,46 @@ Primary eval:
   disclosed rather than hidden. `quality_gates.json` stays the judge and stays
   unedited — if the graph does not help, that gets recorded, not tuned away.
 
+### 3j. Seeding vector-integrity verification (added 2026-07-29, DECIDED — own scope)
+
+Found while backfilling component 50's entity graph, not by any existing eval:
+all 16 corpus-seeded papers/decks were marked `status='indexed'` in Postgres
+with real `chunk_count`s (28-189 each), while `TEXT_COLLECTION` held **zero**
+of their vectors (full incident, root cause, and repair steps in EVIDENCE.md,
+2026-07-29). Every retrieval-quality number this project has ever recorded —
+recall@10, precision@10, `answer_quality.py`'s relevancy/faithfulness — was
+therefore measured against a corpus that was **video-only in practice**, and
+the graded requirement "cite video + paper + deck" could not have been met by
+a fresh boot for as long as this went unnoticed.
+
+**Root cause.** `src/seeding.py:_not_indexed_documents()` (and its video
+counterpart) decide what needs (re-)seeding from the Postgres `status` column
+alone — never from whether the vectors actually exist. Component 15's hybrid-
+search migration *required* dropping and recreating `TEXT_COLLECTION`
+(documented in §3b as an accepted operational step); after that recreate, the
+document rows still said `indexed`, so seeding silently skipped rebuilding
+them forever. This is the same class of gap component 34 closes for
+*deletion* (vectors outliving their row) in the opposite direction: here, a
+row outlives its vectors and nothing notices.
+
+**Fix, scoped narrowly:** seeding's "is this already done" check gains one
+more condition — the source's vector count must be > 0, not just its status.
+No new table, no new endpoint; this is a correction to existing seeding logic,
+not a new subsystem.
+
+| # | Component | File | Notes |
+|---|-----------|------|-------|
+| 51 | Seeding vector-integrity verification | `src/seeding.py`, `src/rag/vector_store.py` | `vector_store.count_document_chunks(user_id, source_id) -> int` (new: a plain Qdrant `count()` filtered on `user_id` + `source_id`, mirroring the count-by-filter pattern already used elsewhere in the file) backs a new `_has_vectors(doc) -> bool` used by `_not_indexed_documents()` alongside the existing status check — a row only counts as "done" when BOTH are true. Same check added for videos via the existing frame-count path. Fails open toward RE-SEEDING on a Qdrant error (an uncertain "maybe missing" should re-index, not silently trust a possibly-stale status), which is the safe direction since re-seeding an already-correct source is idempotent (`upsert_document_chunks` deletes-then-inserts) while trusting a wrong status is what caused the incident. |
+
+Primary eval:
+- **51** — unit: a document with `status='indexed'` but zero vectors is
+  correctly re-selected by `_not_indexed_documents()`; a document with
+  `status='indexed'` AND vectors present is correctly skipped (no needless
+  re-embed on every boot); a Qdrant error during the check fails open toward
+  re-seeding, not toward silently trusting the status; live: seed a document,
+  manually delete its vectors while leaving the Postgres row `indexed`, restart
+  the seed step, confirm it is rebuilt rather than skipped.
+
 ## 4. Corpus & scale plan (right-sized — DECIDED)
 
 The product ships **pre-built with the 8 curated triplets** in `benchmark/corpus.json`
