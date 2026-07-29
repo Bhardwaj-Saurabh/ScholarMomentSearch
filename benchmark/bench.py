@@ -206,10 +206,38 @@ def _cycle_to_n(items: list[dict], n: int) -> list[dict]:
 # ── Live-stack glue (needs a running server + worker; not unit-testable) ────
 
 def _fetch_labeled_citations(labeled: list[dict]) -> dict[str, list[dict]]:
+    """Citations per labeled query, for recall@10 and precision@10.
+
+    A failed or truncated query is REPORTED, not silently scored as zero.
+    Diagnosed 2026-07-29: precision@10 was drifting between runs (0.567-0.604)
+    on an unchanged corpus. One cause is genuine tie instability in Qdrant's
+    RRF (see src/rag/search.py::_merge_hits), but the bigger one was here —
+    this function turned any non-200 OR any 200 whose SSE stream was cut short
+    by the client-side 30s timeout into `[]`, which scores as zero precision
+    for that query and looks exactly like a real quality regression. With
+    /ask_stream's p95 at ~15.8s and a cold reranker adding ~5.7s, that timeout
+    is reachable in normal operation.
+
+    The metric still degrades rather than crashing (a benchmark that dies
+    mid-run is worse), but a run with failures now says so, so nobody records
+    a corrupted number as evidence.
+    """
     by_query = {}
+    failures: list[str] = []
     for q in labeled:
         st, body, _ = _req("GET", "/ask_stream?q=" + urllib.parse.quote(q["query"]))
-        by_query[q["query"]] = _citations_from_sse(body) if st == 200 else []
+        cites = _citations_from_sse(body) if st == 200 else []
+        if st != 200:
+            failures.append(f"{q['query'][:48]!r} -> HTTP {st}")
+        elif not cites:
+            failures.append(f"{q['query'][:48]!r} -> 200 but no citations "
+                           "(truncated stream or abstain)")
+        by_query[q["query"]] = cites
+    if failures:
+        print(f"WARNING: {len(failures)}/{len(labeled)} labeled queries returned no "
+              "citations — the score below is NOT a clean measurement:")
+        for f in failures:
+            print(f"  - {f}")
     return by_query
 
 

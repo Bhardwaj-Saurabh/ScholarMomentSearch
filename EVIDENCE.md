@@ -4014,3 +4014,74 @@ open question rather than changed silently.
 (the tie-break alters ordering only among equal scores).
 
 **Commit**: pending — `src/rag/search.py`, `EVIDENCE.md`.
+
+---
+
+### 2026-07-29 — Diagnosis: precision@10 was never deterministic (correcting component 12's record)
+
+Follow-up to component 48's finding. Component 12's entry recorded
+`precision_at_10: 0.635` as "identical both runs (deterministic)". That claim
+is **wrong**, and this entry corrects it with the measurements and the cause.
+
+**Observed**: on an unchanged corpus, `bench.py --quality` returned
+**0.594, 0.604, 0.594**, later **0.567, 0.594**. Two distinct causes, found by
+elimination rather than assumption:
+
+**Ruled out first.** Rate limiting (component 26) — `/admin/metrics` showed
+`status counts {'200': 66}`, `rate_limited: 0`, so no query was dropped by a
+429. Corpus pollution from this session's live probes — `default` holds 12
+videos, no leftovers. Qdrant approximate search — the same query asked 6× in a
+row returned **byte-identical citations all 6 times**.
+
+**Cause 1 — RRF ties (minor, ±0.01).** Probing `search_text` directly for a
+query that DOES flip showed the candidate scores are
+`[0.5, 0.5, 0.333333, 0.333333, 0.25, 0.25, 0.2, 0.2, 0.166667, 0.166667]` —
+only **11 distinct scores across 20 candidates**. These are Qdrant's
+server-side RRF values (`1/(k+rank)`), which are rank-quantized *by
+construction* — the very property recorded in component 15 and used to justify
+keeping a dense-only score for the confidence gate. With that many exact ties,
+which candidate occupies the 20th slot is arbitrary, so the set changes between
+runs and the `top_k=6` truncation boundary flips. Five repeats of one query's
+candidate list: **not identical** (`all 5 candidate lists identical: False`).
+
+This also explains the timeline: 0.635 was measured BEFORE component 15
+introduced hybrid RRF, when dense-only cosine scores were continuous and ties
+were rare. "Deterministic" was probably true when written and silently stopped
+being true.
+
+Mitigation applied, with its limit stated: `_merge_hits` and `_fuse` now break
+ties on point identity rather than score alone, so OUR code contributes no
+ordering variance. Measured honestly, **this did not stabilise the metric**
+(0.5667 / 0.5938 across the next two runs) — it cannot, because the variance is
+in which candidates Qdrant returns at its own limit boundary, not in how we sort
+them. Kept because removing one real source of nondeterminism is still correct.
+
+**Cause 2 — silently-swallowed failures (major).** One run had a query return
+`[]` while `/admin/metrics` showed **all 32 requests 200 and 0 rate-limited**.
+`_fetch_labeled_citations` scored `[]` as zero precision for that query. With
+`/ask_stream` p95 at **15806.0 ms** against bench's **30 s client timeout** —
+and a cold cross-encoder adding ~5.7 s (component 45's finding) — a truncated
+SSE stream is reachable in normal operation. A transient timeout was therefore
+being reported as a permanent quality regression, indistinguishable from a real
+one.
+
+Fixed by making it loud: `_fetch_labeled_citations` now prints
+`WARNING: n/16 labeled queries returned no citations — the score below is NOT a
+clean measurement`, listing each. It still degrades rather than crashing (a
+benchmark that dies mid-run is worse), but a corrupted number can no longer be
+recorded as evidence unnoticed.
+
+**Clean re-measurement** (warm stack, no WARNING emitted on any run, so no
+failed queries): **0.604, 0.594, 0.604**. Residual spread is ±0.005 —
+one citation position flipping — consistent with cause 1.
+
+**What this means for the record**: precision@10 should be read as
+**≈0.60 ± 0.01**, not as an exact figure, and previously recorded single values
+(0.635, 0.625) were point samples of the same wobbly metric. The gate was
+already red and disclosed, so no pass/fail claim changes. `quality_gates.json`
+was not touched.
+
+**GREEN**: full suite `uv run pytest tests/ -q` → **467 passed**, unchanged, 0
+regressions.
+
+**Commit**: pending — `src/rag/search.py`, `benchmark/bench.py`, `EVIDENCE.md`.
