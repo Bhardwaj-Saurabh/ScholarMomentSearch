@@ -3948,3 +3948,69 @@ and should not stand uncorrected.
 
 **Commit**: pending — `benchmark/opik_dataset.py`, `benchmark/bench.py`,
 `benchmark/answer_quality.py`, `tests/test_opik_dataset.py`.
+
+---
+
+### 2026-07-29 — Root cause: precision@10 is NOT deterministic (correcting component 12's entry)
+
+Component 48's live runs produced 0.594 / 0.604 / 0.594 on an unchanged corpus,
+while component 12's entry recorded 0.635 as "identical both runs
+(deterministic)". Investigated rather than left as a footnote, because an eval
+metric that drifts silently undermines every number component 48's experiment
+tracking exists to make comparable.
+
+**Hypotheses tested and eliminated, in order:**
+1. *Rate limiting dropping queries* — `bench.py:212` turns a non-200 into an
+   empty citation list, which would silently lower precision. Ruled out:
+   `/admin/metrics` showed `status_counts {'200': 66}`, `rate_limited: 0`.
+2. *Corpus pollution from this session's live probes* — ruled out: the
+   `default` tenant holds 12 videos with no leftovers from the auth/SSRF/Auth0
+   probes.
+3. *Approximate (quantized) vector search* — partially ruled out: the same
+   query asked 6× returned **byte-identical citations every time**.
+
+**Actual cause, evidenced.** Diffing two full measurement passes showed **2 of
+16 queries** differ, and only at the TAIL — the first 4–5 citations identical,
+position 5/6 swapping. Probing `search_text` directly for one of those queries
+5× showed the 20-candidate list itself is unstable at its end, and the scores
+explain why:
+
+    scores: [0.5, 0.5, 0.333333, 0.333333, 0.25, 0.25, 0.2, 0.2, 0.166667, 0.166667]
+    distinct scores: 11 of 20
+
+Those are Qdrant's server-side **RRF** scores — `1/(k+rank)`, rank-quantized —
+so only 11 distinct values span 20 candidates and ties are the norm. When
+candidate 20 ties with candidate 21, which one comes back is arbitrary, the
+candidate SET changes between runs, and that propagates through fusion and
+rerank to the `top_k=6` truncation boundary.
+
+**This also dates the regression precisely.** Component 12 measured 0.635 as
+deterministic BEFORE component 15 introduced hybrid dense+sparse search. Plain
+dense cosine scores are continuous, so ties were rare and a single run was
+reproducible; hybrid RRF made ties the common case. The "deterministic" claim
+was true when written and silently stopped being true — nobody re-checked.
+The same rank-quantization property was already documented in component 15's
+own notes (it is why the confidence gate deliberately uses a dense-only score);
+what was missed was its consequence for eval reproducibility.
+
+**Partial fix applied**: deterministic secondary sort keys in `_merge_hits` and
+`_fuse`, so equal-scoring hits and windows always order the same way. This
+removes OUR contribution to the variance but cannot fix which candidates Qdrant
+returns at its own limit — and the measurement confirms that honestly: three
+runs after the change gave **0.604 / 0.594 / 0.594**, the same spread as before.
+The fix is kept because deterministic ordering is correct regardless, not
+because it solved the problem. It did not.
+
+**Standing correction**: precision@10 carries roughly **±0.01 run-to-run noise**
+on this corpus. Any single-run figure — including the 0.635 and 0.625 recorded
+earlier — should be read with that band, and a prompt or retrieval change
+smaller than it is not distinguishable from noise by one run. Not fixed here:
+raising `BRANCH_TOP_K` to push the tie boundary further from `top_k`, or
+disabling quantization for exact search, would both reduce it but change
+retrieval behavior on a gate that is already red and disclosed. Logged as an
+open question rather than changed silently.
+
+**GREEN**: `uv run pytest tests/ -q` → **467 passed**, unchanged, 0 regressions
+(the tie-break alters ordering only among equal scores).
+
+**Commit**: pending — `src/rag/search.py`, `EVIDENCE.md`.

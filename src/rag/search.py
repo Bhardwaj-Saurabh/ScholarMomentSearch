@@ -49,7 +49,15 @@ def _merge_hits(hit_lists: list[list[dict]]) -> list[dict]:
             key = _hit_key(h)
             if key not in best or h["score"] > best[key]["score"]:
                 best[key] = h
-    return sorted(best.values(), key=lambda h: h["score"], reverse=True)
+    # Secondary key on the point identity, not just the score. Qdrant's
+    # server-side RRF (component 15) is rank-quantized — a live probe of one
+    # labeled query showed only 11 DISTINCT scores across 20 candidates — so
+    # ties are the norm rather than the exception, and a score-only sort lets
+    # tied hits land in whatever order they arrived. That made precision@10
+    # wobble between runs (0.594/0.604) purely from ordering. This cannot fix
+    # variance in which candidates Qdrant returns at its own limit boundary,
+    # but it stops OUR code adding to it.
+    return sorted(best.values(), key=lambda h: (-h["score"], str(_hit_key(h))))
 
 
 def _fuse(visual_hits: list[dict], text_hits: list[dict]) -> list[dict]:
@@ -107,7 +115,10 @@ def _fuse(visual_hits: list[dict], text_hits: list[dict]) -> list[dict]:
         windows.append({"video_id": None, "t": 0.0, "rrf": h["rrf"],
                         "modalities": {"text"}, "frame": None, "text": h})
 
-    windows.sort(key=lambda w: w["rrf"], reverse=True)
+    # Same reasoning as _merge_hits: deterministic tie-break so equal-scoring
+    # windows always order the same way.
+    windows.sort(key=lambda w: (-w["rrf"], str(w.get("video_id")),
+                                float(w.get("t") or 0.0)))
     return windows
 
 
