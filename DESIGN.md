@@ -541,7 +541,26 @@ violations in EVIDENCE.md's Part-0 audit were made of. An entity index adds a
 
 | # | Component | File | Notes |
 |---|-----------|------|-------|
-| 50 | Entity-graph augmented retrieval | `src/graph.py` (new), `src/db.py`, `src/rag/search.py`, `src/ingest/doc_pipeline.py`, `src/config.py` | Two new tenanted tables (`graph_entities`, `graph_mentions`) created in `db.init_schema()` alongside the existing ones. A deterministic extractor (`graph.extract_entities(text, title)`) runs at ingest for documents and is backfillable for already-indexed content, writing `mentions` rows keyed by the chunk's own locator so a boost is always traceable to a real citation. At query time, with the flag on: extract entities from the question, look up their 1-hop neighbours, and add a bounded boost to any fused window whose chunk mentions a question entity or one of its neighbours. Every row and every query carries `user_id`. Extraction failures, a missing table, or a Postgres error all degrade to "no boost" — never an error on the read path, same fail-open contract as `src/cache.py` and `src/injection.py`. |
+| 50 | Entity-graph augmented retrieval | `src/graph.py` (new), `src/db.py`, `src/rag/search.py`, `src/ingest/doc_pipeline.py`, `src/config.py` | ONE new tenanted table (`ms_graph_mentions`, keyed `(user_id, entity, source_id)`) created in `db.init_schema()`. Co-occurrence edges are DERIVED by self-joining on `source_id` rather than stored in a second table, so writes stay idempotent and two tables can never disagree. A deterministic extractor (`graph.extract_entities(text, title)`) runs at ingest for documents and is backfillable for already-indexed content. At query time, with the flag on: extract entities from the question, look up their 1-hop neighbours, drop the non-discriminating ones, and add a bounded boost to any fused window **whose SOURCE** mentions a surviving entity. Every row and every query carries `user_id`. Extraction failures, a missing table, or a Postgres error all degrade to "no boost" — never an error on the read path, same fail-open contract as `src/cache.py` and `src/injection.py`. |
+
+**Granularity correction (2026-07-29, after spec-guardian review).** This row
+originally specified two tables and mentions "keyed by the chunk's own locator",
+with the boost applied to "any fused window whose CHUNK mentions a question
+entity". What shipped is **source-granular**: one table, no locator column, and
+the boost applies to every window belonging to a matching source. The
+consequence is behavioural and is recorded here rather than left implicit:
+
+> The discrimination this component provides is **between sources, never within
+> one**. It can rank a chunk from the paper the question names above a
+> topically-similar chunk from a different paper. It cannot rank the *right
+> page* of that paper above the wrong page.
+
+That is still the failure mode §3i was scoped to attack (cross-triplet
+adjacency), so the component keeps its justification — but the narrower claim is
+the true one. Chunk-level mentions (adding `locator` to the primary key) remain
+a possible follow-up; they would multiply row count by roughly the chunk count
+per source, which is why source-level was the right first cut on a corpus where
+one paper holds 189 chunks.
 
 Primary eval:
 - **50** — unit: the extractor is deterministic and tenant-scoped; a question
