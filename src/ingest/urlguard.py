@@ -22,15 +22,26 @@ Defences here, in order of what they stop:
   - size cap enforced DURING streaming, with the partial file removed
   - content-type allowlist actually enforced
 
-KNOWN RESIDUAL LIMITATION, disclosed rather than papered over: this validates
-the IPs a hostname resolves to, then hands the URL to urllib, which resolves
-it AGAIN. A DNS entry that changes between those two lookups (classic DNS
-rebinding) would slip past. Closing that properly means pinning the connection
-to the already-validated IP while preserving TLS SNI/cert validation against
-the original hostname — a custom transport, materially more machinery than
-this component. The exposure is narrow (the attacker must control authoritative
-DNS with a near-zero TTL and win a race on the worker), and every other layer
-above still applies, so it is recorded as accepted residual risk.
+KNOWN RESIDUAL LIMITATIONS, disclosed rather than papered over:
+
+  1. DNS rebinding. This validates the IPs a hostname resolves to, then hands
+     the URL to urllib, which resolves it AGAIN. A DNS entry that changes
+     between those two lookups would slip past. Closing it properly means
+     pinning the connection to the already-validated IP while preserving TLS
+     SNI/cert validation against the original hostname — a custom transport,
+     materially more machinery than this component. Exposure is narrow: the
+     attacker must control authoritative DNS with a near-zero TTL and win a
+     race on the worker.
+  2. No destination-port restriction. Any port on a publicly-routable address
+     is allowed. Harmless alone, but it is the multiplier on (1): a successful
+     rebind could reach `:6379` or `:8001` rather than only `:80`/`:443`.
+     Restricting to http(s) ports would shrink that blast radius and is the
+     cheapest follow-up if (1) is ever closed.
+  3. Content-type is permissive by design — `application/octet-stream` and a
+     MISSING header both pass, because academic hosts legitimately do both.
+     The IP allowlist, not the content-type check, is the primary control
+     here; the content-type check only rejects the affirmative
+     "this is HTML/JSON/an image" case.
 """
 from __future__ import annotations
 
@@ -162,34 +173,46 @@ def download_to(url: str, dest: Path, *, timeout: float = 60,
     for _ in range(_MAX_REDIRECTS + 1):
         validate_url(current)
         resp = _urlopen_no_redirect(current, timeout)
-        status = getattr(resp, "status", None) or getattr(resp, "code", 200)
-        if status in (301, 302, 303, 307, 308):
-            location = resp.getheader("Location")
-            if not location:
-                raise BlockedUrlError(f"Redirect from {current} with no Location header.")
-            # Relative Location is legal; resolve against the current URL so
-            # the next validate_url() sees a real absolute target.
-            current = urljoin(current, location)
-            continue
-
-        content_type = resp.getheader("Content-Type")
-        if not _content_type_ok(content_type):
-            raise BlockedUrlError(
-                f"Refusing content-type {content_type!r} from {current} — not a document.")
-
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        size = 0
+        # Close every response, including the up-to-6 redirect hops — this runs
+        # inside a long-lived Prefect worker, so leaving sockets to GC leaks
+        # them across runs.
         try:
-            with dest.open("wb") as out:
-                while chunk := resp.read(_CHUNK):
-                    size += len(chunk)
-                    if size > max_bytes:
-                        raise BlockedUrlError(
-                            f"Response from {current} exceeds the {max_bytes}-byte limit.")
-                    out.write(chunk)
-        except BaseException:
-            dest.unlink(missing_ok=True)   # never leave a partial/oversized file
-            raise
-        return Fetched(path=dest, content_type=content_type)
+            status = getattr(resp, "status", None) or getattr(resp, "code", 200)
+            if status in (301, 302, 303, 307, 308):
+                location = resp.getheader("Location")
+                if not location:
+                    raise BlockedUrlError(f"Redirect from {current} with no Location header.")
+                # Relative Location is legal; resolve against the current URL so
+                # the next validate_url() sees a real absolute target. This also
+                # normalizes a protocol-relative '//host/x' into a full URL, so
+                # the next hop is genuinely re-validated rather than skipped.
+                current = urljoin(current, location)
+                continue
+
+            content_type = resp.getheader("Content-Type")
+            if not _content_type_ok(content_type):
+                raise BlockedUrlError(
+                    f"Refusing content-type {content_type!r} from {current} — not a document.")
+
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            size = 0
+            try:
+                with dest.open("wb") as out:
+                    while chunk := resp.read(_CHUNK):
+                        size += len(chunk)
+                        # Checked BEFORE the write, so what lands on disk can
+                        # never exceed max_bytes even by one chunk.
+                        if size > max_bytes:
+                            raise BlockedUrlError(
+                                f"Response from {current} exceeds the {max_bytes}-byte limit.")
+                        out.write(chunk)
+            except BaseException:
+                dest.unlink(missing_ok=True)   # never leave a partial/oversized file
+                raise
+            return Fetched(path=dest, content_type=content_type)
+        finally:
+            close = getattr(resp, "close", None)
+            if callable(close):
+                close()
 
     raise BlockedUrlError(f"Too many redirects (>{_MAX_REDIRECTS}) starting at {url}.")

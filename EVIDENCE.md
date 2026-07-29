@@ -2871,12 +2871,13 @@ sending no Content-Type) silently fell back to the default and the
 missing-content-type test asserted nothing. Fixed to `is None`.
 
 **GREEN**:
-- `uv run pytest tests/test_urlguard.py -q` → **39 passed**.
+- `uv run pytest tests/test_urlguard.py -q` → **40 passed**.
 - `uv run pytest tests/test_urlguard.py tests/test_doc_pipeline.py
   tests/test_storage_ref_ownership.py -q` → **71 passed**.
-- Full suite: `uv run pytest tests/ -q` → **289 passed** (was 243; +39 urlguard,
-  +3 doc_pipeline including the SSRF wiring + PPTX regression guards, +4
-  whitespace-evasion cases from the component-23 fix), 0 regressions.
+- Full suite: `uv run pytest tests/ -q` → **289 passed** (was 243; +40 urlguard,
+  +2 doc_pipeline for the SSRF wiring + PPTX regression guards, +4
+  whitespace-evasion cases from the component-23 fix — 243+40+2+4 = 289),
+  0 regressions.
 - **Live, in the running api container** — the wired ingest path
   (`doc_pipeline._download`), not just the guard module in isolation:
   - `http://169.254.169.254/latest/meta-data/` → blocked, *"resolves to
@@ -2910,3 +2911,63 @@ recorded as accepted residual risk rather than silently ignored.
 **Commit**: pending — `src/ingest/urlguard.py`, `src/ingest/doc_pipeline.py`,
 `src/api/admin.py`, `tests/test_urlguard.py`, `tests/test_doc_pipeline.py`,
 `tests/test_storage_ref_ownership.py`.
+
+---
+
+### 2026-07-29 — Component 24 closeout: spec-guardian review (second E4 violation found in this file)
+
+`spec-guardian` reviewed commit `482ca80`: **PASS-with-warnings**. The security
+logic held up under a genuinely adversarial pass — it ran every bypass vector
+requested against the real `validate_url` and found **none** that get through:
+decimal/hex-encoded IPv4 (`2130706433`, `0x7f000001`, `127.1`), IPv4-mapped IPv6
+(`[::ffff:169.254.169.254]`, `[::ffff:a9fe:a9fe]`), userinfo tricks
+(`public.com@169.254.169.254`), zone ids (`[fe80::1%en0]`), NAT64/6to4
+(`[64:ff9b::a9fe:a9fe]`, `[2002:7f00:1::]`), `0`, `[::]`, CGNAT, benchmark and
+IETF-reserved ranges, `localhost`, and `sub.localtest.me`. The structural reason
+it holds: validation goes through `getaddrinfo`, the same resolver urllib uses,
+so encoded IPv4 forms cannot diverge between check and connect. It also
+simulated 4 public redirect hops flipping internal on hop 5 (blocked at hop 5)
+and confirmed `urljoin` turns a protocol-relative `//169.254.169.254/x` into a
+full URL that IS re-validated. Size cap verified to bound on-disk bytes (checked
+before the write) with the partial removed on both `BlockedUrlError` and an
+unrelated mid-read exception; `.part` handling verified to leave no orphan and
+to overwrite atomically; extension precedence confirmed preserved, and in fact
+improved (the original's `Path(uri).suffix` could yield `.pdf?v=1`).
+
+**The finding, again mine to own — a SECOND E4 violation in this file.** The
+entry above claimed `tests/test_urlguard.py -q` → "39 passed". The real number
+at that commit was **40**. Mechanism: 39 was the true output of a run I did
+BEFORE adding `test_returns_content_type_for_extension_selection`; I then added
+that test and carried the stale figure into EVIDENCE.md without re-running the
+single-file command. Same class as the component-20 error (a number not taken
+from the final state), different mechanism (stale rather than miscounted). The
+`+3 doc_pipeline` breakdown was also wrong — that file went 14 → 16 test
+functions, i.e. **+2**. The full-suite 289 and the 71 three-file figure were both
+correct and reproduced exactly. All corrected above, with the arithmetic now
+shown explicitly (243+40+2+4 = 289) so it can be checked rather than trusted.
+
+Standing correction to my own process, recorded because twice is a pattern and
+not an accident: re-run the exact command and copy its output **after** the last
+edit to the file it measures — never carry a number across a subsequent change,
+and never reconstruct one by counting.
+
+**Two LOW code findings, both fixed in this commit:**
+- `urlguard.py` never closed its response objects — up to 6 opens per fetch on
+  the redirect path — leaking sockets inside a long-lived Prefect worker. Now
+  closed in a `finally` on every path. Locked down by two new tests
+  (`test_closes_every_response_including_redirect_hops`,
+  `test_closes_response_on_rejection`).
+- No destination-port restriction. Harmless alone, but it is the multiplier on
+  the disclosed DNS-rebinding risk: a successful rebind could reach `:6379` or
+  `:8001` rather than only `:80`/`:443`. Not a code change — added to the
+  module's residual-limitations list, which was also restructured to disclose
+  the permissive content-type behavior (octet-stream AND missing header both
+  pass) as an explicit third item rather than leaving it implied.
+
+**GREEN after the fixes** (numbers re-run after the final edit, per the
+correction above):
+- `uv run pytest tests/test_urlguard.py -q` → **42 passed** (was 40; +2 close tests).
+- Full suite: `uv run pytest tests/ -q` → **291 passed** (was 289; +2), 0 regressions.
+
+**Commit**: pending — `src/ingest/urlguard.py`, `tests/test_urlguard.py`,
+`EVIDENCE.md`.

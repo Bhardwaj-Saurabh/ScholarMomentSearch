@@ -119,10 +119,14 @@ class _FakeResp:
     def __init__(self, body=b"%PDF-1.4 ok", status=200, headers=None):
         self._buf = io.BytesIO(body)
         self.status = status
+        self.closed = False
         # `is None`, not `or` -- an explicitly-empty headers dict is a real
         # test case (a server that sends no Content-Type at all) and must not
         # silently fall back to the default.
         self._headers = {"Content-Type": "application/pdf"} if headers is None else headers
+
+    def close(self):
+        self.closed = True
 
     def getheader(self, name, default=None):
         return self._headers.get(name, default)
@@ -236,6 +240,33 @@ def test_missing_content_type_is_allowed(monkeypatch, tmp_path):
     got = urlguard.download_to("https://public.example.com/x.pdf", tmp_path / "out.pdf")
     assert got.path.exists()
     assert got.content_type is None
+
+
+def test_closes_every_response_including_redirect_hops(monkeypatch, tmp_path):
+    """This runs inside a long-lived Prefect worker, so an unclosed response
+    per redirect hop leaks sockets across runs (spec-guardian finding)."""
+    _stub_dns(monkeypatch, "151.101.1.140")
+    opened: list[_FakeResp] = []
+
+    def _fake_open(url, timeout):
+        resp = (_FakeResp(status=302, headers={"Location": "https://cdn.example.com/p.pdf"})
+                if not opened else _FakeResp())
+        opened.append(resp)
+        return resp
+
+    monkeypatch.setattr(urlguard, "_urlopen_no_redirect", _fake_open)
+    urlguard.download_to("https://public.example.com/p.pdf", tmp_path / "out.pdf")
+    assert len(opened) == 2
+    assert all(r.closed for r in opened), "a redirect hop's response was left open"
+
+
+def test_closes_response_on_rejection(monkeypatch, tmp_path):
+    _stub_dns(monkeypatch, "151.101.1.140")
+    resp = _FakeResp(headers={"Content-Type": "text/html"})
+    monkeypatch.setattr(urlguard, "_urlopen_no_redirect", lambda url, timeout: resp)
+    with pytest.raises(urlguard.BlockedUrlError):
+        urlguard.download_to("https://public.example.com/x.pdf", tmp_path / "out.pdf")
+    assert resp.closed
 
 
 def test_returns_content_type_for_extension_selection(monkeypatch, tmp_path):
