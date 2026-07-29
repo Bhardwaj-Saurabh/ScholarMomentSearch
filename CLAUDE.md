@@ -156,6 +156,7 @@ A component is DONE only when: its tests are green, relevant SLA rows pass,
 | 40 | RUNBOOK.md + backup/DR | spec-guardian review + a real, executed restore-drill transcript in EVIDENCE.md |
 | 41 | CI pipeline + test-isolation fix | CI green on a PR; the isolation guard test is RED against current behavior first |
 | 42 | Supply chain + browser hardening | CI fails on a known-vulnerable pin; security headers asserted in `tests/test_contract.py` |
+| 43 | Auth0 authentication (OIDC, email+password) | unit vs a self-signed JWKS: valid token → expected tenant; expired/wrong-aud/wrong-iss/bad-sig/`alg=none`/HS256-confusion all rejected; spoofed `X-User-Id` ignored when a JWT is present; admin-token machine path still honors `X-User-Id` (bench must not break); `AUTH0_*` unset ⇒ behavior byte-identical to today |
 
 Cross-cutting, always: `grounding-auditor` after 7/8/10; search-during-ingest ratio
 ≤ 1.3× after 4/5; provided-endpoint regression (probe 6) after everything.
@@ -201,6 +202,21 @@ program. Ordering rules that are NOT negotiable:
 - `benchmark/sla.json` and `eval/rubric.json` stay frozen throughout. Component 29
   IMPLEMENTS the never-measured `error_rate_max_pct` gate — it reports whatever the
   number is; it does not adjust the threshold.
+
+Component 43 (DESIGN.md §3f, added 2026-07-29) supersedes §3e's "NOT doing:
+SSO/OIDC" deferral at the user's request, and is the component that makes
+tenancy a real security boundary. Non-negotiables:
+- **A valid Auth0 token's tenant OVERWRITES any client-sent `X-User-Id`.** If
+  the header can still win, the spoof this component exists to close is still
+  open.
+- **`ADMIN_TOKEN` keeps honoring `X-User-Id`** — `benchmark/bench.py` and
+  `eval/eval.py` depend on it. That makes the admin token deliberately
+  cross-tenant: an operator/machine credential, never a user login.
+- **RS256 pinned.** Never trust the token's own `alg` (HS256-confusion / `none`).
+- **`AUTH0_*` unset ⇒ today's behavior exactly**, same fail-safe convention as
+  `REDIS_URL` and `CLIP_SERVICE_URL`.
+- Search stays PUBLIC (README's graded "public UI answers cross-source"); login
+  gates mutations only.
 
 ## 8. Definition of done for the whole assignment
 

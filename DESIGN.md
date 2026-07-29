@@ -298,6 +298,61 @@ Primary eval per component, mirrored into `CLAUDE.md` §7:
 - **41** — CI green on a PR; the isolation guard test is RED against current behavior before the fix.
 - **42** — CI fails on a known-vulnerable pin; security headers asserted in `tests/test_contract.py`.
 
+### 3f. Auth0 user authentication (added 2026-07-29, DECIDED — own scope)
+
+Supersedes §3e's "explicitly NOT doing → SSO/OIDC" deferral, on the user's
+direct request. This is the component that turns tenancy from *data
+partitioning* into an actual *security boundary* — the single biggest open item
+left by Phase 0, where `X-User-Id` was an unauthenticated, freely-spoofable
+header.
+
+Decided with the user via AskUserQuestion:
+- **Strict isolation.** Each authenticated user starts with an EMPTY workspace.
+  The seeded corpus stays owned by `DEFAULT_USER_ID` and is NOT copied or
+  shared into user tenants. Accepted consequence, stated up front: signing in
+  makes search return nothing until that user ingests something, so the UI
+  needs a real empty state rather than looking broken.
+- **Search stays public; login gates mutations.** `/api/ask`, `/ask_stream`,
+  and the read endpoints keep working with no credentials, preserving README's
+  graded "deployed public UI answers cross-source" item and the anonymous demo.
+  Login is required to add / retry / delete sources.
+- **Build env-driven now, tenant created later.** Everything reads
+  `AUTH0_*` from env; with those unset the app behaves EXACTLY as it does
+  today (same fail-safe convention as `REDIS_URL`/`CLIP_SERVICE_URL`), so
+  nothing breaks before the tenant exists.
+
+**Two hard constraints found in the code, which dictate the shape:**
+
+1. `src/api/videos.py::user_id` is CLAUDE.md-protected, and its
+   `_USER_RE = ^[A-Za-z0-9_-]{1,64}$` **rejects Auth0 subject format** —
+   `auth0|68a3…` contains a `|`. So the JWT `sub` cannot be used as the tenant
+   id directly.
+2. There are **two independent tenancy implementations** — that protected
+   `user_id()` dependency and `src/api/search.py`'s own `_uid()`. Any fix
+   applied to one alone would leave the other on the spoofable header.
+
+Both are solved by resolving identity in middleware and rewriting the
+`x-user-id` header in the ASGI scope BEFORE routing, so both existing
+implementations transparently read the authenticated value. That is additive —
+`videos.py` is never edited — and uniform, which a `dependency_overrides` shim
+would not be (it would miss `search.py::_uid`).
+
+| # | Component | File | Notes |
+|---|-----------|------|-------|
+| 43 | Auth0 authentication (OIDC, email+password) | `src/auth0.py` (new), `src/security.py`, `src/app.py`, `src/config.py`, `src/api/search.py` (config passthrough), `ui/index.html`, `requirements.txt` | **Backend**: `src/auth0.py` validates RS256 access tokens against the tenant's JWKS (cached, refreshed on unknown `kid`), checking signature, `exp`, `aud` and `iss`. Algorithm is pinned to RS256 — accepting the token's own `alg` is the classic confusion attack (an attacker signs HS256 using the public key as the HMAC secret), so `none`/HS* must be rejected outright. **Tenant id**: `sub` is hashed to `u_<sha256(sub)[:32]>` — deterministic, opaque, and guaranteed to satisfy the protected file's regex and length limit. One-way by design; the UI shows the user's email from its own ID token rather than the server storing a mapping table. **Identity precedence** (exactly one rule, applied in middleware): a valid Auth0 bearer token wins and its derived tenant OVERWRITES any client-sent `X-User-Id` — otherwise the spoof survives; else a valid `ADMIN_TOKEN` keeps today's behavior including honoring `X-User-Id`, because `benchmark/bench.py` and `eval/eval.py` authenticate that way and would break otherwise (this makes the admin token deliberately cross-tenant — an operator/machine credential, documented as such); else anonymous → `DEFAULT_USER_ID`. **Gating**: mutations accept EITHER a user JWT or the admin token; reads stay public. **Frontend**: `@auth0/auth0-spa-js` (Authorization Code + PKCE — no client secret in the browser), Sign in / Sign out in the sidebar, `authFetch` attaching the access token, and an empty-state that explains the strict-isolation model instead of showing a blank library. `GET /api/config` gains the three PUBLIC Auth0 values (domain, client id, audience) so the SPA self-configures. |
+
+Primary eval, mirrored into `CLAUDE.md` §7:
+- **43** — unit, against a self-signed RSA keypair + fake JWKS so no live tenant
+  is needed: a valid token yields the expected tenant; expired, wrong-audience,
+  wrong-issuer, bad-signature, `alg=none` and HS256-confusion tokens are ALL
+  rejected; tenant derivation is deterministic and always satisfies
+  `^[A-Za-z0-9_-]{1,64}$`; a spoofed `X-User-Id` is IGNORED when a valid JWT is
+  present; the admin-token machine path still honors `X-User-Id` (bench must
+  not break); with `AUTH0_*` unset every existing behavior is byte-identical.
+  Contract: mutations 401 without either credential, succeed with either.
+  Live (after the tenant exists): a real email+password login reaches an empty
+  workspace, ingests one source, and sees it — while a second account does not.
+
 ## 4. Corpus & scale plan (right-sized — DECIDED)
 
 The product ships **pre-built with the 8 curated triplets** in `benchmark/corpus.json`
