@@ -160,6 +160,7 @@ A component is DONE only when: its tests are green, relevant SLA rows pass,
 | 44 | Tracing facade + backends (Opik / OTel) | unit: no backend configured ⇒ every call a no-op; an exporter that raises never reaches the caller; nested spans nest |
 | 45 | RAG read-path spans | unit: one ask emits the expected span tree with decision attributes (gate score, rerank reordering, abstain reason); live: a real `/ask_stream` is one Opik trace whose step timings sum to observed latency |
 | 46 | Ingest tracing + cross-process correlation | unit: Redis trace-context round-trip; a missing context degrades to an uncorrelated trace, never an error; live: one document registration = one trace across API + worker |
+| 48 | Eval dataset + experiment versioning in Opik | unit: dataset push idempotent; experiment metadata carries dataset + all prompt/embed/chunker versions + retrieval flags; `OPIK_API_KEY` unset ⇒ benchmarks byte-identical. Opik is the RECORD, never the gate — `quality_gates.json` stays the judge |
 | 47 | Prompt & data versioning | unit: editing prompt text changes its version automatically; version appears on the LLM span and in the `/ask` payload; two `answer_quality.py` runs under different prompts are distinguishable |
 
 Cross-cutting, always: `grounding-auditor` after 7/8/10; search-during-ingest ratio
