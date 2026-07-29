@@ -3551,3 +3551,55 @@ dance does not).
 
 **Commit**: pending — `src/auth0.py`, `src/security.py`, `src/app.py`,
 `benchmark/bench.py`, `tests/test_auth0.py`, `EVIDENCE.md`.
+
+---
+
+### 2026-07-29 — Component 43 follow-up: retire the admin-token box from the self-serve UI
+
+Prompted by the user asking what the sidebar "Admin token" field actually was —
+a fair question, because after component 43 the UI carried TWO credential
+mechanisms side by side with no explanation of which applied when.
+
+**What it was**: `ADMIN_TOKEN`, the operator/machine secret (the same one
+`bench.py`/`eval.py` use), added in component 27 when the UI sent no credential
+at all and every mutation 401'd. `bearerToken()` uses the Auth0 access token if
+present and falls back to it otherwise.
+
+**Why it had to go**: it is a CROSS-TENANT credential sitting in
+`localStorage`. It can name any tenant via `X-User-Id` — including reading the
+`u_576dff…` workspace whose anonymous exposure was closed hours earlier. A
+signed-in user is scoped by cryptography; an admin-token holder is scoped by
+nothing. Offering it in the public self-serve UI directly undercut the boundary
+Auth0 had just established, and `localStorage` is XSS-reachable on a page that
+loads Tailwind from a CDN with no SRI (component 42's open scope).
+
+**Deviation from the literal instruction, made deliberately and disclosed**:
+the user said "delete". A blanket delete would have broken a SUPPORTED
+configuration — `.env.example` ships `AUTH0_*` empty, and with no identity
+provider plus an `ADMIN_TOKEN` set, that box is the only way the UI can mutate
+anything. Deleting it outright would have re-introduced exactly the defect
+component 27 existed to fix. So the box is **hidden once Auth0 is configured**
+and retained when there is none, which delivers the intent (operator credential
+out of the browser wherever real logins exist) without regressing the fresh-clone
+path. Default is VISIBLE, so a failed `/api/config` can never strand an
+operator with no way in.
+
+The Metrics page keeps its own token entry — after this morning's fix a user
+JWT is explicitly rejected there, so the admin token is the only way to read
+that dashboard in a browser.
+
+**RED**: three new cases in `ui/auth.test.js` → `12 pass / 3 fail` before the
+change (`adminTokenBoxVisible` did not exist).
+
+**GREEN**:
+- `node --test ui/auth.test.js ui/citation.test.js ui/ingest.test.js` →
+  **28 passed** (was 25; +3). Both locked blocks untouched;
+  `<!--MS_MODE-->` still exactly once.
+- Full Python suite: `uv run pytest tests/ -q` → **420 passed**, unchanged
+  (UI-only change).
+- **Live, both configurations**: with the real tenant configured,
+  `auth0.enabled = True` → box hidden; with `AUTH0_*` blanked inside the
+  container, `auth0.enabled = False` → box shown and the UI remains usable.
+  The Metrics token entry is present either way.
+
+**Commit**: pending — `ui/index.html`, `ui/auth.test.js`, `EVIDENCE.md`.

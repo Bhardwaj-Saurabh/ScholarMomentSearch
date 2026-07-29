@@ -103,3 +103,29 @@ test("authErrorMessage: other errors fall back to the server's own detail", () =
 test("authErrorMessage: never returns an empty string", () => {
   assert.ok(A.authErrorMessage(500, "").length > 0);
 });
+
+// ── Admin-token box visibility ──────────────────────────────────────────────
+// The admin token is a CROSS-TENANT operator credential (it can name any
+// tenant via X-User-Id) living in localStorage. Once Auth0 provides real,
+// cryptographically-scoped logins, keeping it pasteable into the self-serve UI
+// undercuts the boundary Auth0 establishes — a signed-in user is scoped to
+// their own data, an admin-token holder is scoped to nothing.
+//
+// It is hidden rather than deleted because AUTH0_* unset is a supported mode
+// (.env.example ships it empty). With no identity provider AND an ADMIN_TOKEN
+// set, that box is the only way the UI can mutate anything — removing it
+// outright would re-break exactly what component 27 fixed.
+
+test("adminTokenBoxVisible: hidden once Auth0 is providing real logins", () => {
+  assert.equal(A.adminTokenBoxVisible(true), false);
+});
+
+test("adminTokenBoxVisible: shown when there is no identity provider", () => {
+  assert.equal(A.adminTokenBoxVisible(false), true);
+});
+
+test("adminTokenBoxVisible: treats missing/undefined config as no-Auth0", () => {
+  // A failed /api/config fetch must not strand the operator with no way in.
+  assert.equal(A.adminTokenBoxVisible(undefined), true);
+  assert.equal(A.adminTokenBoxVisible(null), true);
+});

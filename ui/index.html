@@ -78,7 +78,10 @@
         <button id="loginBtn" class="hidden w-full rounded-lg bg-indigo-600 hover:bg-indigo-700 px-2 py-1.5 text-[11px] font-medium text-white transition">Sign in</button>
         <button id="logoutBtn" class="hidden w-full rounded-lg border border-slate-200 hover:bg-slate-50 px-2 py-1.5 text-[11px] font-medium text-slate-600 transition">Sign out</button>
       </div>
-      <div data-full-only class="space-y-1.5">
+      <!-- Operator credential, shown ONLY when there is no identity provider
+           (see adminTokenBoxVisible). With Auth0 configured, users sign in
+           instead and this cross-tenant token stays out of the browser. -->
+      <div id="adminTokenBox" data-full-only class="space-y-1.5">
         <label class="block text-[11px] font-medium text-slate-500">Admin token</label>
         <div class="flex gap-1.5">
           <input data-admin-token type="password" placeholder="Bearer token"
@@ -360,6 +363,20 @@ function authHeaders(token){
 function withAuth(headers, token){
   return Object.assign({}, headers||{}, authHeaders(token));
 }
+function adminTokenBoxVisible(auth0Enabled){
+  // The admin token is a CROSS-TENANT operator credential kept in
+  // localStorage — it can name any tenant via X-User-Id, so a holder is
+  // scoped to nothing, whereas a signed-in user is scoped by cryptography.
+  // Once Auth0 provides real logins, offering it in the self-serve UI
+  // undercuts that boundary, so it disappears.
+  //
+  // Hidden, not deleted: AUTH0_* unset is a supported mode (.env.example
+  // ships it empty). With no identity provider and an ADMIN_TOKEN set, this
+  // box is the ONLY way the UI can mutate anything — dropping it outright
+  // would re-break precisely what component 27 fixed. A missing/failed config
+  // is treated as no-Auth0 so a bad /api/config never strands the operator.
+  return !auth0Enabled;
+}
 function authErrorMessage(status, detail){
   // 503 is component 25's "the SERVER is missing ADMIN_TOKEN" — the user
   // cannot fix that by pasting a token, so it must not be reported as one.
@@ -452,6 +469,11 @@ let _auth0=null, _auth0User=null;
 
 async function initAuth0(cfg){
   const a=cfg&&cfg.auth0;
+  // Retire the admin-token box the moment real logins exist. Done here (not at
+  // boot) because it depends on the server's config, and defaults to VISIBLE
+  // so a failed /api/config can never lock an operator out.
+  const box=$("#adminTokenBox");
+  if(box && !adminTokenBoxVisible(!!(a&&a.enabled))) box.classList.add("hidden");
   if(!a||!a.enabled||!window.auth0) return;      // feature off -> UI stays hidden
   try{
     _auth0=await auth0.createAuth0Client({
