@@ -4781,3 +4781,68 @@ NOT DONE**.
 `src/rag/search.py`, `src/ingest/doc_pipeline.py`,
 `benchmark/answer_quality.py`, `tests/test_injection.py`,
 `tests/test_graph.py`.
+
+---
+
+### 2026-07-29 — Component 51: seeding vector-integrity verification (DESIGN.md §3j)
+
+Scoped in its own commit (`0b4e401`) — genuinely new scope (a reconciliation
+direction component 34 does not cover: row-outlives-vectors, not
+vectors-outlive-row), found while investigating the data-integrity incident
+above.
+
+**RED**: `tests/test_seeding_integrity.py` -> 3 of 7 failed, exactly the three
+cases the fix targets — the incident reproduction
+(`status='indexed'` + 0 vectors), the fail-open direction, and the video
+equivalent. The other 4 (common case skip, non-indexed always selected,
+missing row always selected) passed immediately, confirming they were already
+correct and the fix doesn't regress them.
+
+**GREEN**:
+
+    uv run pytest tests/test_seeding_integrity.py -q   -> 7 passed
+    uv run pytest tests/ -q                            -> 609 passed
+
+**Fix**: `vector_store.count_document_chunks`/`count_video_chunks` (plain
+Qdrant `count()`, `exact=True`, filtered by `user_id`+`source_id`/`video_id`).
+`seeding._not_indexed_videos`/`_not_indexed_documents` now require BOTH
+`status == 'indexed'` AND a positive vector count. A count-check exception
+fails OPEN toward re-seeding — deliberately the more-work direction, since
+re-seeding an already-correct source is idempotent
+(`upsert_*_chunks` deletes-then-inserts) while trusting an unconfirmed status
+is the exact incident this closes.
+
+**Live repair, using the corpus that had been broken since (at latest) the
+component 15 migration:**
+
+    docker compose up -d --scale worker=4      # WORKER_CONCURRENCY=2, and
+                                                # ~200 stale bench Prefect runs
+                                                # were starving real work
+    -> re-ingest of all 16 seeded docs completed
+
+    default documents: {'indexed': 16}
+    text vectors: 2029 -> 3159   (+1130, matching the sum of recorded chunk_counts)
+
+Per-source counts verified against Postgres's own `chunk_count`, exact match on
+every sampled source:
+
+    doc_seed_gpt3_paper        points=189   (chunk_count 189)
+    doc_seed_cot_paper         points=142   (chunk_count 142)
+    doc_seed_lora_paper        points=94    (chunk_count 94)
+    doc_seed_clip_deck         points=47    (chunk_count 47)
+    doc_seed_bert_paper        points=47    (chunk_count 47)
+    doc_seed_react_deck        points=72    (chunk_count 72)
+    doc_seed_rag_deck          points=41    (chunk_count 41)
+    doc_seed_attention_paper   points=28    (chunk_count 28)
+
+Scaled workers back to 1 afterward; a fresh `seed` run against the repaired
+corpus logged `[seed] everything already indexed — ready` — component 51's own
+fix, once deployed, is what will make that claim trustworthy going forward
+rather than merely true by coincidence today.
+
+**Corpus is now whole.** The precision@10 / recall@10 / answer_quality
+re-measure that was blocked on this, and component 50's live on/off eval,
+follow in the next entry.
+
+**Commit**: pending — `src/seeding.py`, `src/rag/vector_store.py`,
+`tests/test_seeding_integrity.py`, `DESIGN.md`, `CLAUDE.md`.

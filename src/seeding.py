@@ -56,11 +56,32 @@ def _all_videos() -> list[dict]:
     return videos
 
 
+def _row_has_vectors(count_fn, *args) -> bool:
+    """DESIGN.md §3j component 51. `count_fn` raising means Qdrant could not
+    confirm the vectors exist — treated as "not confirmed present", the same
+    outcome as a real zero, so the caller re-seeds. Re-seeding an
+    already-correct source is idempotent (upsert_*_chunks deletes-then-
+    inserts); silently trusting `status='indexed'` on an unknown answer is
+    the exact incident this component exists to close, so the fail-open
+    direction here is deliberately toward MORE work, not less."""
+    try:
+        return count_fn(*args) > 0
+    except Exception:
+        return False
+
+
 def _not_indexed_videos() -> list[dict]:
     out = []
     for v in _all_videos():
-        row = db.get_video(sample_video_id(v["url"]))
+        vid = sample_video_id(v["url"])
+        row = db.get_video(vid)
         if (row or {}).get("status") != "indexed":
+            out.append(v)
+            continue
+        # Status says indexed — confirm the vectors actually exist before
+        # trusting it. This is the check that was missing when
+        # TEXT_COLLECTION was dropped/recreated for component 15's migration.
+        if not _row_has_vectors(vector_store.count_video_chunks, config.DEFAULT_USER_ID, vid):
             out.append(v)
     return out
 
@@ -89,6 +110,10 @@ def _not_indexed_documents() -> list[dict]:
     for d in _corpus_documents():
         row = db.get_document(d["id"])
         if (row or {}).get("status") != "indexed":
+            out.append(d)
+            continue
+        if not _row_has_vectors(vector_store.count_document_chunks,
+                                config.DEFAULT_USER_ID, d["id"]):
             out.append(d)
     return out
 

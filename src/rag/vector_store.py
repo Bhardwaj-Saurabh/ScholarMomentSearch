@@ -310,6 +310,32 @@ def upsert_document_chunks(user_id: str, source_id: str, kind: str, vectors: np.
         client().upsert(collection_name=TEXT_COLLECTION, points=points, wait=True)
 
 
+def count_document_chunks(user_id: str, source_id: str) -> int:
+    """DESIGN.md §3j component 51: how many chunks a document ACTUALLY has in
+    Qdrant, independent of what Postgres's `status` column claims. This is the
+    check that closes the incident where every seeded paper/deck read
+    `status='indexed'` with zero real vectors after `TEXT_COLLECTION` was
+    dropped and recreated for component 15's migration. Raises on a Qdrant
+    error rather than swallowing it — the caller (seeding.py) must fail OPEN
+    toward re-seeding on an uncertain answer, and doing that here would hide
+    the distinction between 'confirmed present' and 'unknown'."""
+    f = qm.Filter(must=[
+        qm.FieldCondition(key="user_id", match=qm.MatchValue(value=user_id)),
+        qm.FieldCondition(key="source_id", match=qm.MatchValue(value=source_id)),
+    ])
+    return client().count(collection_name=TEXT_COLLECTION, count_filter=f, exact=True).count
+
+
+def count_video_chunks(user_id: str, video_id: str) -> int:
+    """Same check for the visual branch — frame vectors in QDRANT_COLLECTION.
+    Video transcript text also lives in TEXT_COLLECTION, but the frame count
+    alone is sufficient signal: a video losing its frames but keeping its
+    transcript is not a case this incident produced or this check needs to
+    distinguish."""
+    f = _user_filter(user_id, video_id)
+    return client().count(collection_name=QDRANT_COLLECTION, count_filter=f, exact=True).count
+
+
 def delete_document_chunks(user_id: str, source_id: str) -> None:
     """Purge a document's chunks before re-embedding, mirroring delete_video's
     role for the video branches — keeps a re-run idempotent."""
