@@ -182,28 +182,37 @@ def test_neighbours_fails_open(monkeypatch):
     assert graph.neighbours("u1", ["clip"]) == set()
 
 
-def test_neighbours_are_capped_and_ranked_by_shared_seed_count(cleanup):
-    """Found live against the real corpus: an UNCAPPED, unranked expansion
-    returned 1889 neighbours for a 3-entity query (a single 189-chunk paper
-    mentions hundreds of distinct low-frequency terms), and their union
-    matched 26 of 28 sources — each neighbour was individually rare enough to
-    survive per-entity IDF, but the SIZE of the set is what caused the
-    fan-out. `db.graph_neighbours` now caps the result and ranks by how many
-    seed entities each neighbour shares, so a term genuinely tied to several
-    of the query's entities outranks one that merely co-occurred once."""
+def test_neighbours_ranks_shared_seeds_first(cleanup):
+    """"elmo" co-occurs with BOTH seed entities (via src_a and src_c);
+    "squad"/"glue" co-occur with only one each — elmo must rank first."""
     graph.record_mentions("graphtest_e2", "src_a", "paper", ["bert", "elmo", "glue"])
     graph.record_mentions("graphtest_e2", "src_b", "paper", ["bert", "squad"])
     graph.record_mentions("graphtest_e2", "src_c", "paper", ["language", "elmo"])
-    # "elmo" co-occurs with BOTH seed entities (via src_a and src_c);
-    # "squad"/"glue" co-occur with only one each — elmo should rank first.
-    nb = graph.neighbours("graphtest_e2", ["bert", "language"])
-    assert "elmo" in nb
+    nb = graph.db.graph_neighbours("graphtest_e2", ["bert", "language"], limit=20)
+    assert nb[0] == "elmo"
 
 
-def test_neighbours_cap_is_bounded():
-    """The absolute ceiling that stops the fan-out, independent of ranking."""
-    import inspect
-    assert "limit" in inspect.signature(graph.db.graph_neighbours).parameters
+def test_neighbours_cap_actually_trims_a_large_candidate_set(cleanup):
+    """This is the regression that matters, not just an API-shape check
+    (spec-guardian: the previous version of this test used only 3 candidates,
+    well under any plausible limit, so it would have passed under the
+    ORIGINAL uncapped query too). Reproduces the size regime that caused the
+    real incident: one source mentioning a seed entity alongside 50 other
+    terms, each shared with the seed by only that one source — i.e. real
+    fan-out material, not a toy case."""
+    filler = [f"term-{i}" for i in range(50)]
+    graph.record_mentions("graphtest_e3", "src_big", "paper", ["clip"] + filler)
+    nb = graph.db.graph_neighbours("graphtest_e3", ["clip"], limit=20)
+    assert len(nb) == 20, f"expected the cap to trim 50 candidates to 20, got {len(nb)}"
+
+
+def test_neighbours_wrapper_passes_the_cap_through(cleanup):
+    """graph.neighbours() (the function search.py actually calls) must not
+    silently drop the limit on its way to db.graph_neighbours."""
+    filler = [f"term-{i}" for i in range(50)]
+    graph.record_mentions("graphtest_e4", "src_big", "paper", ["clip"] + filler)
+    nb = graph.neighbours("graphtest_e4", ["clip"])
+    assert len(nb) <= 20
 
 
 def test_deleting_a_document_purges_its_graph_rows(cleanup):

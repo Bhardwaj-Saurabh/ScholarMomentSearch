@@ -4923,3 +4923,69 @@ produce. New tests: neighbour capping/ranking, and a regression pin on the
 **GREEN**: `uv run pytest tests/ -q` -> **612 passed** (was 609).
 
 **Commit**: pending — `src/db.py`, `src/rag/search.py`, `tests/test_graph.py`.
+
+---
+
+### 2026-07-29 — Component 50: live on/off measurement (the eval that was blocked all session)
+
+Graph backfilled on the whole, repaired corpus first (stale rows from the
+broken-corpus period cleared): **28 sources, 5524 edges** (12 videos + 8
+papers + 8 decks).
+
+Measured with `GRAPH_RETRIEVAL_ENABLED` toggled via `.env` (never committed —
+gitignored) and an `api` restart between runs, confirmed live each time via
+`config.GRAPH_RETRIEVAL_ENABLED` read back from inside the container:
+
+    OFF: precision_at_10 = 0.865 (target 0.70) — PASS
+    ON:  precision_at_10 = 0.865 (target 0.70) — PASS
+
+    search_p95 (n=20, "what does the survey say about hybrid retrieval"):
+    OFF: 12246.1ms
+    ON:  11900.4ms
+
+**Result, stated plainly: no measurable precision change, positive or
+negative, and no measurable latency cost** (the ON figure is actually lower,
+which is noise against an LLM-dominated ~12s call, not a real speedup).
+Per DESIGN.md §3i's own primary eval — *"if the graph does not help, that gets
+recorded, not tuned away"* — this null result stands as measured.
+`quality_gates.json` is unedited; nothing was tuned to chase a different
+number.
+
+**Why a null result is plausible, not a sign of a broken component**: this
+corpus's precision@10 is already 0.865 without any graph help — the retrieval
+pipeline (hybrid search + rerank, components 15/16) plus the whole-corpus
+repair (component 51) had already closed the gap the graph was meant to
+attack. The graph's justification (cross-triplet adjacency at the retrieval
+boundary) matters most when precision is marginal; on a corpus this clean,
+there is little headroom left for a re-ranking hint to recover. `GRAPH_RETRIEVAL_ENABLED`
+stays `false` by default — there is no measured case for turning it on.
+
+**Second spec-guardian round** on `c861d49` (component 51) and `48b05ef` (the
+fan-out fix) returned **PASS-with-warnings**, all three addressed:
+
+1. DESIGN.md §3i's component-50 row still described 1-hop expansion as live
+   query-time behaviour after the live path was switched to `hops=0`.
+   Corrected with a dated addendum (mirroring the existing granularity
+   correction) stating plainly what ships vs. what is implemented-but-unwired,
+   plus the null-result numbers above.
+2. `test_neighbours_are_capped_and_ranked_by_shared_seed_count` used only 3
+   candidates — well under the cap — so it would have passed under the
+   ORIGINAL uncapped query too and was not actually testing the fix. Replaced
+   with `test_neighbours_cap_actually_trims_a_large_candidate_set` (50
+   filler terms, asserts the cap trims to exactly 20) and
+   `test_neighbours_wrapper_passes_the_cap_through` (guards `graph.neighbours()`
+   itself, not just the DB layer).
+3. `test_neighbours_cap_is_bounded` only introspected that a `limit` parameter
+   exists, never that it's honored. Removed in favor of the two behavioural
+   tests above.
+
+**GREEN**: `uv run pytest tests/ -q` -> **613 passed** (was 612).
+
+**Component 50 status: DONE.** Tests green, live on/off eval run with
+verbatim numbers (a null result, recorded honestly), `search_p95` measured
+both ways, flag defaults false, spec-guardian PASS across two rounds.
+`grounding-auditor` has not yet been run against it — recommended before any
+future flip to `GRAPH_RETRIEVAL_ENABLED=true` in a deployed environment,
+though the flag being off makes it a non-issue for the current submission.
+
+**Commit**: pending — `DESIGN.md`, `tests/test_graph.py`.

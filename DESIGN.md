@@ -562,6 +562,35 @@ a possible follow-up; they would multiply row count by roughly the chunk count
 per source, which is why source-level was the right first cut on a corpus where
 one paper holds 189 chunks.
 
+**Hop-expansion correction (2026-07-29, after a live measurement).** The row
+above still describes 1-hop neighbour expansion ("look up their 1-hop
+neighbours ... drop the non-discriminating ones") as query-time behaviour.
+What ships is narrower: **the live read path calls `matched_sources(...,
+hops=0)` — direct entity match only.** A live check against the real 28-source
+corpus found the 1-hop expansion, even after capping and ranking neighbours by
+shared-seed-count (EVIDENCE.md), still matched 18 of 28 sources for an
+ordinary question — broader than "boost the source the question names" was
+meant to be, because a single large paper's hundreds of low-frequency terms
+each individually survive the per-entity IDF filter while their UNION does
+not. `hops=1`/`neighbours()` remain implemented and unit-tested — the
+capability is real, not abandoned — but are not wired into the live boost
+until they can be made more selective. Direct match alone (`hops=0`) produced
+tight, on-topic sets in the same live check (2-6 sources per query) and is
+what actually runs.
+
+**Live measurement result, recorded rather than assumed.** `precision_at_10`
+was measured at **0.865 both with the flag OFF and ON** (`bench.py --quality`,
+2026-07-29) — i.e., on this 28-source corpus, the graph boost produced **no
+measurable precision change**, positive or negative. `search_p95` was
+12246.1ms OFF vs 11900.4ms ON (n=20 each) — within noise of an LLM-dominated
+~12s call, no measurable latency cost either. Per this component's own primary
+eval below ("if the graph does not help, that gets recorded, not tuned away"),
+this null result stands as written. The precision@10 gate itself passed
+comfortably (0.865 vs the 0.70 `quality_gates.json` threshold) on a corpus
+that, per component 51's incident, had been silently missing every paper/deck
+vector until this session's repair — the retrieval pipeline was never the
+weak point; the corpus feeding it was.
+
 Primary eval:
 - **50** — unit: the extractor is deterministic and tenant-scoped; a question
   naming an entity ranks the chunk that *mentions* it above a topically-similar
