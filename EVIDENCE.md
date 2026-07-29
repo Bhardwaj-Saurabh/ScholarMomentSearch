@@ -4989,3 +4989,25 @@ future flip to `GRAPH_RETRIEVAL_ENABLED=true` in a deployed environment,
 though the flag being off makes it a non-issue for the current submission.
 
 **Commit**: pending — `DESIGN.md`, `tests/test_graph.py`.
+
+---
+
+### 2026-07-29 — answer_quality.py re-measured on the WHOLE corpus (closes the caveat spec-guardian flagged)
+
+The earlier component-49 re-measure (relevancy 5.0 / faithfulness 0.979) was
+flagged by spec-guardian as measured on the video-only broken corpus, same as
+every precision@10 reading. Re-run now that all 28 sources (12 videos + 8
+papers + 8 decks) are confirmed indexed:
+
+    python -m benchmark.answer_quality
+    queries judged: 16 / 16, citations checked: 63   (was 48)
+    [PASS] answer_relevancy: 5.0 (target 4.0)
+    [PASS] answer_faithfulness: 1.0 (target 0.85)     (was 0.979)
+    recorded in Opik: experiment 019fafff-dc6b-71ab-aadd-2d2fc8011766
+
+Both PASS, and faithfulness improved to a clean 1.0 with more citations
+checked (63 vs 48) — consistent with a whole corpus giving the answering model
+better evidence to ground each claim in, rather than being forced onto
+video-only transcripts for questions that actually named a paper or deck.
+
+**Commit**: pending.
