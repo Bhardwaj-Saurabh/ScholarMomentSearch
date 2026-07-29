@@ -3464,3 +3464,90 @@ second account does not.
 **Commit**: pending — `src/auth0.py`, `src/security.py`, `src/app.py`,
 `src/config.py`, `src/api/search.py`, `ui/index.html`, `tests/test_auth0.py`,
 `requirements.txt`, `.env.example`, `DEPLOYMENT.md`.
+
+---
+
+### 2026-07-29 — Component 43: LIVE login verified, plus 4 security fixes (2 found post-ship)
+
+**The live end-to-end check the previous entry honestly listed as NOT VERIFIED
+is now done, against a real Auth0 tenant** (`dev-kjy65jz0w6efs24i.us.auth0.com`).
+
+Configuration verified from the server side before the human step, by driving
+Auth0's own `/authorize` endpoint with the exact parameters the SPA sends:
+- both real redirect URIs → **HTTP 302** to `/u/login` (client id valid,
+  callbacks allowlisted, audience resolved)
+- negative control `https://evil.example.com/steal` → **HTTP 403**,
+  *"Callback URL mismatch / unauthorized_client"* — the allowlist is genuinely
+  enforced, not permissive
+- negative control with a nonexistent audience → *"Service not found"*, which
+  is what proves the earlier success meant `https://momentsearch/api` resolved
+  to a real API
+- JWKS reachable, 2 real signing keys returned
+
+**Then a real browser login + one real ingest**, verified server-side without
+any credential being pasted: a new tenant appeared,
+`u_576dffe00dc73a06c150723323deb11b` (34 chars, satisfies the protected file's
+`^[A-Za-z0-9_-]{1,64}$`), owning `yt_ZXiruGOCn9s`. The full chain is therefore
+proven: real Auth0 login → RS256 token → JWKS validation → tenant derived from
+`sub` → data written under it, separate from the 28 sources under `default`.
+
+**FOUR security fixes, two of which I found only because of this live run and
+the review — both were real, both are now closed:**
+
+1. **Cross-tenant read (found live, mine).** Immediately after confirming the
+   login worked, an anonymous request carrying `X-User-Id: u_576dff…` returned
+   the private video. "Reads stay public" (the user's decision) combined with
+   "the header selects the tenant" (pre-existing) added up to: anyone who
+   learned a tenant id could list that user's library. Fixed by pinning
+   ANONYMOUS callers to `DEFAULT_USER_ID` — they get the public demo corpus and
+   nothing else; selecting a tenant now requires proving who you are.
+   **This would have broken the graded benchmark**, and checking first is the
+   only reason it didn't: `bench.py:273` and `:311` polled `/admin/sources`
+   with `X-User-Id` and NO token. `benchmark/bench.py` is ours (not protected),
+   and an ops tool should authenticate anyway, so both calls now pass
+   `token=ADMIN`. Same tenant resolution, same timings, just authenticated.
+2. **spec-guardian MAJOR — privilege widening on operator endpoints.**
+   `require_auth_dep` accepted ANY valid JWT, which silently promoted
+   `/metrics` and `/admin/metrics` from admin-only to
+   anyone-who-registers — global cost/token/traffic data and the all-tenant
+   queue rollup. Auth0's default database connection allows public signup, so
+   on a public deploy that meant any stranger. This directly contradicted
+   CLAUDE.md §7 ("never leave `/metrics`/`/admin/metrics` ungated"). Fixed with
+   `admin_only_path()`, applied at BOTH the middleware and the dependency.
+3. **spec-guardian MEDIUM — unauthenticated JWKS refetch.** An unknown `kid`
+   forced an uncached refetch: synchronous `urlopen` inside the async
+   middleware, reachable before rate limiting, so looping random-kid tokens
+   could stall the event loop and burn the tenant's JWKS quota. Fixed with a
+   60s refetch cooldown (key rotation still propagates, just bounded).
+4. **spec-guardian LOW — `exp` not required.** PyJWT does not require the claim
+   to be PRESENT unless asked, and a token with no expiry is a permanent
+   credential. Now `options={"require": ["exp", "iss", "aud", "sub"]}`.
+
+spec-guardian otherwise returned **PASS-with-warnings** and confirmed, by
+reading Starlette's source: RS256 genuinely pinned with no path honoring the
+token's own `alg`; audience and issuer both validated; foreign-tenant tokens
+rejected on `iss` and `kid`; the JWKS URL derived solely from config and never
+from the token; `force_user_id` stripping ALL case-insensitive duplicate
+headers with the same scope dict reaching the endpoint (no smuggling); the
+`dependency_overrides` covering every router; the admin machine path intact;
+and the public surface unchanged. It re-ran and matched every number in the
+prior entry — no E4 violation.
+
+**GREEN**:
+- `uv run pytest tests/test_auth0.py -q` → **27 passed** (was 19; +8 covering
+  all four fixes).
+- Full suite: `uv run pytest tests/ -q` → **420 passed** (was 412; +8), 0
+  regressions — including the metrics and bench tests.
+- **Live, after the fixes**: the same anonymous spoof that leaked the video now
+  returns **12 demo videos and not the private one**; anonymous still sees the
+  full public corpus (graded requirement intact); `admin token + X-User-Id`
+  still resolves the tenant (**1 source**, so bench is unaffected);
+  `/admin/metrics` → **200** with the admin token, **401** without.
+
+**Still open, unchanged and disclosed**: `/docs`+`/openapi.json` public; no
+CORS policy or Host allowlist; the SSRF DNS-rebinding residual; and the new
+Auth0 SPA flow has no JS test coverage (the pure helpers do; the redirect
+dance does not).
+
+**Commit**: pending — `src/auth0.py`, `src/security.py`, `src/app.py`,
+`benchmark/bench.py`, `tests/test_auth0.py`, `EVIDENCE.md`.

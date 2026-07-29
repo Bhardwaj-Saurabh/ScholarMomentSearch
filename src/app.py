@@ -79,6 +79,15 @@ async def _auth_middleware(request, call_next):
     tenant = security.resolve_tenant(authorization)
     if tenant is not None:
         security.force_user_id(request.scope, tenant)
+    elif not security.token_ok(authorization):
+        # ANONYMOUS callers may not choose a tenant. Reads are public by design
+        # (the graded demo answers without credentials), but "public reads" plus
+        # "the header picks the tenant" added up to a cross-tenant read: anyone
+        # who learned a tenant id could list that user's library. Found live
+        # against a real Auth0 login. Pinning anonymous requests to the default
+        # tenant keeps the public demo working and closes it. The admin token
+        # still selects tenants — bench/eval depend on that.
+        security.force_user_id(request.scope, config.DEFAULT_USER_ID)
 
     failure = security.auth_failure(
         request.method, request.url.path, authorization)

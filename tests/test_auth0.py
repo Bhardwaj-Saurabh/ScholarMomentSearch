@@ -315,3 +315,88 @@ def test_api_config_exposes_public_auth0_values(client):
     assert body["auth0"]["client_id"] == "test-client-id"
     assert body["auth0"]["audience"] == AUDIENCE
     assert "secret" not in json.dumps(body).lower()
+
+
+# ── Post-review hardening (spec-guardian findings + a live cross-tenant read) ─
+
+def test_anonymous_cannot_select_another_tenant_by_header(client, private_pem):
+    """Found live, and it was mine: reads are public (by design) AND the
+    tenant came from an unauthenticated header, so ANY stranger who learned a
+    tenant id could read that user's library. Anonymous callers are now pinned
+    to DEFAULT_USER_ID — they can browse the public demo corpus and nothing
+    else. Selecting a tenant requires proving you are someone."""
+    from src import auth0
+
+    token = make_token(private_pem, sub="auth0|victim")
+    victim = auth0.tenant_for_sub("auth0|victim")
+    vid = "yt_eeeeeeeeeee"
+    # The victim (properly authenticated) creates something.
+    assert client.post("/api/videos", json={"url": f"https://youtu.be/{vid[3:]}"},
+                       headers={"Authorization": f"Bearer {token}"}).status_code == 202
+    try:
+        assert db.get_video(vid)["user_id"] == victim
+        # A stranger naming that tenant must NOT see it.
+        seen = client.get("/api/videos", headers={"X-User-Id": victim}).json()["videos"]
+        assert not any(v["id"] == vid for v in seen), \
+            "anonymous header-spoofing read another tenant's library"
+    finally:
+        db.delete_video(vid)
+
+
+def test_admin_token_can_still_select_a_tenant_for_reads(client, monkeypatch):
+    """benchmark/bench.py polls /admin/sources for a bench tenant. That must
+    keep working — with the admin token, which it now sends."""
+    monkeypatch.setattr(config, "ADMIN_TOKEN", "test-admin-token")
+    resp = client.get("/admin/sources", headers={"Authorization": "Bearer test-admin-token",
+                                                 "X-User-Id": "benchtenant"})
+    assert resp.status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/metrics", "/admin/metrics"])
+def test_a_signed_in_user_cannot_read_operator_metrics(client, private_pem, monkeypatch, path):
+    """spec-guardian MAJOR: `require_auth_dep` allowed ANY valid JWT, so any
+    person who signed up could read global cost/token/traffic data and the
+    all-tenant queue rollup. CLAUDE.md §7 says these two stay admin-token-only,
+    and Auth0's default database connection allows public signup — so on a
+    public deploy that was readable by any stranger who registered."""
+    monkeypatch.setattr(config, "ADMIN_TOKEN", "test-admin-token")
+    resp = client.get(path, headers={"Authorization": f"Bearer {make_token(private_pem)}"})
+    assert resp.status_code == 401, "a user JWT must not unlock operator metrics"
+
+
+@pytest.mark.parametrize("path", ["/metrics", "/admin/metrics"])
+def test_admin_token_still_reads_operator_metrics(client, monkeypatch, path):
+    monkeypatch.setattr(config, "ADMIN_TOKEN", "test-admin-token")
+    assert client.get(path, headers={"Authorization": "Bearer test-admin-token"}).status_code == 200
+
+
+def test_unknown_kid_does_not_refetch_jwks_every_time(monkeypatch, private_pem):
+    """spec-guardian MEDIUM: an unknown `kid` triggered an uncached refetch —
+    synchronous urlopen inside the async middleware, reachable by any
+    anonymous caller BEFORE rate limiting. Looping random-kid tokens would
+    stall the event loop and burn Auth0's JWKS quota. A cooldown bounds it."""
+    from src import auth0
+
+    calls = {"n": 0}
+
+    def _counting():
+        calls["n"] += 1
+        return {"keys": []}
+
+    monkeypatch.setattr(auth0, "_fetch_jwks", _counting)
+    auth0.reset_cache()
+    for _ in range(25):
+        auth0.tenant_for_token(make_token(private_pem, kid="rotating-unknown-kid"))
+    assert calls["n"] <= 2, f"refetched JWKS {calls['n']} times — no cooldown"
+
+
+def test_token_without_exp_is_rejected(private_pem):
+    """spec-guardian LOW: PyJWT does not require `exp` to be PRESENT unless
+    asked. Auth0 always sends one, so this is latent — but a token with no
+    expiry is a permanent credential and must never validate."""
+    from src import auth0
+
+    now = int(time.time())
+    no_exp = jwt.encode({"sub": "auth0|abc", "aud": AUDIENCE, "iss": ISSUER, "iat": now},
+                        private_pem, algorithm="RS256", headers={"kid": KID})
+    assert auth0.tenant_for_token(no_exp) is None

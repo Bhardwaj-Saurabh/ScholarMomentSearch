@@ -270,7 +270,7 @@ def _poll_sources_until_terminal(ids: set[str], timeout_s: float,
     deadline = time.time() + timeout_s
     last: dict[str, str] = {}
     while time.time() < deadline:
-        st, body, _ = _req("GET", "/admin/sources", user=user)
+        st, body, _ = _req("GET", "/admin/sources", token=ADMIN, user=user)
         if st == 200:
             rows = {s["id"]: s["status"] for s in json.loads(body)["sources"]}
             last = {i: rows.get(i, "missing") for i in ids}
@@ -308,7 +308,7 @@ def measure_throughput(n: int = 16, timeout_s: float = 600.0) -> float:
     final = _poll_sources_until_terminal(set(ids), timeout_s, user=user)
     elapsed = time.perf_counter() - t0
 
-    st, body, _ = _req("GET", "/admin/sources", user=user)
+    st, body, _ = _req("GET", "/admin/sources", token=ADMIN, user=user)
     counts = {}
     if st == 200:
         counts = {s["id"]: (s.get("chunk_count") or 0) for s in json.loads(body)["sources"]}

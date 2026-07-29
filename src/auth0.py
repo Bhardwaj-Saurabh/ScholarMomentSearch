@@ -34,6 +34,7 @@ import hashlib
 import json
 import logging
 import threading
+import time
 import urllib.request
 
 from . import config
@@ -45,6 +46,13 @@ _JWKS_TIMEOUT_S = 5
 
 _lock = threading.Lock()
 _jwks_cache: dict | None = None
+# Minimum seconds between JWKS refetches. Without it, an unknown `kid` triggers
+# a fresh network call EVERY time — and since identity is resolved before rate
+# limiting, any anonymous caller could loop random-kid tokens to stall the
+# event loop on blocking I/O and burn the tenant's JWKS quota (spec-guardian).
+# Key rotation still propagates, just at most once per cooldown.
+_REFRESH_COOLDOWN_S = 60
+_last_refresh: float = 0.0
 
 
 def enabled() -> bool:
@@ -57,9 +65,10 @@ def issuer() -> str:
 
 def reset_cache() -> None:
     """Test hook, and the recovery path when a `kid` isn't in the cached set."""
-    global _jwks_cache
+    global _jwks_cache, _last_refresh
     with _lock:
         _jwks_cache = None
+        _last_refresh = 0.0
 
 
 def _fetch_jwks() -> dict:
@@ -69,10 +78,16 @@ def _fetch_jwks() -> dict:
 
 
 def _jwks(refresh: bool = False) -> dict | None:
-    global _jwks_cache
+    global _jwks_cache, _last_refresh
+    now = time.monotonic()
     with _lock:
         if _jwks_cache is not None and not refresh:
             return _jwks_cache
+        # Rate-limit refetches. An attacker controls the `kid` in a token they
+        # send, so without this every bogus kid is a free outbound HTTP call.
+        if refresh and _last_refresh and (now - _last_refresh) < _REFRESH_COOLDOWN_S:
+            return _jwks_cache
+        _last_refresh = now
     try:
         fetched = _fetch_jwks()
     except Exception as exc:
@@ -132,6 +147,11 @@ def claims_for_token(token: str) -> dict | None:
             algorithms=_ALGORITHMS,          # pinned — see module docstring
             audience=config.AUTH0_AUDIENCE,
             issuer=issuer(),
+            # `exp` must be PRESENT, not just valid when supplied: PyJWT does
+            # not require the claim by default, and a token with no expiry is
+            # a permanent credential (spec-guardian). Auth0 always sends one,
+            # so this only closes a latent hole.
+            options={"require": ["exp", "iss", "aud", "sub"]},
         )
     except Exception:
         return None

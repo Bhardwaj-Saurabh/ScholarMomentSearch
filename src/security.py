@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import hmac
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 
 from . import cache, config
 
@@ -105,7 +105,22 @@ def resolve_tenant(authorization: str | None) -> str | None:
     return auth0.tenant_for_token(bearer(authorization))
 
 
-def require_auth_dep(authorization: str | None = Header(default=None)) -> None:
+def admin_only_path(path: str) -> bool:
+    """Routes an ordinary signed-in USER must never reach, however valid their
+    token — they expose global, cross-tenant operator data (cost, tokens,
+    traffic, the all-tenant queue rollup), not anything of theirs.
+
+    Found by spec-guardian: component 43 made `require_auth` accept any valid
+    JWT, which silently promoted these two from admin-only to
+    anyone-who-registers. Auth0's default database connection allows public
+    signup, so on a public deploy that was any stranger. CLAUDE.md §7 is
+    explicit that they stay behind the admin token.
+    """
+    return (path or "").rstrip("/") in _PROTECTED_READS
+
+
+def require_auth_dep(authorization: str | None = Header(default=None),
+                     request: Request = None) -> None:
     """Route-level replacement for `src/api/videos.py::require_auth`, installed
     via FastAPI's `dependency_overrides` (component 43).
 
@@ -123,7 +138,8 @@ def require_auth_dep(authorization: str | None = Header(default=None)) -> None:
     Behavior is a strict superset of the original: a valid Auth0 token passes,
     and everything else follows the inherited admin-token rules exactly.
     """
-    if resolve_tenant(authorization) is not None:
+    path = request.url.path if request is not None else ""
+    if not admin_only_path(path) and resolve_tenant(authorization) is not None:
         return
     if not config.ADMIN_TOKEN:
         return          # inherited dev-convenience; middleware fails closed in prod
@@ -157,7 +173,8 @@ def auth_failure(method: str, path: str, authorization: str | None) -> tuple[int
     # Component 43: a valid user login is sufficient for a mutation — the admin
     # token is no longer the only way in. Checked first so a signed-in user is
     # never refused just because ADMIN_TOKEN happens to be unset.
-    if resolve_tenant(authorization) is not None:
+    # Operator-only reads never accept a user JWT (see admin_only_path).
+    if not admin_only_path(path) and resolve_tenant(authorization) is not None:
         return None
     if not config.ADMIN_TOKEN:
         if config.ENV not in _DEV_ENVS:
