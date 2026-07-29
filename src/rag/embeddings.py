@@ -30,7 +30,7 @@ from functools import lru_cache
 
 import numpy as np
 
-from .. import cache, config
+from .. import cache, config, tracing
 
 _lock = threading.Lock()
 
@@ -150,10 +150,16 @@ class _SparseVec:
 def embed_sparse_query(text: str):
     """BM25-style sparse vector for a search query."""
     key = _cache_key("sparse", config.SPARSE_EMBED_MODEL, text)
-    cached = cache.get_json(key)
-    if cached is not None:
-        return _SparseVec(indices=np.asarray(cached["indices"], dtype=np.int64),
-                          values=np.asarray(cached["values"], dtype=np.float32))
+    with tracing.span("embed_sparse", model=config.SPARSE_EMBED_MODEL) as _sp:
+        cached = cache.get_json(key)
+        _sp.set_attrs(cache="hit" if cached is not None else "miss")
+        if cached is not None:
+            return _SparseVec(indices=np.asarray(cached["indices"], dtype=np.int64),
+                              values=np.asarray(cached["values"], dtype=np.float32))
+        return _embed_sparse_uncached(text, key)
+
+
+def _embed_sparse_uncached(text: str, key: str):
     with _lock:
         result = next(iter(_sparse_model().query_embed([text])))
     cache.set_json(key, {"indices": result.indices.tolist(), "values": result.values.tolist()},
@@ -222,9 +228,15 @@ def embed_jpegs(jpegs: list[bytes]) -> np.ndarray:
 
 def embed_text(text: str) -> np.ndarray:
     key = _cache_key("clip", config.EMBED_VERSION, text)
-    cached = cache.get_json(key)
-    if cached is not None:
-        return np.asarray(cached, dtype=np.float32)
+    with tracing.span("embed_text", model=config.EMBED_VERSION) as _sp:
+        cached = cache.get_json(key)
+        _sp.set_attrs(cache="hit" if cached is not None else "miss")
+        if cached is not None:
+            return np.asarray(cached, dtype=np.float32)
+        return _embed_text_uncached(text, key)
+
+
+def _embed_text_uncached(text: str, key: str) -> np.ndarray:
     if config.CLIP_SERVICE_URL:
         vec = _post("/embed/text", {"text": text}, timeout=60)["vector"]
         result = np.asarray(vec, dtype=np.float32)
@@ -251,9 +263,15 @@ def embed_query(text: str) -> np.ndarray:
     """Search query -> text vector for the transcript branch (same provider
     dispatch as embed_docs)."""
     key = _cache_key("query", config.TEXT_EMBED_VERSION, text)
-    cached = cache.get_json(key)
-    if cached is not None:
-        return np.asarray(cached, dtype=np.float32)
+    with tracing.span("embed_query", model=config.TEXT_EMBED_VERSION) as _sp:
+        cached = cache.get_json(key)
+        _sp.set_attrs(cache="hit" if cached is not None else "miss")
+        if cached is not None:
+            return np.asarray(cached, dtype=np.float32)
+        return _embed_query_uncached(text, key)
+
+
+def _embed_query_uncached(text: str, key: str) -> np.ndarray:
     if config.TEXT_EMBED_PROVIDER == "openai":
         result = embed_openai([text])[0]
     elif config.CLIP_SERVICE_URL:

@@ -82,6 +82,21 @@ def record_request(route: str, status_code: int, latency_ms: float) -> None:
 
 
 def record_llm_usage(model: str, input_tokens: int, output_tokens: int, *, kind: str) -> None:
+    """Also annotates the ACTIVE span (component 45): all four provider paths
+    already funnel through here with the token counts, so hooking this one
+    function gives every LLM span its tokens and cost without duplicating the
+    logic per provider — and without src/llm.py needing to know tracing
+    exists."""
+    from . import tracing
+
+    cost = _cost(model, input_tokens, output_tokens)
+    tracing.annotate(model=model, kind=kind, input_tokens=input_tokens,
+                     output_tokens=output_tokens, cost_usd=round(cost, 6))
+    _record_llm_usage_impl(model, input_tokens, output_tokens, kind=kind)
+
+
+def _record_llm_usage_impl(model: str, input_tokens: int, output_tokens: int,
+                           *, kind: str) -> None:
     """kind: "answer" | "caption" | "complete" | "ping" — only "answer" counts
     toward the "LLM answers" stat; every kind's tokens/cost still accumulate,
     since it's all real LLM API spend regardless of which call site made it."""

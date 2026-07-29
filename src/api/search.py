@@ -207,6 +207,9 @@ def ask_stream(q: str = Query(min_length=1, max_length=config.ASK_MAX_QUESTION_C
             "llm_used": result.get("llm_used", False),
             "abstained": result.get("abstained", False),
             "note": result.get("note"),
+            # Component 48: lets an evaluator attach per-query scores to the
+            # trace that produced THIS answer. Absent when tracing is off.
+            "trace_id": result.get("trace_id"),
         })
         yield _sse("done", {})
 

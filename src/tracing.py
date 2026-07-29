@@ -125,6 +125,25 @@ def set_backends(backends: list) -> None:
         _initialized = True
 
 
+def annotate(**attrs) -> None:
+    """Attach attributes to the innermost ACTIVE span.
+
+    Lets code deep in the call stack (an LLM client, an embedding cache)
+    contribute to the span its caller opened, without threading a span handle
+    through every signature. A no-op outside any span, and when disabled.
+    """
+    st = _stack()
+    if not st:
+        return
+    rec = st[-1]
+    for k, v in attrs.items():
+        try:
+            rec["attrs"][k] = v if isinstance(
+                v, (str, int, float, bool, type(None), list, dict)) else str(v)
+        except Exception:
+            rec["attrs"][k] = "<unrepresentable>"
+
+
 def warm() -> None:
     """Construct backends up front (app startup), so no request pays the cost.
     Safe to call when disabled or already initialised."""

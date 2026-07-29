@@ -16,7 +16,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
-from .. import config
+from .. import config, tracing, tracing
 
 
 @lru_cache
@@ -49,7 +49,16 @@ def rerank(question: str, windows: list[dict[str, Any]]) -> list[dict[str, Any]]
         return windows  # nothing to rerank against — never load the model for no reason
 
     pairs = [(question, text) for _, text in scored]
-    scores = _model().predict(pairs)
+    # Its own span: the cross-encoder is the single most expensive step after
+    # the LLM (measured cold at 5725.9ms, warm ~100ms — component 45), and the
+    # model-load spike is invisible unless the inference is timed separately
+    # from the surrounding fusion work.
+    with tracing.span("rerank_model", model=config.RERANK_MODEL) as _sp:
+        scores = _model().predict(pairs)
+        _sp.set_attrs(scored=len(pairs),
+                      frame_only=len(text_free),
+                      top_score=float(max(scores)) if len(scores) else 0.0,
+                      min_score=float(min(scores)) if len(scores) else 0.0)
     ordered = [w for (w, _text), _score in
               sorted(zip(scored, scores), key=lambda item: item[1], reverse=True)]
     return ordered + text_free

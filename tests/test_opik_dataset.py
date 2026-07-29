@@ -47,9 +47,13 @@ class _FakeClient:
     def __init__(self):
         self.datasets: dict[str, _FakeDataset] = {}
         self.experiments: list[_FakeExperiment] = []
+        self.scored: list[list[dict]] = []
 
     def get_or_create_dataset(self, name, description=None, project_name=None):
         return self.datasets.setdefault(name, _FakeDataset(name))
+
+    def log_traces_feedback_scores(self, scores):
+        self.scored.append(list(scores))
 
     def create_experiment(self, **kw):
         e = _FakeExperiment(**kw)
@@ -259,3 +263,69 @@ def test_push_fails_open_on_a_malformed_query_file(client, monkeypatch):
 
     monkeypatch.setattr(opik_dataset, "_dataset_items", _boom)
     assert opik_dataset.push_labeled_queries() is None
+
+
+# ── Per-query feedback scores (declared red, now built) ─────────────────────
+
+def _tid():
+    """A REAL uuid4 hex. `uuid4_to_uuid7` validates the version nibble, so
+    "a"*32 is rejected — an unrealistic fixture that hid the conversion path."""
+    import uuid
+    return uuid.uuid4().hex
+
+
+def test_log_query_scores_sends_one_feedback_score_per_metric(client):
+    """spec-guardian: experiments carried aggregates only, so "which queries
+    regressed" still meant reading raw numbers. Per-query scores attach to the
+    trace that produced the answer."""
+    opik_dataset.log_query_scores([
+        {"trace_id": _tid(), "relevancy": 5, "faithfulness": 1.0},
+        {"trace_id": _tid(), "relevancy": 3, "faithfulness": 0.5},
+    ])
+    assert client.scored, "no feedback scores were sent"
+    names = {s["name"] for batch in client.scored for s in batch}
+    assert names == {"relevancy", "faithfulness"}
+
+
+def test_log_query_scores_converts_our_trace_id_to_opik_form(client):
+    """Our ids are 32-hex; Opik wants UUIDv7. A score attached to an id Opik
+    does not recognise is silently lost."""
+    raw = _tid()
+    opik_dataset.log_query_scores([{"trace_id": raw, "relevancy": 4}])
+    sent_id = client.scored[0][0]["id"]
+    assert sent_id != raw and "-" in sent_id
+
+
+def test_log_query_scores_skips_entries_with_no_trace_id(client):
+    opik_dataset.log_query_scores([{"relevancy": 5}, {"trace_id": None, "relevancy": 4}])
+    assert not client.scored
+
+
+def test_log_query_scores_is_a_noop_when_disabled(monkeypatch):
+    from src import config
+
+    monkeypatch.setattr(config, "OPIK_API_KEY", "")
+    assert opik_dataset.log_query_scores([{"trace_id": _tid(), "relevancy": 5}]) is None
+
+
+def test_log_query_scores_fails_open(monkeypatch):
+    from src import config
+
+    class _Broken:
+        def log_traces_feedback_scores(self, *a, **k):
+            raise RuntimeError("opik down")
+
+    monkeypatch.setattr(config, "OPIK_API_KEY", "test-key")
+    monkeypatch.setattr(opik_dataset, "_client", lambda: _Broken())
+    opik_dataset.log_query_scores([{"trace_id": _tid(), "relevancy": 5}])
+
+
+def test_unconvertible_trace_id_is_reported_not_silently_dropped(client, monkeypatch):
+    """`uuid4_to_uuid7` only accepts version-4 UUIDs, so a non-v4 id yields no
+    Opik id and the score vanishes. Dropping it quietly would understate how
+    many queries were scored — warn instead."""
+    warned = []
+    monkeypatch.setattr(opik_dataset, "_warn_once", lambda e: warned.append(e))
+    opik_dataset.log_query_scores([{"trace_id": "a" * 32, "relevancy": 5}])
+    assert not client.scored
+    assert warned, "an unconvertible trace id was dropped without a warning"

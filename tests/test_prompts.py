@@ -165,3 +165,75 @@ def test_version_follows_a_live_prompt_rebind():
     finally:
         llm.SYSTEM = original
     assert prompts.get("answer").version == before
+
+
+# ── Corpus revision + Opik prompt-library push (declared red, now built) ─────
+
+def test_versions_includes_a_corpus_revision():
+    """spec-guardian: §3g specified "the chunker version AND the corpus
+    revision"; only the chunker was built. Two runs over different corpora are
+    otherwise indistinguishable in an experiment record."""
+    v = prompts.versions()
+    assert v.get("corpus_version"), "corpus revision missing from provenance"
+
+
+def test_corpus_version_is_deterministic_and_tracks_content(tmp_path, monkeypatch):
+    a = prompts.corpus_version()
+    assert a == prompts.corpus_version()
+    # A changed corpus file must produce a different revision.
+    monkeypatch.setattr(prompts, "_corpus_path", lambda: tmp_path / "c.json")
+    (tmp_path / "c.json").write_text('{"triplets": []}')
+    prompts.corpus_version.cache_clear()
+    b = prompts.corpus_version()
+    (tmp_path / "c.json").write_text('{"triplets": [1]}')
+    prompts.corpus_version.cache_clear()
+    assert b != prompts.corpus_version()
+    prompts.corpus_version.cache_clear()
+
+
+def test_corpus_version_survives_a_missing_file(tmp_path, monkeypatch):
+    """Provenance must never break the read path — the container ships
+    corpus.json, but a helper that raises here would take down /api/config."""
+    monkeypatch.setattr(prompts, "_corpus_path", lambda: tmp_path / "nope.json")
+    prompts.corpus_version.cache_clear()
+    assert prompts.corpus_version()
+    prompts.corpus_version.cache_clear()
+
+
+def test_push_to_opik_is_a_noop_without_a_key(monkeypatch):
+    from src import config
+
+    monkeypatch.setattr(config, "OPIK_API_KEY", "")
+    assert prompts.push_to_opik() == []
+
+
+def test_push_to_opik_sends_every_registered_prompt(monkeypatch):
+    from src import config
+
+    sent = []
+
+    class _FakePrompt:
+        def __init__(self, name, prompt, metadata=None, **kw):
+            sent.append((name, prompt, metadata))
+            self.commit = "abc123"
+
+    monkeypatch.setattr(config, "OPIK_API_KEY", "test-key")
+    monkeypatch.setattr(prompts, "_opik_prompt_cls", lambda: _FakePrompt)
+    names = prompts.push_to_opik()
+    assert set(names) >= {"answer", "query_enhance"}
+    pushed = {n for n, _t, _m in sent}
+    assert pushed >= {"answer", "query_enhance"}
+    # The content-hash version must travel with it, or the library entry cannot
+    # be tied back to a trace.
+    assert all(m and m.get("version") for _n, _t, m in sent)
+
+
+def test_push_to_opik_fails_open(monkeypatch):
+    from src import config
+
+    def _boom():
+        raise RuntimeError("opik unavailable")
+
+    monkeypatch.setattr(config, "OPIK_API_KEY", "test-key")
+    monkeypatch.setattr(prompts, "_opik_prompt_cls", _boom)
+    assert prompts.push_to_opik() == []      # must not raise

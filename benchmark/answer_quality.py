@@ -142,18 +142,19 @@ def _judge_call(prompt: str) -> str:
     return data["choices"][0]["message"]["content"]
 
 
-def _ask(question: str) -> tuple[str, list[dict]]:
+def _ask(question: str) -> tuple[str, list[dict], str | None]:
     import urllib.parse
 
     from benchmark.bench import _citations_from_sse, _sse_events
     st, body, _ = _req("GET", "/ask_stream?q=" + urllib.parse.quote(question))
     if st != 200:
-        return "", []
-    answer = ""
+        return "", [], None
+    answer, trace_id = "", None
     for name, data in _sse_events(body):
         if name == "answer":
             answer = data.get("answer", "")
-    return answer, _citations_from_sse(body)
+            trace_id = data.get("trace_id") or trace_id
+    return answer, _citations_from_sse(body), trace_id
 
 
 def measure_answer_quality() -> dict:
@@ -161,8 +162,9 @@ def measure_answer_quality() -> dict:
     if not labeled:
         return _aggregate([])
     judged: list[dict | None] = []
+    per_query: list[dict] = []
     for q in labeled:
-        answer, citations = _ask(q["query"])
+        answer, citations, trace_id = _ask(q["query"])
         if not answer or not citations:
             judged.append(None)
             continue
@@ -174,8 +176,19 @@ def measure_answer_quality() -> dict:
                  f"{type(exc).__name__}: {exc}")
             judged.append(None)
             continue
-        judged.append(_parse_judge_response(raw))
-    return _aggregate(judged)
+        parsed = _parse_judge_response(raw)
+        judged.append(parsed)
+        if parsed and trace_id:
+            checks = parsed.get("citations_checked") or []
+            supported = sum(1 for c in checks if c.get("supported"))
+            per_query.append({
+                "trace_id": trace_id,
+                "relevancy": parsed.get("relevancy"),
+                "faithfulness": (supported / len(checks)) if checks else None,
+            })
+    result = _aggregate(judged)
+    result["per_query"] = per_query
+    return result
 
 
 def main():
@@ -208,6 +221,9 @@ def main():
     if opik_dataset is None:
         sys.exit(0 if (ok_relevancy and ok_faithfulness) else 1)
     opik_dataset.push_labeled_queries()
+    # Per-query scores land on the traces that produced those answers, so a
+    # regression points at the spans that caused it (component 48).
+    opik_dataset.log_query_scores(result.get("per_query") or [])
     exp = opik_dataset.log_experiment("answer_quality", {
         "mean_relevancy": relevancy,
         "faithfulness_rate": faithfulness,

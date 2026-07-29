@@ -143,6 +143,66 @@ def chunker_version() -> str:
     return _hash("\n".join(parts))
 
 
+def _corpus_path() -> Path:
+    """Seam so a test can point this elsewhere."""
+    return Path(__file__).resolve().parents[1] / "benchmark" / "corpus.json"
+
+
+@lru_cache
+def corpus_version() -> str:
+    """Revision of the seeded corpus definition.
+
+    §3g specified this alongside the chunker version and it was not built:
+    without it, two eval runs over different corpora are indistinguishable in
+    an experiment record, which defeats the point of comparing them. Hashed
+    from `benchmark/corpus.json` (which the Docker image does ship). A missing
+    or unreadable file degrades to a marker — provenance must never break the
+    read path it is attached to.
+    """
+    try:
+        return _hash(_corpus_path().read_text())
+    except Exception:
+        return "unavailable"
+
+
+def _opik_prompt_cls():
+    """Seam for the Opik Prompt class; imported lazily so `opik` stays optional."""
+    from opik import Prompt as OpikPrompt
+
+    return OpikPrompt
+
+
+def push_to_opik() -> list[str]:
+    """Publish every registered prompt to Opik's prompt library.
+
+    §3g specified this and it was not built — versions were computed and
+    stamped on spans, but nothing reached the library, so a trace's
+    `prompt_version` pointed at text stored nowhere. Opik versions prompts by
+    content itself, so re-pushing unchanged text is a no-op on their side and
+    our content hash and theirs agree by construction.
+
+    Returns the names pushed. No-op without `OPIK_API_KEY`; fails OPEN, because
+    a telemetry publish must never break startup or a benchmark.
+    """
+    if not config.OPIK_API_KEY:
+        return []
+    pushed: list[str] = []
+    try:
+        cls = _opik_prompt_cls()
+    except Exception:
+        return []
+    for name, prompt in _registry().items():
+        try:
+            cls(name=name, prompt=prompt.text,
+                metadata={"version": prompt.version,
+                          "embed_version": config.EMBED_VERSION,
+                          "chunker_version": chunker_version()})
+            pushed.append(name)
+        except Exception:
+            continue      # one bad prompt must not stop the rest
+    return pushed
+
+
 def versions() -> dict:
     """Full provenance bundle: which prompts and which data produced a result.
 
@@ -161,4 +221,5 @@ def versions() -> dict:
         "embed_version": config.EMBED_VERSION,
         "text_embed_version": config.TEXT_EMBED_VERSION,
         "chunker_version": chunker_version(),
+        "corpus_version": corpus_version(),
     }

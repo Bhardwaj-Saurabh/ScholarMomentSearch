@@ -4272,3 +4272,76 @@ rebind), 0 regressions.
 `src/rag/search.py`, `src/worker.py`, `src/app.py`, `benchmark/opik_dataset.py`,
 `tests/test_ranking_determinism.py`, `tests/test_tracing.py`,
 `tests/test_prompts.py`, `tests/test_opik_dataset.py`, `EVIDENCE.md`.
+
+---
+
+### 2026-07-29 — Closing the four §3g gaps declared red by spec-guardian
+
+All four items the reviews found specified-but-unbuilt are now built and
+live-verified. Each was written test-first.
+
+**1. Per-embed / rerank / LLM spans (completing component 45).** §3g listed
+`rerank.py`, `query_enhance.py` and `llm.py`; none contained a `tracing`
+reference.
+- New `tracing.annotate(**attrs)` attaches attributes to the innermost ACTIVE
+  span, so code deep in the stack can contribute without threading a handle
+  through every signature.
+- `embed_text` / `embed_query` / `embed_sparse` now each emit a span tagged
+  **`cache="hit"|"miss"`** — the attribute that earns its keep, since component
+  20's Redis cache otherwise makes "why was this request slow" unanswerable.
+- `rerank_model` is its own span (scored, frame_only, top/min score), timed
+  separately from surrounding fusion so the cold model-load spike stays visible.
+- Tokens and cost are annotated in **`metrics.record_llm_usage`** rather than
+  per provider: all four provider paths already funnel through it, so one hook
+  covers OpenAI and Anthropic and `src/llm.py` never learns tracing exists.
+
+**2. Corpus revision (completing component 47).** `versions()` now carries
+`corpus_version`, hashed from `benchmark/corpus.json`. Without it two eval runs
+over different corpora were indistinguishable in an experiment record.
+
+**3. `opik.Prompt` prompt-library push (completing component 47).**
+`prompts.push_to_opik()` publishes every registered prompt with its content
+hash in metadata, called from the app lifespan. Previously a trace's
+`prompt_version` pointed at text stored nowhere.
+
+**4. `log_traces_feedback_scores` per-query scores (completing component 48).**
+`/ask` now returns `trace_id` and `/ask_stream` emits it on the `answer` event,
+so `answer_quality.py` can attach each query's relevancy and faithfulness to
+the trace that produced that answer. Experiments previously carried aggregates
+only, so "which queries regressed" still meant diffing raw numbers.
+
+**Three defects found while building these, all by tests or live probing:**
+- The embedding-span test failed on a cache HIT because the fixture rebuilt
+  `_FakeRedis()` on every `_client()` call — the same fixture bug that bit
+  `test_tier2_cache.py`. Fixed to one instance per test.
+- The LLM test stubbed `llm._openai_client`, which **does not exist** (the
+  client is constructed inline). Rather than invent a seam, the annotation
+  moved to `metrics.record_llm_usage`, which is the real one — fewer mocks and
+  it covers every provider.
+- `uuid4_to_uuid7` **rejects non-version-4 UUIDs**, so my `"a"*32` fixture was
+  unrealistic and hid the conversion path. Real ids are uuid4 so production was
+  fine, but it exposed a silent-loss path: an unconvertible id dropped its score
+  with no trace. `log_query_scores` now counts and warns about those.
+
+**GREEN**:
+- Full suite: `uv run pytest tests/ -q` → **514 passed** (was 493; +21), 0
+  regressions.
+- **Live**: startup logged `[startup] pushed prompts to Opik: answer,
+  query_enhance`; Opik's prompt library lists **answer** (commit 2) and
+  **query_enhance** (commit 1). `/api/config` returns
+  `chunker_version 3165a99097c9`, `corpus_version 6cce42edaa88`.
+- **Live per-query score, end to end**: a real `/ask_stream` returned
+  `trace_id 96ed08b856974608b96f5867b24e0b4b` on its answer event; that mapped
+  to Opik trace `016f5e66-e800-7608-b96f-5867b24e0b4b`, and after
+  `log_query_scores` that trace (`ask`, **span_count 15**) carries
+  **`faithfulness: 0.92`** and **`relevancy: 5.0`**.
+
+Span count rose from 9 to 15 per ask, which is the embed/rerank spans landing.
+
+**§3g is now complete with nothing left declared red.**
+
+**Commit**: pending — `src/tracing.py`, `src/metrics.py`, `src/prompts.py`,
+`src/rag/embeddings.py`, `src/rag/rerank.py`, `src/rag/search.py`,
+`src/api/search.py`, `src/app.py`, `benchmark/opik_dataset.py`,
+`benchmark/answer_quality.py`, `tests/test_span_coverage.py`,
+`tests/test_prompts.py`, `tests/test_opik_dataset.py`.

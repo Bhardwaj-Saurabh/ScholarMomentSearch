@@ -160,6 +160,58 @@ def log_experiment(name: str, metrics: dict, *, run_id: str | None = None) -> st
         return None
 
 
+# Metrics that are per-QUERY rather than per-run. Anything else in a score dict
+# (trace_id, bookkeeping) is ignored rather than sent as a bogus score.
+_SCORE_FIELDS = ("relevancy", "faithfulness", "precision")
+
+
+def log_query_scores(rows: list[dict]) -> None:
+    """Attach per-query scores to the traces that produced those answers.
+
+    §3g specified this and it was not built: experiments carried only
+    aggregates, so "did that prompt edit help, and WHICH queries regressed?"
+    still meant diffing raw numbers by hand. A feedback score lands on the
+    trace itself, so a regression is one click from the spans that caused it.
+
+    Each row needs the `trace_id` the server reported for that answer. Rows
+    without one are skipped — a score attached to nothing is worse than no
+    score, because it inflates the count. Fails OPEN.
+    """
+    if not enabled():
+        return None
+    try:
+        from src.tracing_opik import _opik_trace_id
+
+        scores: list[dict] = []
+        unconvertible = 0
+        for row in rows:
+            tid = row.get("trace_id")
+            if not tid:
+                continue          # nothing to attach to
+            opik_id = _opik_trace_id(str(tid))
+            if not opik_id:
+                # `uuid4_to_uuid7` only accepts version-4 UUIDs. Ours are, but
+                # a trace id from anywhere else would silently lose its score
+                # and understate how many queries were scored.
+                unconvertible += 1
+                continue
+            for field in _SCORE_FIELDS:
+                if row.get(field) is None:
+                    continue
+                scores.append({"id": opik_id, "name": field,
+                               "value": float(row[field])})
+        if unconvertible:
+            _warn_once(ValueError(
+                f"{unconvertible} trace id(s) could not be converted to Opik "
+                "form — those per-query scores were not recorded"))
+        if not scores:
+            return None
+        _client().log_traces_feedback_scores(scores)
+    except Exception as exc:
+        _warn_once(exc)
+    return None
+
+
 def _run_suffix() -> str:
     """Wall-clock stamp, used ONLY for the experiment name — never inside a
     dataset item, which must stay content-stable (see _dataset_items)."""

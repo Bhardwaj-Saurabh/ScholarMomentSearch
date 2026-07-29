@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from . import config, db, metrics, security, tracing
+from . import config, db, metrics, prompts, security, tracing
 from .api.admin import router as admin_router
 from .api.metrics import router as metrics_router
 from .api.search import router as search_router
@@ -54,6 +54,11 @@ async def lifespan(app: FastAPI):
     # just means no tracing.
     try:
         tracing.warm()
+        # Publish the prompt library so a trace's `prompt_version` points at
+        # text Opik actually stores (component 47). No-op without OPIK_API_KEY.
+        pushed = prompts.push_to_opik()
+        if pushed:
+            print(f"[startup] pushed prompts to Opik: {', '.join(pushed)}")
     except Exception as exc:
         print(f"[startup] tracing backends unavailable ({exc!r}) — continuing untraced")
     yield

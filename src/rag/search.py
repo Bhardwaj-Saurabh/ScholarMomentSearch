@@ -491,6 +491,11 @@ def ask(question: str, user_id: str, *, top_k: int | None = None,
         sp.set_attrs(citations=len(result.get("citations") or []),
                      abstained=bool(result.get("abstained", False)),
                      llm_used=bool(result.get("llm_used", False)))
+        # Surfaced so an evaluator can attach per-query scores to THIS trace
+        # (component 48). Without it a score has nothing to land on.
+        tid = tracing.current_trace_id()
+        if tid:
+            result["trace_id"] = tid
     metrics.record_ask(result)
     return result
 
