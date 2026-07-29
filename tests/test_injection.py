@@ -86,6 +86,33 @@ def test_newlines_are_flattened():
     assert "\r" not in out
 
 
+def test_table_row_structure_survives_flattening():
+    """Component 14 renders paper tables as ' | '-joined cells and newline-
+    joined ROWS so the structure is embeddable. Replacing newlines with plain
+    spaces silently undid that at the prompt boundary (found by
+    spec-guardian): 'Method Acc / BERT 88.4 / T5 91.2' became one
+    undifferentiated line, so the model could no longer tell which number
+    belonged to which row. Rows must stay distinguishable on one physical
+    line."""
+    table = "Method | Acc\nBERT | 88.4\nT5 | 91.2"
+    out = injection.sanitize_evidence(table)
+    assert "\n" not in out                      # T1 invariant still holds
+    assert out.count(injection._ROW_SEP.strip()) == 2
+    # The pairing a reader/model needs must still be recoverable.
+    rows = [r.strip() for r in out.split(injection._ROW_SEP.strip())]
+    assert rows[1].startswith("BERT") and "88.4" in rows[1]
+    assert rows[2].startswith("T5") and "91.2" in rows[2]
+
+
+def test_c1_bytes_are_escaped_not_deleted():
+    """cp1252 mojibake from PDF extraction lands in U+0080-U+009F. Deleting it
+    loses real characters invisibly — the same class as the <s> bug."""
+    out = injection.sanitize_evidence("price was 12\x9145 dollars")
+    assert "\x91" not in out
+    assert "12" in out and "45" in out
+    assert "\\x91" in out
+
+
 def test_forged_label_grammar_is_neutralized():
     """Belt and braces behind the flattening: even inline, the text must not
     still read as `[n] @ ts from "X" — excerpt:`."""

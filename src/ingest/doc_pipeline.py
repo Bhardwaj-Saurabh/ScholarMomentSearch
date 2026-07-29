@@ -189,17 +189,30 @@ def t_embed_index(doc_id: str, user_id: str, kind: str, chunks: list[dict]) -> i
     # graph boost. Deliberately AFTER the status flip to 'indexed' — the
     # crash-safety invariant above is what the whole pipeline is built around,
     # and a graph write is not allowed to sit between the upsert and the flip.
-    # `record_mentions` swallows its own errors, so this cannot fail an ingest;
-    # a missed write just means no boost for this source until it is re-indexed.
-    row = db.get_document(doc_id) or {}
-    entities: list[str] = []
-    seen: set[str] = set()
-    for c in chunks:
-        for e in graph.extract_entities(c.get("text"), title=row.get("title")):
-            if e not in seen:
-                seen.add(e)
-                entities.append(e)
-    graph.record_mentions(user_id, doc_id, kind, entities)
+    #
+    # The WHOLE block is guarded, not just the graph write. `record_mentions`
+    # swallows its own errors, but `db.get_document` does not — and this task
+    # carries `retries=2`, so an exception raised here (i.e. AFTER the status is
+    # already 'indexed') would make the retry redo the embed + upsert. That is
+    # exactly the "retries must not redo finished stages" invariant in
+    # CLAUDE.md §5. Found by spec-guardian; the earlier comment here asserted
+    # this block could not fail an ingest, which was simply wrong.
+    try:
+        row = db.get_document(doc_id) or {}
+        entities: list[str] = []
+        seen: set[str] = set()
+        for c in chunks:
+            for e in graph.extract_entities(c.get("text"), title=row.get("title")):
+                if e not in seen:
+                    seen.add(e)
+                    entities.append(e)
+                if len(entities) >= graph.MAX_ENTITIES_PER_SOURCE:
+                    break
+            if len(entities) >= graph.MAX_ENTITIES_PER_SOURCE:
+                break
+        graph.record_mentions(user_id, doc_id, kind, entities)
+    except Exception as exc:  # noqa: BLE001 -- see the invariant note above
+        print(f"[ingest] {doc_id} graph indexing skipped: {type(exc).__name__}: {exc}")
     return len(chunks)
 
 

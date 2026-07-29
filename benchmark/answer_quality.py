@@ -104,7 +104,11 @@ def _build_judge_prompt(question: str, answer: str, citations: list[dict]) -> st
     return (
         JUDGE_SYSTEM
         + f"QUESTION:\n{injection.fence_question(question)}\n\n"
-        + f"ANSWER: {answer}\n\n"
+        # The ANSWER is derived from untrusted chunks, so it is the last raw
+        # interpolation into the prompt this hardening exists for: an answer
+        # that echoed a `SOURCES:` block could still steer the judge (found by
+        # spec-guardian). Sanitized to one line and fenced like the rest.
+        + f"ANSWER:\n{injection.fence_evidence(injection.sanitize_evidence(answer))}\n\n"
         + f"{injection.EVIDENCE_OPEN}\nSOURCES:\n{sources}\n{injection.EVIDENCE_CLOSE}"
     )
 

@@ -191,6 +191,72 @@ def test_deleting_a_document_purges_its_graph_rows(cleanup):
     assert graph.matched_sources("graphtest_e", ["clip"]) == set()
 
 
+# ── Phrase-extraction defects found by spec-guardian ─────────────────────────
+
+def test_leading_function_words_are_trimmed_from_phrases():
+    """`_PHRASE` starts on any capital, so a sentence-initial "Our" produced
+    the entity `our sparse attention`, which can never match a query saying
+    "sparse attention". Rejecting only ALL-stopword phrases missed this."""
+    ents = graph.extract_entities(
+        "Our Sparse Attention variant beats BERT on every task.")
+    assert "sparse attention" in ents
+    assert not any(e.startswith("our ") for e in ents)
+
+
+@pytest.mark.parametrize("junk_prefix", ["however ", "interestingly ", "this ",
+                                         "why this matters for"])
+def test_discourse_markers_do_not_become_entity_prefixes(junk_prefix):
+    text = ("However Google reported gains. Interestingly Meta did too. "
+            "Why This Matters For Enterprise Search is unclear.")
+    ents = graph.extract_entities(text)
+    assert not any(e.startswith(junk_prefix) for e in ents), ents
+
+
+def test_lowercase_joined_phrases_are_extracted():
+    """"Chain of Thought" was NOT matched by `_PHRASE` (the lowercase "of"
+    breaks the capitalized run) even though the code comment claimed it as the
+    example — and chain-of-thought is one of the labeled query topics."""
+    ents = graph.extract_entities("We study Chain of Thought prompting.")
+    assert any("chain" in e and "thought" in e for e in ents), ents
+
+
+def test_hyphenated_lowercase_terms_are_extracted():
+    ents = graph.extract_entities("We measure zero-shot and chain-of-thought accuracy.")
+    assert "zero-shot" in ents
+    assert "chain-of-thought" in ents
+
+
+# ── Query-side extraction: the reason the boost would never have fired ────────
+
+def test_lowercase_question_yields_nothing_from_the_document_extractor():
+    """Documents the gap that motivates extract_query_entities: real questions
+    are lowercase, and the capitalization-driven extractor is blind to them."""
+    assert graph.extract_entities("what does the clip paper say about transfer?") == []
+
+
+def test_query_entities_resolve_against_the_tenant_vocabulary(monkeypatch):
+    """A lowercase question must still find `clip` — via the entity vocabulary
+    the tenant actually has, so it can never invent one."""
+    monkeypatch.setattr(graph.db, "graph_match_entities",
+                        lambda u, cands: {"clip"} & set(cands))
+    ents = graph.extract_query_entities("u1", "what does the clip paper say?")
+    assert "clip" in ents
+
+
+def test_query_entities_cannot_invent_an_entity(monkeypatch):
+    monkeypatch.setattr(graph.db, "graph_match_entities", lambda u, cands: set())
+    assert graph.extract_query_entities("u1", "what about flibbertigibbet routing?") == []
+
+
+def test_query_entities_fail_open_on_db_error(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(graph.db, "graph_match_entities", boom)
+    # Falls back to whatever the capitalization pass found — here, the acronym.
+    assert graph.extract_query_entities("u1", "How does CLIP work?") == ["clip"]
+
+
 # ── Discriminating power: the generic-entity problem, found by measurement ────
 
 @pytest.mark.parametrize("generic", ["ai", "api", "gpu", "os", "url", "nlp",
@@ -241,26 +307,45 @@ def test_matched_sources_returns_empty_when_all_entities_are_generic(monkeypatch
 
 # ── The invariant that protects every already-recorded number ─────────────────
 
-def test_read_path_does_not_touch_the_graph_when_disabled(monkeypatch):
-    """With the flag off, `search.py` must not call into graph.py at all — not
-    "calls it and it returns nothing", but never calls it. That is what makes
-    every precision@10 / recall@10 figure in EVIDENCE.md still valid."""
+@pytest.mark.parametrize("flag,expect_called", [(False, False), (True, True)])
+def test_graph_is_consulted_only_when_the_flag_is_on(monkeypatch, flag, expect_called):
+    """The invariant that keeps every recorded precision@10 / recall@10 figure
+    valid: with the flag off the read path must not call into graph.py.
+
+    Driven through a REAL `_retrieve_impl` call with the graph functions spied,
+    not a source grep — the previous version asserted `called == []` without
+    ever invoking the function under test, so it passed for free
+    (spec-guardian). The `True` case is what proves the `False` case means
+    something.
+    """
+    import numpy as np
+
     from src import config
     from src.rag import search as rag_search
 
-    monkeypatch.setattr(config, "GRAPH_RETRIEVAL_ENABLED", False)
+    monkeypatch.setattr(config, "GRAPH_RETRIEVAL_ENABLED", flag)
+    monkeypatch.setattr(config, "RERANK_ENABLED", False)
+    monkeypatch.setattr(config, "QUERY_ENHANCEMENT_ENABLED", False)
 
-    called = []
-    monkeypatch.setattr(rag_search.graph, "extract_entities",
-                        lambda *a, **k: called.append("extract") or [])
+    # Keep retrieval entirely in-memory: one document hit is enough to produce
+    # a window for the boost to act on.
+    hit = {"source_id": "src_x", "page": 1, "score": 0.9, "text": "body",
+           "kind": "paper"}
+    monkeypatch.setattr(rag_search, "embed_text", lambda q: np.zeros(4, dtype=np.float32))
+    monkeypatch.setattr(rag_search, "embed_query", lambda q: np.zeros(4, dtype=np.float32))
+    monkeypatch.setattr(rag_search.vector_store, "search", lambda *a, **k: [])
+    monkeypatch.setattr(rag_search.vector_store, "search_text", lambda *a, **k: [hit])
+    monkeypatch.setattr(rag_search.db, "documents_by_ids", lambda ids: {})
+    monkeypatch.setattr(rag_search.db, "videos_by_ids", lambda ids: {}, raising=False)
+
+    called: list[str] = []
+    monkeypatch.setattr(rag_search.graph, "extract_query_entities",
+                        lambda *a, **k: (called.append("extract"), ["clip"])[1])
     monkeypatch.setattr(rag_search.graph, "matched_sources",
-                        lambda *a, **k: called.append("matched") or set())
+                        lambda *a, **k: (called.append("matched"), {"src_x"})[1])
     monkeypatch.setattr(rag_search.graph, "boost_windows",
-                        lambda w, *a, **k: called.append("boost") or w)
+                        lambda w, *a, **k: (called.append("boost"), w)[1])
 
-    assert rag_search.graph.enabled() is False
-    # Guard the wiring itself: the read path's call must be behind enabled().
-    import inspect
-    src = inspect.getsource(rag_search._retrieve_impl)
-    assert "graph.enabled()" in src
-    assert called == []
+    rag_search._retrieve_impl("what about clip?", "u_test", top_k=5)
+
+    assert bool(called) is expect_called, called

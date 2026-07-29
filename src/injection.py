@@ -56,8 +56,22 @@ _TRUNCATED = "…[truncated]"
 # PDF extractors emit and which several tokenizers treat as newlines.
 _LINEBREAKS = re.compile(r"[\r\n  \v\f]+")
 
-# C0/C1 control characters (keep tab, which is only whitespace).
-_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+# What a newline becomes. NOT a plain space: component 14 renders paper tables
+# as " | "-joined cells and "\n"-joined ROWS (src/ingest/paper.py) so the
+# structure survives as embeddable text. Flattening those to spaces silently
+# undid that work at the prompt boundary — verified:
+#   'Method  Acc\nBERT  88.4\nT5  91.2' -> 'Method Acc BERT 88.4 T5 91.2'
+# with the row boundaries gone. A visible pilcrow keeps rows distinguishable to
+# the model while still being a single physical line, so T1 stays dead.
+_ROW_SEP = " ¶ "
+
+# C0 control characters (keep tab, which is only whitespace). C1 (U+0080-U+009F)
+# is deliberately NOT deleted: cp1252 mojibake from PDF extraction (mis-decoded
+# smart quotes and dashes) lands in that range, and deleting it silently loses
+# real characters — the same "information destroyed, sentence still grammatical"
+# failure the <s>/</s> bug had. Those are escaped by _escape_c1 instead.
+_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f]")
+_C1 = re.compile(r"[\x7f-\x9f]")
 
 # Chat-template / control tokens. `<\|…\|>` covers the whole ChatML family in
 # one rule; the rest are literal tokens from Llama/Mistral-style templates.
@@ -140,8 +154,9 @@ def sanitize_evidence(text, limit: int = EVIDENCE_LIMIT) -> str:
     if not text:
         return ""
     out = str(text)
-    out = _LINEBREAKS.sub(" ", out)
+    out = _LINEBREAKS.sub(_ROW_SEP, out)
     out = _CONTROLS.sub("", out)
+    out = _C1.sub(lambda m: f"\\x{ord(m.group(0)):02x}", out)
     # ESCAPE control tokens rather than delete them. Deleting was the first
     # cut and it silently destroyed information: an NLP paper explaining that
     # "<s> marks sequence start and </s> the end" came out as "marks sequence

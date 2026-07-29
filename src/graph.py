@@ -48,8 +48,18 @@ MAX_BOOST = 0.05
 
 # Acronyms and model names: CLIP, GPT-3, BERT, T5, LoRA, ViT-B.
 _ACRONYM = re.compile(r"\b[A-Z][A-Za-z]*[A-Z0-9][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*\b")
-# Capitalized multi-word phrases: "Chain of Thought", "Sparse Attention".
+# Capitalized multi-word phrases: "Sparse Attention", "Ashish Vaswani".
+# NOTE (corrected after spec-guardian): this does NOT match "Chain of Thought"
+# — the lowercase "of" breaks the run of capitalized words. Lowercase joiners
+# are handled by _PHRASE_JOINED below, which was added for exactly that case
+# since chain-of-thought is one of the labeled query topics.
 _PHRASE = re.compile(r"\b[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,}){1,3}\b")
+# "Chain of Thought", "Attention is All You Need" — capitalized words joined by
+# short lowercase function words.
+_PHRASE_JOINED = re.compile(
+    r"\b[A-Z][a-z]{2,}(?:\s+(?:of|is|in|for|and|the|to|with|on)\s+[A-Z][a-z]{2,}){1,3}\b")
+# Hyphenated lowercase technical terms: chain-of-thought, zero-shot, few-shot.
+_HYPHENATED = re.compile(r"\b[a-z]{3,}(?:-[a-z]{2,}){1,3}\b")
 
 # Every sentence starts with a capital letter, so without this the graph fills
 # with "The", "We", "However" and the boost becomes pure noise. Also drops the
@@ -68,6 +78,19 @@ _STOPWORDS = {
     "finally", "also", "both", "each", "all", "one", "two", "three", "if",
     "when", "while", "where", "which", "who", "what", "how", "why", "can",
     "may", "will", "would", "should", "could", "not", "no", "yes", "so",
+    # Discourse adverbs. Every one of these can open a sentence, so _PHRASE
+    # captures it as the head of a phrase ("Interestingly Meta did too" ->
+    # `interestingly meta`), which then never matches a query saying "meta".
+    "interestingly", "notably", "importantly", "surprisingly", "additionally",
+    "consequently", "specifically", "similarly", "conversely", "crucially",
+    "remarkably", "furthermore", "nevertheless", "nonetheless", "meanwhile",
+    "overall", "instead", "indeed", "again", "recently", "previously",
+    "subsequently", "ultimately", "typically", "generally", "essentially",
+    "effectively", "formally", "empirically", "theoretically", "briefly",
+    # Generic nouns that survive phrase-trimming as meaningless singletons
+    # ("Why This Matters For Enterprise Search" -> `matters`).
+    "matters", "overview", "summary", "background", "motivation", "outline",
+    "contributions", "limitations", "acknowledgements", "discussion",
 }
 
 # Generic technical vocabulary that is NOT a discriminating entity in a corpus
@@ -89,6 +112,17 @@ _MAX_TEXT = 20_000        # bound the regex pass; chunks are far smaller
 _MAX_ENTITIES = 40        # per chunk — a runaway page must not flood the graph
 _MIN_LEN = 2
 
+# Aggregate bound across a whole source. _MAX_ENTITIES alone is per-CHUNK, and
+# `doc_pipeline` unions over every chunk — so a 189-chunk paper could otherwise
+# register thousands of entities, which then makes the source-level
+# co-occurrence self-join in graph_neighbours expand to almost everything
+# (spec-guardian).
+MAX_ENTITIES_PER_SOURCE = 300
+
+# Query-side candidate generation is bounded too — a long question must not turn
+# into a huge IN-list.
+_MAX_QUERY_CANDIDATES = 60
+
 # Inverse-document-frequency guard, the principled half of the same problem: an
 # entity mentioned by most of the corpus cannot tell one source from another,
 # which is the ONLY thing this boost is for. Applied at query time so it adapts
@@ -106,6 +140,22 @@ def _normalize(raw: str) -> str:
     return raw.strip().strip(".,;:()[]\"'").lower()
 
 
+def _trim_stopwords(name: str) -> str:
+    """Drop leading/trailing function words from a phrase.
+
+    `_PHRASE` happily starts on a sentence-initial capital, so "Our Sparse
+    Attention variant" yielded the entity `our sparse attention` — which can
+    never match a query saying "sparse attention". Rejecting only ALL-stopword
+    phrases (the previous rule) missed this entirely (spec-guardian).
+    """
+    words = name.split()
+    while words and words[0] in _STOPWORDS:
+        words.pop(0)
+    while words and words[-1] in _STOPWORDS:
+        words.pop()
+    return " ".join(words)
+
+
 def _short_title(title: str) -> str:
     """'CLIP (Radford et al. 2021)' -> 'CLIP'. Mirrors search.py::_short_name
     so a title-derived entity matches what the attribution backstop already
@@ -121,7 +171,7 @@ def extract_entities(text, title: str | None = None) -> list[str]:
     seen: set[str] = set()
 
     def add(candidate: str) -> None:
-        name = _normalize(candidate)
+        name = _trim_stopwords(_normalize(candidate))
         if (len(name) < _MIN_LEN or name in seen or name in _STOPWORDS
                 or name in _GENERIC or not any(c.isalpha() for c in name)):
             return
@@ -142,12 +192,51 @@ def extract_entities(text, title: str | None = None) -> list[str]:
     except Exception:
         return found[:_MAX_ENTITIES]
 
-    for pattern in (_ACRONYM, _PHRASE):
+    for pattern in (_ACRONYM, _PHRASE_JOINED, _PHRASE, _HYPHENATED):
         for m in pattern.finditer(body):
             add(m.group(0))
             if len(found) >= _MAX_ENTITIES:
                 return found[:_MAX_ENTITIES]
     return found[:_MAX_ENTITIES]
+
+
+def extract_query_entities(user_id: str, question: str) -> list[str]:
+    """Entities in a QUESTION, which needs different handling from a document.
+
+    Questions are typically lowercase ("what does the clip paper say about
+    zero-shot transfer?"), and `extract_entities` is capitalization-driven, so
+    it returned **nothing** for most real queries — measured by spec-guardian
+    against `benchmark/labeled_queries.json`, where only acronym questions
+    produced a hit. A boost that never fires is not a feature, and worse, it
+    would have made the pending on/off eval read as "the graph doesn't help"
+    when the truth was "the extractor never ran".
+
+    So: take the capitalization-driven hits AND match the question's own n-grams
+    against the entity vocabulary this tenant actually has. The vocabulary
+    lookup is what makes lowercase questions work, and it can only ever return
+    entities that are already in the graph, so it cannot invent one.
+    """
+    found = list(extract_entities(question))
+    seen = set(found)
+
+    words = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9\-]*", (question or "").lower())
+             if w not in _STOPWORDS and w not in _GENERIC and len(w) >= _MIN_LEN]
+    candidates: list[str] = []
+    for n in (1, 2, 3):
+        for i in range(len(words) - n + 1):
+            gram = " ".join(words[i:i + n])
+            if gram not in seen:
+                seen.add(gram)
+                candidates.append(gram)
+            if len(candidates) >= _MAX_QUERY_CANDIDATES:
+                break
+    if not candidates:
+        return found
+    try:
+        known = db.graph_match_entities(user_id, candidates)
+    except Exception:
+        return found
+    return found + [c for c in candidates if c in known]
 
 
 def record_mentions(user_id: str, source_id: str, source_kind: str,

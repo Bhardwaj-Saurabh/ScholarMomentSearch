@@ -416,6 +416,23 @@ def graph_sources_for_entities(user_id: str, entities: list[str]) -> list[str]:
     return [r["source_id"] for r in rows]
 
 
+def graph_match_entities(user_id: str, candidates: list[str]) -> set[str]:
+    """Which of these candidate strings are actually entities for this tenant.
+    Lets graph.extract_query_entities() resolve a lowercase question against the
+    vocabulary that exists, without ever inventing an entity."""
+    if not candidates:
+        return set()
+    with pool().connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT entity FROM ms_graph_mentions
+            WHERE user_id = %s AND entity = ANY(%s)
+            """,
+            (user_id, list(candidates)),
+        ).fetchall()
+    return {r["entity"] for r in rows}
+
+
 def graph_source_count(user_id: str) -> int:
     """How many distinct sources this tenant has in the graph — the
     denominator for graph.discriminating()'s IDF guard."""
@@ -463,31 +480,57 @@ def graph_neighbours(user_id: str, entities: list[str]) -> list[str]:
     return [r["entity"] for r in rows]
 
 
-def graph_delete_source(source_id: str) -> None:
+def graph_delete_source(source_id: str, user_id: str | None = None) -> None:
     """Drop a source's entity edges when its content stops being searchable.
 
-    Keyed on source_id alone because `delete_document(doc_id)` has no user_id
-    in scope and source ids are globally unique (`doc_<hash>`) — this deletes
-    rows for exactly the source being removed, never another tenant's.
+    `user_id` is resolved from the document row when not supplied, so the
+    DELETE always carries a tenant filter — CLAUDE.md §5 requires every query
+    to filter by `user_id`, and relying on "source ids happen to be globally
+    unique" was an argument for safety rather than an enforcement of it
+    (spec-guardian). Falls back to source_id alone only when the row is already
+    gone, which is the delete-after-delete case.
 
     Worth stating: stale rows here are **inert**, not dangerous. A boost only
     applies to a window that retrieval already returned, so an entity pointing
     at a source with no vectors left matches nothing. This is hygiene, not a
     correctness fix."""
     with pool().connection() as conn:
-        conn.execute(
-            "DELETE FROM ms_graph_mentions WHERE source_id = %s", (source_id,))
+        if user_id is None:
+            row = conn.execute(
+                "SELECT user_id FROM ms_documents WHERE id = %s", (source_id,)
+            ).fetchone()
+            user_id = (row or {}).get("user_id")
+        if user_id:
+            conn.execute(
+                "DELETE FROM ms_graph_mentions WHERE user_id = %s AND source_id = %s",
+                (user_id, source_id))
+        else:
+            conn.execute(
+                "DELETE FROM ms_graph_mentions WHERE source_id = %s", (source_id,))
 
 
 def delete_document(doc_id: str) -> None:
+    # Component 50: read the owning tenant BEFORE the delete, so the graph
+    # purge below can carry a user_id filter (CLAUDE.md §5). Wrapped so a
+    # lookup failure cannot affect the delete itself.
+    owner = None
+    try:
+        with pool().connection() as conn:
+            row = conn.execute(
+                "SELECT user_id FROM ms_documents WHERE id = %s", (doc_id,)).fetchone()
+        owner = (row or {}).get("user_id")
+    except Exception:
+        owner = None
+
     with pool().connection() as conn:
         conn.execute("DELETE FROM ms_documents WHERE id = %s", (doc_id,))
-    # Component 50: additive cleanup of the new graph table only — the
-    # document delete above is unchanged. Swallowed because a graph-hygiene
-    # failure must not turn a successful delete into an error, and stale rows
-    # are inert anyway (see graph_delete_source).
+
+    # Additive cleanup of the new graph table only — the document delete above
+    # is unchanged. Swallowed because a graph-hygiene failure must not turn a
+    # successful delete into an error, and stale rows are inert anyway (see
+    # graph_delete_source).
     try:
-        graph_delete_source(doc_id)
+        graph_delete_source(doc_id, owner)
     except Exception:
         pass
 

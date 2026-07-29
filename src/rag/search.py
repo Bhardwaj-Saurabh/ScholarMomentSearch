@@ -258,7 +258,7 @@ def _retrieve_impl(question: str, user_id: str, *, top_k: int | None = None,
     # never filter, so a correct answer can't be dropped (AGENTS.md #5).
     if graph.enabled() and windows:
         with tracing.span("graph_boost") as _sg:
-            q_entities = graph.extract_entities(question)
+            q_entities = graph.extract_query_entities(user_id, question)
             matched = graph.matched_sources(user_id, q_entities, hops=1)
             before_top = _hit_key(windows[0]["text"]) if windows[0].get("text") else None
             windows = graph.boost_windows(windows, matched)

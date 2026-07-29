@@ -4663,3 +4663,121 @@ PASS AND EVIDENCE.md is updated. Outstanding here:
 **Commit**: pending — `src/graph.py`, `src/db.py`, `src/config.py`,
 `src/rag/search.py`, `src/ingest/doc_pipeline.py`, `tests/test_graph.py`,
 `DESIGN.md`, `CLAUDE.md`.
+
+---
+
+### 2026-07-29 — spec-guardian review of components 49 + 50, and the fixes
+
+Verdict returned: **49 PASS-with-warnings, 50 FAIL (3 items)**. Clean by
+inspection: no protected file touched (15 files in
+`git diff --name-only e220f28~1..HEAD`, none of the PROVIDED list), no frozen
+file touched (`benchmark/sla.json`, `eval/rubric.json`,
+`benchmark/quality_gates.json` all absent from the diff), `/api/*` shapes
+additive only.
+
+**Corrections to earlier entries in this file, required by the review:**
+
+1. **The component-49 re-measure was ALSO run against the video-only corpus.**
+   That entry reports `[PASS] answer_relevancy: 5.0` and
+   `[PASS] answer_faithfulness: 0.979` as its mandatory re-measure. Those runs
+   happened *before* the data-integrity finding, so the same caveat applies to
+   them verbatim: **measured on a corpus with zero deck vectors and one paper.
+   They need re-measuring on a whole corpus.** The two PASS verdicts are real
+   outputs of a real run; what they measured is narrower than the entry implied.
+2. **"(asserted, not assumed)" was an overstatement** when written: the
+   flag-off test asserted `called == []` without ever invoking
+   `_retrieve_impl`, so the only real check was a source grep. Now genuinely
+   behavioural — see the fix list below — so the claim is true as of this entry,
+   but it was not when I made it.
+3. **Number reconciliation**: the 49 entry pairs "40 passed" with "541 passed
+   (was 514; +27)". The 541 was a **mid-component run**; the 13
+   audit-hardening tests and the 34 graph tests came after it. 514 + 74 = 588,
+   and the suite now reads **602 passed** after this round of fixes.
+
+**FAIL items — all three fixed:**
+
+- **HIGH, crash-safe ordering.** `doc_pipeline.py`'s new graph block sat after
+  the `status='indexed'` flip inside a task with `retries=2`, and
+  `db.get_document` — the one raiser in it — was **unguarded**. A Postgres blip
+  there would fail the task after the flip, so the retry would redo embed +
+  upsert, violating CLAUDE.md §5 ("retries must not redo finished stages"). My
+  own inline comment claimed the block could not fail an ingest, which was
+  simply false: the swallow lives inside `record_mentions`, not around
+  `get_document`. Whole block now wrapped, comment corrected to say why.
+- **MEDIUM, scope drift.** DESIGN.md §3i promised two tables and mentions
+  "keyed by the chunk's own locator"; I shipped one table, source-granular.
+  Corrected in DESIGN.md in its own commit (`8a37486`) per CLAUDE.md §1, with
+  the behavioural consequence stated plainly: **the boost discriminates between
+  sources, never within one** — it can rank the right paper above the wrong
+  paper, not the right page above the wrong page.
+- **MEDIUM, near-vacuous test.** Flag-off invariance now drives a real
+  `_retrieve_impl` call with the graph functions spied, parametrized over
+  `flag=False/True` so the ON case proves the OFF case means something.
+
+**Warnings — fixed:**
+
+- **Component 49 was silently undoing component 14.** Paper tables are rendered
+  as `" | "`-joined cells and newline-joined ROWS so structure survives as
+  embeddable text; flattening newlines to spaces destroyed that at the prompt
+  boundary. Verified: `'Method  Acc\nBERT  88.4\nT5  91.2'` became
+  `'Method Acc BERT 88.4 T5 91.2'` — row boundaries gone, so the model can no
+  longer tell which number belongs to which row. Newlines now become a visible
+  `" ¶ "` separator: rows stay distinguishable, still one physical line, T1
+  still dead. Test added (none covered a multi-row table before).
+- **C1 bytes were being deleted.** `_CONTROLS` stripped U+0080-U+009F, where
+  cp1252 mojibake from PDF extraction lands — the same "information destroyed,
+  sentence still grammatical" class as the `<s>` bug. Now escaped, not deleted.
+- **The extractor barely fired on real queries.** Measured against
+  `labeled_queries.json`: `"what does the clip paper say about zero-shot
+  transfer?"` yielded `[]`, and only acronym questions produced anything.
+  A boost that never fires is not a feature — worse, it would have made the
+  pending ON/OFF eval read as "the graph doesn't help" when the truth was "the
+  extractor never ran". Added `extract_query_entities()`, which resolves a
+  question's n-grams against the vocabulary the tenant actually has, so it
+  cannot invent an entity. This is the single most important fix in this round
+  for making the pending eval interpretable.
+- **Phrase extraction captured leading function words**: `"Our Sparse Attention
+  variant"` produced `our sparse attention`, which can never match a query
+  saying "sparse attention". Now trimmed. Discourse adverbs
+  (`interestingly`, `notably`, ...) and singleton generic nouns (`matters`)
+  added to the stopword set for the same reason.
+- **A code comment was factually wrong**: it named "Chain of Thought" as an
+  example `_PHRASE` handles, but the lowercase "of" breaks the capitalized run,
+  so it matched nothing — and chain-of-thought is a labeled query topic. Added
+  `_PHRASE_JOINED` and `_HYPHENATED`, and corrected the comment.
+- **Unbounded entity aggregation**: `_MAX_ENTITIES` is per-chunk while
+  `doc_pipeline` unions across all chunks, so a 189-chunk paper could register
+  thousands. Added `MAX_ENTITIES_PER_SOURCE = 300`.
+- **`graph_delete_source` had no tenant filter** — safety was argued from "ids
+  are unique" rather than enforced (CLAUDE.md §5). Now resolves and filters by
+  `user_id`, captured *before* the row is deleted.
+- **The judge's `ANSWER` was still raw** — the last unsanitized interpolation
+  into the prompt component 49 exists to harden, and a residual T3 path. Now
+  sanitized and fenced.
+
+**Accepted, not fixed (recorded so they are not rediscovered as surprises):**
+
+- `injection.scan` raises `instruction_override` on ordinary ML prose
+  ("System prompt leakage is a known risk.", "Act as a classifier baseline").
+  Non-mutating, but it means `injection_detected` will be **noisy on a corpus
+  containing safety/prompting papers**. DESIGN.md §3h deliberately chose
+  detect-don't-block, so this is not a violation — but the false-positive rate
+  must be measured before anything consumes that flag.
+- `'See [1] @ page 3 for the full ablation.'` is rewritten to `'See (1) @ page
+  3 ...'` and flagged. Plausible in a deck; accepted because the alternative is
+  leaving the real label grammar forgeable.
+- `graph.enabled()` is technically a call into `graph.py` with the flag off. It
+  does a single `getattr` on config — no extraction, no DB, no reordering, no
+  result key — so the "prior baselines stay valid" guarantee holds.
+
+**GREEN after fixes**: `uv run pytest tests/ -q` -> **602 passed**.
+
+**Still outstanding, unchanged by this review**: no live ON/OFF eval for
+component 50, no SLA-gate run for either component, `grounding-auditor` not
+run, and the corpus re-ingest still incomplete. Component 50 remains **LANDED,
+NOT DONE**.
+
+**Commit**: pending — `src/injection.py`, `src/graph.py`, `src/db.py`,
+`src/rag/search.py`, `src/ingest/doc_pipeline.py`,
+`benchmark/answer_quality.py`, `tests/test_injection.py`,
+`tests/test_graph.py`.
