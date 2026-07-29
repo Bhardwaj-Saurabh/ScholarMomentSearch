@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .. import db, jobs
+from ..config import DOC_KEY_PREFIX, FRAME_KEY_PREFIX, UPLOAD_KEY_PREFIX
 from .videos import require_auth
 from .videos import user_id as user_id_dep
 
@@ -18,6 +19,44 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 _ALLOWED_KINDS = ("paper", "deck")
 _ALLOWED_SCHEMES = ("http://", "https://", "storage://")
+
+# The three bucket namespaces that are per-tenant (src/config.py's key layout).
+# Anything OUTSIDE these is operator-dropped shared content — README's own
+# contract example is `storage://decks/kdd-keynote.pdf`, which has no tenant
+# segment at all.
+_TENANT_SCOPED_PREFIXES = (UPLOAD_KEY_PREFIX, FRAME_KEY_PREFIX, DOC_KEY_PREFIX)
+
+
+def _check_storage_key_ownership(key: str, uid: str) -> None:
+    """DESIGN.md §3e component 23. `POST /admin/documents` used to take this
+    key verbatim, so any caller could name ANOTHER tenant's object and have it
+    downloaded, parsed, embedded under their own user_id, and read back via
+    /api/ask — a cross-tenant read primitive. The video path has always
+    checked this (`src/api/videos.py:92-93`); the document path never did.
+
+    The check has to be exact rather than merely strict: requiring
+    `docs/{uid}/` would reject the shared-content shape README documents and
+    tests/test_admin_api.py asserts. So only keys UNDER a tenant-scoped
+    prefix are ownership-checked; keys outside them stay allowed.
+
+    Prefix matching is case-INSENSITIVE on purpose. Bucket keys are
+    case-sensitive, so `Docs/victim/x` names a different object than
+    `docs/victim/x` and wouldn't read the victim's file — but it is still a
+    probe of someone else's namespace, and rejecting the shape outright beats
+    reasoning about which case variants happen to resolve."""
+    if not key.strip():
+        raise HTTPException(400, "storage:// uri needs a key.")
+    # Normalize before comparing: a '..' segment would otherwise walk out of
+    # the caller's namespace while still satisfying a naive startswith().
+    if key.startswith("/") or ".." in key.split("/"):
+        raise HTTPException(403, "Key must be a plain relative bucket key.")
+    lowered = key.lower()
+    for prefix in _TENANT_SCOPED_PREFIXES:
+        if lowered.startswith(prefix.lower()):
+            owner = key[len(prefix):].split("/", 1)[0]
+            if owner != uid:
+                raise HTTPException(403, "Key belongs to a different tenant.")
+            return
 
 
 class DocumentRequest(BaseModel):
@@ -38,6 +77,8 @@ def register_document(req: DocumentRequest, uid: str = Depends(user_id_dep)):
     doc_id = f"doc_{uuid.uuid4().hex[:10]}"
     is_storage_ref = req.uri.startswith("storage://")
     storage_key = req.uri[len("storage://"):] if is_storage_ref else None
+    if is_storage_ref:
+        _check_storage_key_ownership(storage_key, uid)
     row = db.upsert_pending_document({
         "id": doc_id, "user_id": uid, "kind": req.kind, "uri": req.uri,
         "storage_key": storage_key, "source_hash": None, "title": req.title,

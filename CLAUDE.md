@@ -143,7 +143,7 @@ A component is DONE only when: its tests are green, relevant SLA rows pass,
 | 27 | Secrets hygiene + UI auth wiring | live: with `ADMIN_TOKEN` set, every UI mutation succeeds (RED today: all 401) |
 | 28 | Fly deploy + real health checks | contract probes pass against the live Fly URL; `fly checks list` green; health reports degraded, not crash, with a dependency down |
 | 29 | Benchmark completion + in-region SLA re-measure | `bench.py` measures every key declared in `sla.json` incl. `error_rate_max_pct`; in-region numbers recorded verbatim beside the local ones |
-| 30 | `tests/test_contract.py` + 502 probe | the file exists and passes; the 502 test is RED against a deliberately broken enqueue |
+| 30 | `tests/test_contract.py` + live 502 probe | the required file exists and passes; 502 covered there and in the live probe checklist (already unit-tested in `test_admin_api.py` — this is about the named file + live probe) |
 | 31 | Submission pack | `PRODUCT_EVAL.md` from real runs; README "How I ran it"; demo recorded |
 | 32 | LLM call resilience | fault injection: mocked 429-then-success → one answer; provider failure → 502 not raw 500; `/ask_stream` emits a terminal error event |
 | 33 | Dependency-degrade hardening | Qdrant stopped → `/api/ask` degraded 200, not 500; app boots with Postgres down; a raising route still increments metrics |
