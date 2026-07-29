@@ -3315,3 +3315,63 @@ rather than only without it. Next per the roadmap is Phase A: the Fly deploy
 **Commit**: pending — `ui/index.html`, `ui/auth.test.js`, `src/security.py`,
 `src/app.py`, `src/config.py`, `src/api/search.py`, `tests/test_rate_limit.py`,
 `.env.example`, `DEPLOYMENT.md`, `DESIGN.md`.
+
+---
+
+### 2026-07-29 — Component 27 closeout: spec-guardian review + Phase 0 verdict
+
+`spec-guardian` reviewed commit `6777293`: **PASS-with-warnings**, and **all
+four EVIDENCE claims reproduced** (25 UI tests, 26 rate-limit tests, 393 full
+suite, `<!--MS_MODE-->` exactly once) — no E4 violation.
+
+Verified clean: both locked script blocks byte-identical and their 13 tests
+still passing; the new `auth-logic` block genuinely free of
+`document`/`window`/`fetch`/`localStorage` so it runs in a bare vm; **all six**
+`fetch(` sites classified, with every mutating call on `authFetch` and the
+presigned PUT correctly left on plain `fetch`; the token never reaching a query
+string, a log, an error message, or a cross-origin request; the rate-limit key
+confirmed tenant-free; and `TRUST_PROXY_HEADERS` confirmed to default OFF
+locally, so a dev-stack client cannot rotate buckets via a forged
+`Fly-Client-IP`.
+
+**Four documentation/config defects found and fixed in this commit** — all of
+the "the code is right but the docs would mislead an operator" kind, which is
+exactly what gets deployed wrong at 2am:
+
+1. **Closest to a real blocker.** `DEPLOYMENT.md` presented `REDIS_URL` as
+   optional ("omit to disable caching"). But rate limiting rides Redis and
+   fails OPEN, so omitting it silently removes ALL throttling from
+   `/api/ask*` — unauthenticated endpoints that cost real LLM money per call.
+   Caching degrades gracefully without Redis; abuse protection does not. Now
+   marked REQUIRED for a public deploy, with the reasoning stated.
+2. `.env.example` still advertised `per IP+tenant` keying and
+   `RATE_LIMIT_ASK_MAX=20` — both contradicted by the same commit that
+   introduced them. Corrected, with the anti-bypass reasoning inline.
+3. `TRUST_PROXY_HEADERS` was a security-relevant knob documented nowhere an
+   operator would look. Now in `.env.example` and `DEPLOYMENT.md`.
+4. Off-Fly hosts: with `ENV=production` but no trusted proxy in front,
+   `X-Forwarded-For` is client-controlled and rotating it defeats the limiter.
+   Called out in `DEPLOYMENT.md` with the fix (`TRUST_PROXY_HEADERS=false`).
+
+**Phase 0 verdict (components 23–27): safe to expose, with three open items
+recorded rather than hidden.** Both pre-exposure holes are closed and
+independently re-attacked (no bypass found in either); auth fails closed; the
+public ask path is bounded and throttled; the UI works with auth ON.
+
+Still open, deliberately:
+- **Tenancy is unvalidated `X-User-Id`** — data partitioning, not a security
+  boundary. `/api/ask*` needs no credentials, so cost exposure is bounded only
+  by 60/min/IP and that bound disappears during a Redis outage (fail-open).
+  This is the honest ceiling of the current model, documented rather than
+  papered over.
+- **`/docs`, `/redoc`, `/openapi.json` are public** and enumerate the whole
+  admin surface. Pre-existing; not in any Phase-0 component's scope.
+- **DNS rebinding** against the SSRF guard (component 24's disclosed residual),
+  and no Host-header allowlist or explicit CORS policy.
+
+None of these is a regression introduced by this work; each is either
+pre-existing or an accepted limit of the chosen design. Next per the roadmap:
+Phase A component 28 (Fly deploy + real health checks), which also unblocks
+component 29's in-region SLA re-measure.
+
+**Commit**: pending — `.env.example`, `DEPLOYMENT.md`, `EVIDENCE.md`.

@@ -114,7 +114,7 @@ fly secrets set `
   STORAGE_PROVIDER="…" STORAGE_BUCKET="…" `
   STORAGE_ACCESS_KEY_ID="…" STORAGE_SECRET_ACCESS_KEY="…" `
   LLM_PROVIDER="…" LLM_API_KEY="…" LLM_MODEL="…" `
-  REDIS_URL="…"                    # a managed Redis with RediSearch; omit to disable caching
+  REDIS_URL="…"                    # REQUIRED for a public deploy — see below
 
 # YouTube cookies as a secret (needed because Fly's datacenter IP is bot-checked;
 # there's no ./data mount on Fly, so the local file path won't work there —
@@ -128,6 +128,19 @@ Verify nothing placeholder-shaped made it through before deploying:
 ```powershell
 fly secrets list          # names + digests only; values are never shown back
 ```
+
+> **`REDIS_URL` is not optional for a public deploy.** Rate limiting
+> (DESIGN.md §3e component 26) rides Redis and *fails open* by design — so
+> with no `REDIS_URL`, throttling silently disappears from `/api/ask` and
+> `/ask_stream`, which need no credentials and cost real LLM money per call.
+> Caching degrades gracefully without Redis; abuse protection does not.
+>
+> **Proxy headers:** `fly.toml` sets `ENV = 'production'`, which turns on
+> `TRUST_PROXY_HEADERS` so the limiter sees the real caller via
+> `Fly-Client-IP` instead of putting every visitor in one shared bucket. If
+> you deploy this image somewhere that is NOT behind a trusted proxy, set
+> `TRUST_PROXY_HEADERS=false` — otherwise `X-Forwarded-For` is
+> client-controlled and rotating it defeats the limiter.
 
 ### 4. Deploy
 
