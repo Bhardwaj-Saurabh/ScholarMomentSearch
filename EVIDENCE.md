@@ -4085,3 +4085,79 @@ was not touched.
 regressions.
 
 **Commit**: pending — `src/rag/search.py`, `benchmark/bench.py`, `EVIDENCE.md`.
+
+---
+
+### 2026-07-29 — Component 46: ingest tracing + cross-process correlation (§3g complete)
+
+Last component of §3g. Ingest happens in two processes — the API returns 202,
+a Prefect worker does the work seconds later — so traced naively it is two
+unrelated traces and "what happened to the document I registered?" still needs
+correlating by eye.
+
+**RED**: `tests/test_ingest_tracing.py` → **10 failed**.
+
+**IMPLEMENT**: `src/trace_link.py` (new) stashes the registering request's trace
+id in Redis under `trace:{id}`; the worker pops it and adopts it. Via a
+side-channel rather than a flow parameter because both alternatives are blocked:
+`ingest_video`'s signature is in CLAUDE.md-protected `pipeline.py`, and changing
+`ingest_document`'s would alter a registered Prefect deployment signature. The
+context is **consumed on read** — a Prefect retry re-running hours later must not
+nest an unrelated run under the original request. Inherits `cache.py`'s
+fail-open contract: no Redis, broken Redis, or a missing key all degrade to an
+UNCORRELATED trace, never a failed ingest. `doc_pipeline.ingest_document` gained
+per-stage spans; `admin.py` opens the `register_document` span and stashes.
+
+**Three defects found by live probing, each invisible to the unit tests:**
+
+1. **UUIDv7 timestamps break the merge.** Opik trace ids are UUIDv7, and
+   `uuid4_to_uuid7` embeds a timestamp — so converting our correlation id in the
+   API and again in the worker yields DIFFERENT Opik ids. Proven directly: two
+   conversions of the same uuid4 1.2 s apart were **not equal**. Fixed by
+   pinning a fixed reference instant, making the mapping a pure function of the
+   correlation id (verified equal).
+2. **The two roots collided.** The first design made the root span BE the Opik
+   trace. With a shared id, the worker's root and the API's root both mapped to
+   "the trace". A live probe returned a merged trace with **1 span** —
+   `register_document` gone.
+3. **And the survivor was overwritten.** After fixing (2) for adopted roots, the
+   merged trace came back **named `ingest_document`** with duration 2126 ms —
+   the worker's `trace()` call had overwritten the API's name and timings.
+
+Final design: **every record is emitted as a span, roots included; the Opik
+trace is only a container.** Costs one slightly redundant span on
+single-process traces, and makes the multi-process case correct.
+
+**GREEN**:
+- `uv run pytest tests/test_ingest_tracing.py -q` → **10 passed**.
+- Full suite: `uv run pytest tests/ -q` → **477 passed** (was 467; +10), 0
+  regressions.
+- **Live, one genuinely new paper (arXiv 1907.11692) ingested to `indexed`** —
+  a single Opik trace `016f5e66-e800-7746-8774-5858b7cda4c6`, **span_count 6**,
+  **duration 9344.9 ms**, spanning BOTH processes:
+
+  | process | span | duration | recorded |
+  |---|---|---|---|
+  | API | register_document | 648.2 ms | doc_id, flow_run_id |
+  | worker | ingest_document | 9344.9 ms | correlated=True, indexed=24 |
+  | worker | doc_fetch | 2659.5 ms | |
+  | worker | doc_parse | 1578.9 ms | chunks=24 |
+  | worker | doc_caption | 6.8 ms | chunks=24, captioned=0 |
+  | worker | doc_embed_index | 5098.5 ms | indexed=24 |
+
+  `correlated=True` is the proof the worker adopted the API's trace rather than
+  starting its own. Probe document deleted afterward.
+
+Earlier probes (arXiv 1706.03762, 1810.04805, 2005.11401) all returned
+`skipped` — those papers are already in the seeded corpus, so the duplicate
+branch fired. Correlation was still demonstrated on those runs; the 1907.11692
+run is the one that exercised every stage.
+
+**Known asymmetry, as scoped**: video ingest gets no per-stage spans, because
+`src/ingest/pipeline.py` is CLAUDE.md-protected. Documents get the full tree.
+
+**§3g is now complete** (44, 45, 46, 47, 48).
+
+**Commit**: pending — `src/trace_link.py`, `src/tracing.py`,
+`src/tracing_opik.py`, `src/ingest/doc_pipeline.py`, `src/api/admin.py`,
+`tests/test_ingest_tracing.py`.

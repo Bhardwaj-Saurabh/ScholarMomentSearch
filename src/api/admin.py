@@ -10,7 +10,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from .. import db, jobs
+from .. import db, jobs, trace_link, tracing
 from ..config import DOC_KEY_PREFIX, FRAME_KEY_PREFIX, UPLOAD_KEY_PREFIX
 from .videos import require_auth
 from .videos import user_id as user_id_dep
@@ -98,7 +98,17 @@ def register_document(req: DocumentRequest, uid: str = Depends(user_id_dep)):
     # (done above) -> enqueue -> 202. A failure here is the upstream's fault
     # (Prefect Cloud unreachable), not the caller's — 502, not 400/500.
     try:
-        flow_run_id = jobs.enqueue_document(row["id"], uid, req.kind)
+        # Component 46: open a span for the registration and stash its trace id
+        # so the WORKER joins the same trace seconds later. Via Redis rather
+        # than a flow parameter — `ingest_video`'s signature is in a protected
+        # file and changing `ingest_document`'s would alter a registered
+        # Prefect deployment. Fails open: no Redis just means an uncorrelated
+        # worker trace.
+        with tracing.span("register_document", doc_id=row["id"], tenant=uid,
+                          kind=req.kind, uri=req.uri) as _sp:
+            trace_link.stash(row["id"], tracing.current_trace_id() or "")
+            flow_run_id = jobs.enqueue_document(row["id"], uid, req.kind)
+            _sp.set_attrs(flow_run_id=flow_run_id)
         db.set_document_flow_run_id(row["id"], flow_run_id)
     except Exception as exc:
         db.set_document_status(row["id"], "failed", error=f"enqueue: {exc}")

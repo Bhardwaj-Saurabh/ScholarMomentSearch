@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 
 from prefect import flow, task
 
-from .. import db, llm, storage
+from .. import db, llm, storage, trace_link, tracing
 from ..config import TEXT_EMBED_VERSION
 from ..rag import vector_store
 from ..rag.embeddings import embed_docs
@@ -191,16 +191,36 @@ def t_embed_index(doc_id: str, user_id: str, kind: str, chunks: list[dict]) -> i
 def ingest_document(doc_id: str, user_id: str, kind: str) -> dict:
     attempt = db.bump_document_attempts(doc_id)
     path: str | None = None
+    # Component 46: join the trace the API started at registration, so
+    # "registered -> fetched -> parsed -> captioned -> indexed" is ONE trace
+    # across two processes. Absent (no Redis, expired, or a retry that already
+    # consumed it) => an uncorrelated trace, never a failed ingest.
+    linked = trace_link.pop(doc_id)
     try:
-        path = t_fetch(doc_id, user_id)
-        if not path:  # duplicate — already marked 'skipped' by t_fetch
-            print(f"[ingest] {doc_id} skipped (duplicate content)")
-            return {"doc_id": doc_id, "skipped": True}
-        chunks = t_parse(doc_id, user_id, path, kind)
-        chunks = t_caption(doc_id, user_id, chunks)
-        n = t_embed_index(doc_id, user_id, kind, chunks)
-        print(f"[ingest] {doc_id} indexed: {n} chunks (attempt {attempt})")
-        return {"doc_id": doc_id, "chunks": n}
+        with tracing.span("ingest_document", trace_id=linked, doc_id=doc_id,
+                          tenant=user_id, kind=kind, attempt=attempt,
+                          correlated=bool(linked)) as _sf:
+            with tracing.span("doc_fetch") as _s1:
+                path = t_fetch(doc_id, user_id)
+                _s1.set_attrs(duplicate=not path)
+            if not path:  # duplicate — already marked 'skipped' by t_fetch
+                print(f"[ingest] {doc_id} skipped (duplicate content)")
+                _sf.set_attrs(skipped=True)
+                return {"doc_id": doc_id, "skipped": True}
+            with tracing.span("doc_parse") as _s2:
+                chunks = t_parse(doc_id, user_id, path, kind)
+                _s2.set_attrs(chunks=len(chunks))
+            with tracing.span("doc_caption") as _s3:
+                chunks = t_caption(doc_id, user_id, chunks)
+                _s3.set_attrs(chunks=len(chunks),
+                              captioned=sum(1 for c in chunks
+                                            if c.get("needs_caption")))
+            with tracing.span("doc_embed_index") as _s4:
+                n = t_embed_index(doc_id, user_id, kind, chunks)
+                _s4.set_attrs(indexed=n)
+            _sf.set_attrs(indexed=n)
+            print(f"[ingest] {doc_id} indexed: {n} chunks (attempt {attempt})")
+            return {"doc_id": doc_id, "chunks": n}
     except Exception as exc:
         db.set_document_status(doc_id, "failed", error=f"{type(exc).__name__}: {exc}")
         raise  # Prefect marks the run Failed; full trace in the Cloud UI

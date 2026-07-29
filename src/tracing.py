@@ -201,6 +201,10 @@ def span(name: str, *, trace_id: str | None = None, **attrs):
         # real start AND end in ONE call rather than create-then-update.
         "start_ts": None,
         "end_ts": None,
+        # True when this root JOINED a trace started in another process
+        # (component 46). Such a root must be exported as a SPAN, not as the
+        # trace itself, or it collides with the originating process's root.
+        "adopted": bool(trace_id) and parent is None,
     }
     handle = _Span(rec)
     for b in backends:
