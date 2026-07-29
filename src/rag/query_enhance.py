@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 
-from .. import llm
+from .. import injection, llm
 
 _SYSTEM = (
     "You expand a search query for a retrieval system over a corpus of ML "
@@ -59,6 +59,13 @@ def _parse(raw: str) -> list[str] | None:
     return cleaned[:_MAX_QUERIES] or None
 
 
+def _build_prompt(question: str) -> str:
+    """Component 49: fence the question so it reads as data, not as extra
+    instructions to the expander. Kept a separate pure function so the
+    construction is unit-testable without an LLM."""
+    return f"QUESTION:\n{injection.fence_question(question)}"
+
+
 def enhance_query(question: str) -> list[str]:
     """`[question]` unchanged on ANY failure — no LLM configured, parse
     error, network error. Never blocks retrieval; this is pure best-effort
@@ -67,7 +74,7 @@ def enhance_query(question: str) -> list[str]:
     if cfg is None:
         return [question]
     try:
-        raw = llm.complete(_SYSTEM, f"QUESTION: {question}", cfg)
+        raw = llm.complete(_SYSTEM, _build_prompt(question), cfg)
     except Exception:
         return [question]
     return _parse(raw) or [question]

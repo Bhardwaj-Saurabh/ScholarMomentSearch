@@ -210,6 +210,12 @@ def ask_stream(q: str = Query(min_length=1, max_length=config.ASK_MAX_QUESTION_C
             # Component 48: lets an evaluator attach per-query scores to the
             # trace that produced THIS answer. Absent when tracing is off.
             "trace_id": result.get("trace_id"),
+            # Component 49: whether any retrieved evidence carried an
+            # injection signature. `/api/ask` returns the whole result dict so
+            # it gets this for free; this event whitelists its fields, so
+            # without this line the signal would be missing from the path the
+            # UI and bench.py actually use. Never a block — see DESIGN.md §3h.
+            "injection_detected": result.get("injection_detected", False),
         })
         yield _sse("done", {})
 

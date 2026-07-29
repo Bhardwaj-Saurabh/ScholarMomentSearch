@@ -13,7 +13,8 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from .. import cache, config, db, llm, metrics, prompts, storage, tracing
+from .. import (cache, config, db, injection, llm, metrics, prompts, storage,
+                tracing)
 from ..config import (BRANCH_TOP_K, CONFIDENCE_THRESHOLD, CROSS_MODAL_BOOST,
                       FUSION_WINDOW_S, RRF_K, TEXT_CONFIDENCE_THRESHOLD, TOP_K)
 from . import vector_store
@@ -248,6 +249,7 @@ def _retrieve_impl(question: str, user_id: str, *, top_k: int | None = None,
         windows = _fuse(vhits, thits)
         _sf.set_attrs(windows=len(windows),
                       top_rrf=round(windows[0]["rrf"], 6) if windows else 0.0)
+
     if config.RERANK_ENABLED:
         # Component 16: RRF is rank-based (score-agnostic) — a cross-encoder
         # reads the actual question against each window's actual text,
@@ -541,8 +543,19 @@ def _ask_impl(question: str, user_id: str, *, top_k: int | None = None,
 
     with tracing.span("build_moments") as _sb:
         moments = _build_moments(user_id, citations)
+        # Component 49: record whether any retrieved evidence carries an
+        # injection signature. This is OBSERVABILITY, not a block — the text
+        # was already neutralized structurally in llm._label(), and abstaining
+        # on detection would let any user disable their own search just by
+        # registering a document (DESIGN.md §3h).
+        injection_flags = injection.scan_all(
+            [m.get("transcript") for m in moments] + [m.get("source") for m in moments])
         _sb.set_attrs(moments=len(moments),
-                      with_images=sum(1 for m in moments if m.get("image")))
+                      with_images=sum(1 for m in moments if m.get("image")),
+                      injection_flags=",".join(injection_flags) or "none")
+    result["injection_detected"] = bool(injection_flags)
+    if injection_flags:
+        result["injection_flags"] = injection_flags
     with tracing.span("llm_answer", model=cfg.model, llm_source=source,
                       prompt_version=prompts.get("answer").version) as _sl:
         raw = llm.answer(question, moments, cfg)
