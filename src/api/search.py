@@ -17,7 +17,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, Field, StringConstraints
 
-from .. import config, db, llm, storage
+from .. import config, db, llm, prompts, storage
 from ..rag import search as rag_search
 from .videos import require_auth, user_id as user_id_dep
 
@@ -54,6 +54,9 @@ def get_config(x_user_id: str | None = Header(default=None)):
         "top_k": config.TOP_K,
         "upload_mode": "presigned" if storage.presign_capable() else "direct",
         "max_upload_mb": config.MAX_UPLOAD_MB,
+        # Component 47: the exact prompt + data versions serving this stack, so
+        # a reported eval number can be tied to what actually produced it.
+        "versions": prompts.versions(),
         # Component 43. All three are PUBLIC values in an Authorization Code +
         # PKCE flow — the SPA needs them to talk to Auth0 at all, and there is
         # no client secret anywhere in this application. `enabled` false means

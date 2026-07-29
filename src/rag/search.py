@@ -13,7 +13,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from .. import cache, config, db, llm, metrics, storage, tracing
+from .. import cache, config, db, llm, metrics, prompts, storage, tracing
 from ..config import (BRANCH_TOP_K, CONFIDENCE_THRESHOLD, CROSS_MODAL_BOOST,
                       FUSION_WINDOW_S, RRF_K, TEXT_CONFIDENCE_THRESHOLD, TOP_K)
 from . import vector_store
@@ -449,9 +449,11 @@ def ask(question: str, user_id: str, *, top_k: int | None = None,
     """Thin wrapper around _ask_impl (DESIGN.md §3c component 18): records
     every call's grounding/abstain outcome in metrics exactly once, without
     restructuring _ask_impl's several early-return paths."""
+    # Full provenance on the root: which prompts and which data produced this
+    # answer. Without it an eval score is attributable to "whatever was checked
+    # out at the time" (component 47).
     with tracing.span("ask", question=question, tenant=user_id,
-                      embed_version=config.EMBED_VERSION,
-                      text_embed_version=config.TEXT_EMBED_VERSION) as sp:
+                      **prompts.versions()) as sp:
         result = _ask_impl(question, user_id, top_k=top_k,
                            video_id=video_id, video_ids=video_ids)
         # Stamped on the ROOT so a trace list is filterable by outcome without
@@ -506,7 +508,8 @@ def _ask_impl(question: str, user_id: str, *, top_k: int | None = None,
         moments = _build_moments(user_id, citations)
         _sb.set_attrs(moments=len(moments),
                       with_images=sum(1 for m in moments if m.get("image")))
-    with tracing.span("llm_answer", model=cfg.model, llm_source=source) as _sl:
+    with tracing.span("llm_answer", model=cfg.model, llm_source=source,
+                      prompt_version=prompts.get("answer").version) as _sl:
         raw = llm.answer(question, moments, cfg)
         _sl.set_attrs(answer_chars=len(raw or ""))
     # The two backstops can silently rewrite or withhold an answer. Whether

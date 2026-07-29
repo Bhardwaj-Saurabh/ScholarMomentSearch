@@ -40,6 +40,35 @@ from benchmark.bench import QUALITY, ROOT, _labeled_queries, _req
 _JUDGE_TIMEOUT_S = 60
 
 
+# The judge's STATIC instructions, hoisted to a module constant so component 47
+# can version it by content hash. Kept byte-identical to the original inline
+# text: changing it would silently invalidate component 13's recorded
+# relevancy/faithfulness numbers.
+# Registered with src.prompts by the BENCHMARK, not by the app: the serving
+# container has no `benchmark/` package, so an app-side import of this module
+# silently yielded an empty prompt registry in production (component 47).
+def _register_judge_prompt():
+    try:
+        from src import prompts as _p
+        return _p.register("judge", JUDGE_SYSTEM).version
+    except Exception:
+        return None
+
+
+JUDGE_SYSTEM = (
+    "You are evaluating a RAG system's answer for quality. Score two things:\n"
+    "1. relevancy (integer 1-5): does the ANSWER directly and completely address "
+    "the QUESTION? (1 = off-topic, 5 = fully addresses it). Score relevance/"
+    "completeness only, not correctness.\n"
+    "2. faithfulness: for EVERY bracketed citation number [n] that appears in the "
+    "ANSWER, check whether the specific claim next to it is actually supported by "
+    "that SOURCE's text below. List every citation number used and whether it is "
+    "supported.\n\n"
+    "Respond with ONLY minified JSON, no prose, in exactly this shape:\n"
+    '{"relevancy": <int 1-5>, "citations_checked": '
+    '[{"n": <int>, "supported": <true|false>}, ...]}\n\n'
+)
+
 def _build_judge_prompt(question: str, answer: str, citations: list[dict]) -> str:
     """Deterministic prompt construction — pure, unit-tested. Each numbered
     source line carries whatever retrieved text the answering LLM itself saw
@@ -50,18 +79,8 @@ def _build_judge_prompt(question: str, answer: str, citations: list[dict]) -> st
             for c in citations]
     sources = "\n".join(lines)
     return (
-        "You are evaluating a RAG system's answer for quality. Score two things:\n"
-        "1. relevancy (integer 1-5): does the ANSWER directly and completely address "
-        "the QUESTION? (1 = off-topic, 5 = fully addresses it). Score relevance/"
-        "completeness only, not correctness.\n"
-        "2. faithfulness: for EVERY bracketed citation number [n] that appears in the "
-        "ANSWER, check whether the specific claim next to it is actually supported by "
-        "that SOURCE's text below. List every citation number used and whether it is "
-        "supported.\n\n"
-        "Respond with ONLY minified JSON, no prose, in exactly this shape:\n"
-        '{"relevancy": <int 1-5>, "citations_checked": '
-        '[{"n": <int>, "supported": <true|false>}, ...]}\n\n'
-        f"QUESTION: {question}\n\nANSWER: {answer}\n\nSOURCES:\n{sources}"
+        JUDGE_SYSTEM
+        + f"QUESTION: {question}\n\nANSWER: {answer}\n\nSOURCES:\n{sources}"
     )
 
 
@@ -174,3 +193,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+JUDGE_PROMPT_VERSION = _register_judge_prompt()

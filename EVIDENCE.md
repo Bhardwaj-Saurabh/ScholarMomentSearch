@@ -3800,3 +3800,71 @@ now be shown.
 
 **Commit**: pending — `src/rag/search.py`, `tests/test_rag_spans.py`,
 `EVIDENCE.md`.
+
+---
+
+### 2026-07-29 — Component 47: prompt & data versioning (and a bug that only appeared in the container)
+
+Scoped in `DESIGN.md` §3g, extended with component 48 at the user's suggestion
+(commit `fe74723`). Closes the gap flagged when component 13 shipped:
+`answer_quality.py` reported faithfulness 0.96 / relevancy 5.0 and those numbers
+were attributable to nothing.
+
+**RED**: `tests/test_prompts.py` → collection error (`src.prompts` absent).
+
+**IMPLEMENT**: `src/prompts.py` — `Prompt` whose `version` is a **content hash**
+(12 hex of sha256), never a declared constant: a hand-bumped `PROMPT_VERSION`
+relies on remembering, and a forgotten bump reports "same version" across
+different prompts, which is worse than no versioning because it looks
+trustworthy. The registry holds the LIVE strings (`llm.SYSTEM`,
+`query_enhance._SYSTEM`), so a registry that has drifted from the text actually
+sent is unreachable — asserted by a test, since that property is the whole basis
+for trusting the version. `chunker_version()` hashes the parser sources, closing
+the component-14 gap where paper chunking changed (tables + figures) and nothing
+recorded it. `versions()` bundles prompts + embed + text-embed + chunker
+versions; it is stamped on the `ask` span root, `prompt_version` goes on the
+`llm_answer` span, and the whole bundle is exposed at `GET /api/config`.
+
+**A refactor done carefully**: the judge's instructions were an inline f-string,
+so they were hoisted to `JUDGE_SYSTEM` to make them hashable. Verified
+**byte-identical** afterwards (703 chars, captured before and compared after) —
+changing that text would have silently invalidated component 13's recorded
+numbers.
+
+**THE REAL BUG, found live in the container and not by any unit test.** The
+first cut registered the judge prompt by importing `benchmark.answer_quality`
+from `src/prompts.py`, wrapped in a broad `except`. Locally that worked. Inside
+the Docker image it did not: the Dockerfile copies `src/`, `ui/` and
+`benchmark/corpus.json` only, so the import failed and the except turned it into
+`prompts: {}` — an **empty** prompt map, served by `/api/config` and stamped on
+every Opik trace. Prompt versioning that reports nothing while appearing
+present is precisely the looks-trustworthy-but-isn't failure this component
+exists to prevent, and I shipped it into the container before checking.
+
+Fixed by inverting the dependency: `_app_prompts()` imports only `src.*`, and
+the benchmark calls `prompts.register("judge", JUDGE_SYSTEM)` where that code
+actually exists. The blanket `except` around the registry is **gone** — a
+failure there is now a genuine bug and surfaces. Two regression tests added, the
+important one asserting BEHAVIOR rather than source text: it makes the
+`benchmark` package unimportable (what the container really looks like) and
+requires the serving prompts to still resolve. My first attempt at that test
+grepped `_app_prompts`'s source for "benchmark" and matched its own docstring —
+fixed too.
+
+**GREEN**:
+- `uv run pytest tests/test_prompts.py -q` → **13 passed**.
+- Full suite: `uv run pytest tests/ -q` → **453 passed** (was 440; +13), 0
+  regressions — including `tests/test_answer_quality.py`, which proves the
+  `JUDGE_SYSTEM` hoist changed no behavior.
+- **Live in the rebuilt container**: `GET /api/config` →
+  `prompts: {'answer': '69f1121dc865', 'query_enhance': '7dff17393d70'}`,
+  `chunker_version: b24275569024` — real values where it previously returned
+  `{}`.
+- **Live on a real Opik trace** (question "Why is multi-head attention
+  useful?"): root carries
+  `prompts {'answer': '69f1121dc865', 'query_enhance': '7dff17393d70'}`,
+  `embed_version clip-ViT-B-32-v1`, `chunker_version b24275569024`; and the
+  `llm_answer` span carries `model gpt-4o-mini | prompt_version 69f1121dc865`.
+
+**Commit**: pending — `src/prompts.py`, `src/rag/search.py`,
+`src/api/search.py`, `benchmark/answer_quality.py`, `tests/test_prompts.py`.
