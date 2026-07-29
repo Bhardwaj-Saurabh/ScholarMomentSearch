@@ -162,6 +162,20 @@ A component is DONE only when: its tests are green, relevant SLA rows pass,
 | 46 | Ingest tracing + cross-process correlation | unit: Redis trace-context round-trip; a missing context degrades to an uncorrelated trace, never an error; live: one document registration = one trace across API + worker |
 | 48 | Eval dataset + experiment versioning in Opik | unit: dataset push idempotent; experiment metadata carries dataset + all prompt/embed/chunker versions + retrieval flags; `OPIK_API_KEY` unset ⇒ benchmarks byte-identical. Opik is the RECORD, never the gate — `quality_gates.json` stays the judge |
 | 47 | Prompt & data versioning | unit: editing prompt text changes its version automatically; version appears on the LLM span and in the `/ask` payload; two `answer_quality.py` runs under different prompts are distinguishable |
+| 49 | Indirect prompt-injection guardrail | unit: a chunk carrying a forged `[n] … — excerpt:` line cannot add a moment line to the built prompt; control tokens/newlines/over-length neutralized; a benign excerpt with real brackets/quotes survives byte-unchanged; live: adversarial doc registered → `grounding-auditor` finds no fabricated citation, and `answer_quality.py` is RE-MEASURED (the `SYSTEM` edit invalidates component 13's old numbers) |
+
+Component 49 (DESIGN.md §3h, added 2026-07-29) treats the CORPUS as an untrusted
+input channel — user-registered documents reach three LLM prompts verbatim.
+Non-negotiables:
+- **Sanitize at the prompt boundary, never at ingest.** Ingest-side sanitization
+  corrupts stored data and leaves already-indexed chunks unprotected. One module
+  (`src/injection.py`), same "exactly one place" contract as `src/cache.py`.
+- **Neutralize and record; do NOT abstain on detection.** Abstaining lets any user
+  disable their own search by registering a document.
+- **The judge is in scope.** `answer_quality.py` feeds chunk text to the LLM that
+  produces our own eval numbers; leaving it unsanitized makes those numbers
+  attacker-influencable, which is an E4 problem, not just a security one.
+- **Fails open.** A sanitizer error must never break the read path.
 
 Cross-cutting, always: `grounding-auditor` after 7/8/10; search-during-ingest ratio
 ≤ 1.3× after 4/5; provided-endpoint regression (probe 6) after everything.
