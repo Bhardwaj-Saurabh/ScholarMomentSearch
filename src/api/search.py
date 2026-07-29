@@ -13,7 +13,9 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from typing import Annotated
+
+from pydantic import BaseModel, Field, StringConstraints
 
 from .. import config, db, llm, storage
 from ..rag import search as rag_search
@@ -138,8 +140,11 @@ class AskRequest(BaseModel):
     needs no credentials."""
     question: str = Field(min_length=1, max_length=config.ASK_MAX_QUESTION_CHARS)
     video_id: str | None = Field(default=None, max_length=128)  # single-video scope (legacy)
-    video_ids: list[str] | None = Field(              # multi-select scope (checked videos)
-        default=None, max_length=config.ASK_MAX_VIDEO_IDS)
+    # `max_length` on a list bounds the COUNT, not each element — spec-guardian
+    # found that one 200KB string still sailed through. The element type is
+    # constrained too so the payload is genuinely bounded.
+    video_ids: list[Annotated[str, StringConstraints(max_length=128)]] | None = Field(
+        default=None, max_length=config.ASK_MAX_VIDEO_IDS)  # multi-select scope
     top_k: int | None = Field(default=None, ge=1, le=config.ASK_MAX_TOP_K)
 
 

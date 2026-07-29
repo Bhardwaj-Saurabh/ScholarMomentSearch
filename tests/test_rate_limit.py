@@ -171,13 +171,69 @@ def test_ask_stream_shares_the_ask_budget(client):
     assert client.get("/ask_stream", params={"q": "hi"}).status_code == 429
 
 
-def test_separate_tenants_do_not_share_a_bucket(client):
+def test_rotating_the_tenant_header_does_not_mint_a_fresh_budget(client):
+    """spec-guardian finding: the first cut keyed on IP **and** tenant. But
+    /api/ask needs no credentials and X-User-Id is unvalidated, so rotating
+    that header handed out unlimited buckets — throttling honest clients while
+    stopping no deliberate attacker. IP is the only dimension a caller can't
+    trivially rotate, so it is the only one keyed on."""
+    for i in range(3):
+        client.post("/api/ask", json={"question": "hi"}, headers={"X-User-Id": f"t{i}"})
+    assert client.post("/api/ask", json={"question": "hi"},
+                       headers={"X-User-Id": "brand-new-tenant"}).status_code == 429
+
+
+def test_forwarded_headers_separate_callers_behind_a_proxy(client, monkeypatch):
+    """spec-guardian finding, and an availability regression rather than a
+    security one: behind Fly's proxy `request.client.host` is the PROXY, so
+    keying on it collapsed every anonymous caller into ONE bucket — 20
+    requests from anybody would have starved the entire deployment."""
+    monkeypatch.setattr(config, "TRUST_PROXY_HEADERS", True)
     for _ in range(3):
-        client.post("/api/ask", json={"question": "hi"}, headers={"X-User-Id": "alice"})
+        assert client.post("/api/ask", json={"question": "hi"},
+                           headers={"Fly-Client-IP": "203.0.113.1"}).status_code == 200
     assert client.post("/api/ask", json={"question": "hi"},
-                       headers={"X-User-Id": "alice"}).status_code == 429
+                       headers={"Fly-Client-IP": "203.0.113.1"}).status_code == 429
+    # A different real client must be unaffected by the first one's burst.
     assert client.post("/api/ask", json={"question": "hi"},
-                       headers={"X-User-Id": "bob"}).status_code == 200
+                       headers={"Fly-Client-IP": "203.0.113.9"}).status_code == 200
+
+
+def test_forwarded_headers_ignored_when_not_behind_a_proxy(client, monkeypatch):
+    """Trusting these unconditionally would be worse than the bug it fixes:
+    any client could mint a fresh bucket per request by varying the header."""
+    monkeypatch.setattr(config, "TRUST_PROXY_HEADERS", False)
+    codes = [client.post("/api/ask", json={"question": "hi"},
+                         headers={"Fly-Client-IP": f"203.0.113.{i}"}).status_code
+             for i in range(5)]
+    assert codes[3] == 429 and codes[4] == 429, codes
+
+
+def test_x_forwarded_for_uses_the_leftmost_entry(client, monkeypatch):
+    """The left-most entry is the original client; everything after it is a
+    proxy hop that must not be mistaken for the caller."""
+    from src import security
+
+    monkeypatch.setattr(config, "TRUST_PROXY_HEADERS", True)
+    assert security.client_ip({"x-forwarded-for": "203.0.113.7, 10.0.0.1, 10.0.0.2"},
+                              "10.0.0.9") == "203.0.113.7"
+
+
+def test_fly_client_ip_wins_over_x_forwarded_for(client, monkeypatch):
+    """Fly sets Fly-Client-IP itself and a client cannot append to it, unlike
+    X-Forwarded-For."""
+    from src import security
+
+    monkeypatch.setattr(config, "TRUST_PROXY_HEADERS", True)
+    assert security.client_ip({"fly-client-ip": "203.0.113.5",
+                               "x-forwarded-for": "198.51.100.1"}, "10.0.0.9") == "203.0.113.5"
+
+
+def test_rejects_oversized_video_id_element(client):
+    """max_length on a list bounds the COUNT, not each element — one 200KB
+    string previously sailed through (spec-guardian)."""
+    resp = client.post("/api/ask", json={"question": "hi", "video_ids": ["a" * 200000]})
+    assert resp.status_code == 422
 
 
 def test_cheap_endpoints_use_the_general_budget(client):

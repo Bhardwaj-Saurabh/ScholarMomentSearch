@@ -75,11 +75,12 @@ async def _auth_middleware(request, call_next):
         return JSONResponse({"detail": detail}, status_code=status)
 
     # Component 26: admission control, after auth so an authenticated caller's
-    # budget isn't spent by anonymous noise. Keyed by IP + tenant; fails open.
+    # budget isn't spent by anonymous noise. Keyed on the caller's real IP
+    # (proxy-aware — see security.client_ip); fails open.
     retry_after = security.rate_limit_check(
         request.url.path,
-        request.client.host if request.client else "unknown",
-        (request.headers.get("x-user-id") or config.DEFAULT_USER_ID).strip(),
+        security.client_ip(request.headers,
+                           request.client.host if request.client else None),
     )
     if retry_after is not None:
         return JSONResponse(

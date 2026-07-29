@@ -63,6 +63,18 @@
       </button>
     </nav>
     <div class="px-4 py-4 border-t border-slate-100 space-y-2.5 shrink-0">
+      <!-- Admin token (component 27). Lives in the sidebar so it is reachable
+           from every view: adding sources, retrying and deleting all need it,
+           not just the Metrics page where it used to live. -->
+      <div data-full-only class="space-y-1.5">
+        <label class="block text-[11px] font-medium text-slate-500">Admin token</label>
+        <div class="flex gap-1.5">
+          <input data-admin-token type="password" placeholder="Bearer token"
+                 class="min-w-0 flex-1 rounded-lg border border-slate-200 px-2 py-1 text-xs focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none">
+          <button id="sidebarTokenSave" class="rounded-lg bg-slate-800 hover:bg-slate-900 px-2 py-1 text-[11px] font-medium text-white transition">Save</button>
+        </div>
+        <p id="tokenHint" class="text-[11px] leading-snug text-amber-600 hidden">Needed to add, retry or delete sources.</p>
+      </div>
       <div id="corpusStats" class="text-xs text-slate-500">—</div>
       <span id="llmBadge" class="inline-flex items-center gap-1 rounded-full border border-slate-200 px-2 py-0.5 text-xs font-medium text-slate-500">checking…</span>
     </div>
@@ -200,7 +212,7 @@
             <p id="metricsUpdated" class="mt-1 text-[13px] text-slate-500">—</p>
           </div>
           <div class="flex items-center gap-2">
-            <input id="metricsToken" type="password" placeholder="Admin token"
+            <input id="metricsToken" data-admin-token type="password" placeholder="Admin token"
               class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs placeholder:text-slate-400 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 w-40">
             <button id="metricsTokenSave" class="rounded-lg bg-slate-800 hover:bg-slate-900 px-3 py-1.5 text-xs font-medium text-white transition">Save</button>
           </div>
@@ -316,6 +328,35 @@ function citeOpenUrl(c){
   return uri;
 }
 </script>
+<script id="auth-logic">
+/* Pure, DOM-free auth helpers (DESIGN.md §3e component 27). Same pattern as
+   citation-logic and ingest-logic: ui/auth.test.js regex-extracts and runs
+   just this block in plain Node.
+
+   Until this component the UI sent an Authorization header on exactly ONE
+   call (the metrics poll). Every mutation — register, presign, retry, delete,
+   document upload — sent none, so with ADMIN_TOKEN set they all 401'd and the
+   app only worked with auth turned OFF. */
+function authHeaders(token){
+  // A pasted secret very often drags in a trailing newline; trim before use.
+  // An absent token must send NO header at all — `Bearer ` (empty) is a
+  // malformed header rather than an anonymous request, and dev stacks
+  // legitimately run with no token set.
+  const t=(token||"").trim();
+  return t ? {Authorization:"Bearer "+t} : {};
+}
+function withAuth(headers, token){
+  return Object.assign({}, headers||{}, authHeaders(token));
+}
+function authErrorMessage(status, detail){
+  // 503 is component 25's "the SERVER is missing ADMIN_TOKEN" — the user
+  // cannot fix that by pasting a token, so it must not be reported as one.
+  if(status===503) return detail || "Server is misconfigured (missing admin token). Contact the operator.";
+  if(status===401) return "Unauthorized — set your admin token in the sidebar and try again.";
+  if(status===429) return detail || "Too many requests — slow down and retry in a minute.";
+  return detail || ("Request failed ("+status+").");
+}
+</script>
 <script id="ingest-logic">
 /* Pure, DOM-free helpers for the Paper/Deck self-serve registration (DESIGN.md
    component 11). Kept separate from the main script (same reasoning as
@@ -351,6 +392,37 @@ const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;'
 let CITES=[];
 const MODE = window.MS_MODE || "sample";   // "sample" (curated, read-only) | "full" (self-serve workspace)
 const FULL = MODE==="full";
+
+/* ---------- admin token (DESIGN.md §3e component 27) ----------
+   Every mutating call goes through authFetch() so it carries the bearer
+   token. Before this the UI sent one on the metrics poll ONLY, which meant
+   that with ADMIN_TOKEN set, registering / retrying / deleting all 401'd —
+   the app only worked with auth disabled. The pure header/message helpers
+   live in the <script id="auth-logic"> block above (tested by ui/auth.test.js);
+   this part is just storage + fetch, which needs a browser. */
+const ADMIN_TOKEN_KEY="ms_admin_token";
+function adminToken(){ try{ return localStorage.getItem(ADMIN_TOKEN_KEY)||""; }catch(e){ return ""; } }
+function setAdminToken(v){
+  try{ localStorage.setItem(ADMIN_TOKEN_KEY,(v||"").trim()); }catch(e){}
+  document.querySelectorAll("[data-admin-token]").forEach(el=>el.value=adminToken());
+  syncTokenHint();
+}
+async function authFetch(url, opts){
+  const o=Object.assign({}, opts||{});
+  o.headers=withAuth(o.headers, adminToken());
+  return fetch(url, o);
+}
+/* Turn a failed mutation into an actionable sentence rather than a bare code.
+   Returns "" when the response is fine. */
+async function failureMessage(resp){
+  if(resp.ok) return "";
+  const d=await resp.json().catch(()=>({}));
+  return authErrorMessage(resp.status, d.detail||"");
+}
+function syncTokenHint(){
+  const hint=$("#tokenHint"); if(!hint) return;
+  hint.classList.toggle("hidden", !!adminToken());
+}
 
 /* ---------- icons (Lucide 24x24 paths, one definition each) ---------- */
 const ICONS={
@@ -581,11 +653,15 @@ $("#libraryBody").addEventListener("click", async e=>{
   const el=e.target.closest("[data-act]"); if(!el) return;
   const act=el.dataset.act, id=el.dataset.id;
   if(act==="sel"){ SELECTED.has(id)?SELECTED.delete(id):SELECTED.add(id); renderLibrary(); }
-  else if(act==="retry"){ await fetch(el.dataset.url,{method:"POST"}); loadVideos(); loadDocuments(); startRefresher(); }
+  else if(act==="retry"){
+    const r=await authFetch(el.dataset.url,{method:"POST"});
+    const err=await failureMessage(r); if(err){ alert(err); return; }
+    loadVideos(); loadDocuments(); startRefresher();
+  }
   else if(act==="del"){
     if(!confirm(`Delete “${el.dataset.title}”?\n\nThis permanently removes its frames and search vectors. This can’t be undone.`)) return;
-    const r=await fetch("/api/videos/"+encodeURIComponent(id),{method:"DELETE"});
-    if(!r.ok){ const d=await r.json().catch(()=>({})); alert(d.detail||"Delete failed."); return; }
+    const r=await authFetch("/api/videos/"+encodeURIComponent(id),{method:"DELETE"});
+    const err=await failureMessage(r); if(err){ alert(err); return; }
     KNOWN.delete(id); SELECTED.delete(id); loadVideos();
   }
 });
@@ -607,9 +683,9 @@ function startRefresher(){
 }
 async function registerIngest(body, btn, st){
   try{
-    const resp=await fetch("/api/videos",{method:"POST",
+    const resp=await authFetch("/api/videos",{method:"POST",
       headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
-    if(!resp.ok){ const e=await resp.json().catch(()=>({})); throw new Error(e.detail||resp.statusText); }
+    const err=await failureMessage(resp); if(err) throw new Error(err);
     await resp.json();
     st.textContent="Queued — processing in the background. Add another anytime.";
     loadVideos(); startRefresher();
@@ -623,11 +699,14 @@ $("#upBtn").onclick=async()=>{ const f=$("#upFile").files[0]; if(!f)return;
   const st=$("#upStatus"); $("#upBtn").disabled=true;
   try{
     st.textContent="Uploading…";
-    const pre=await fetch("/api/videos/presign",{method:"POST",
+    const pre=await authFetch("/api/videos/presign",{method:"POST",
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({filename:f.name,content_type:f.type||"video/mp4",size:f.size})});
-    if(!pre.ok){ const e=await pre.json().catch(()=>({})); throw new Error(e.detail||pre.statusText); }
+    const preErr=await failureMessage(pre); if(preErr) throw new Error(preErr);
     const p=await pre.json();
+    // Plain fetch, NOT authFetch: this PUT goes straight to the object store
+    // on a provider-signed URL. Attaching our bearer token would leak it to a
+    // third party and can break signature validation.
     const put=await fetch(p.url,{method:"PUT",headers:p.headers,body:f});
     if(!put.ok) throw new Error("upload failed ("+put.status+")");
     registerIngest({video_id:p.video_id,key:p.key,title:f.name.replace(/\.[^.]+$/,"")}, $("#upBtn"), st);
@@ -640,9 +719,9 @@ $("#docBtn").onclick=async()=>{
   if(!r.ok){ st.textContent="Error: "+r.error; return; }
   $("#docBtn").disabled=true;
   try{
-    const resp=await fetch("/admin/documents",{method:"POST",
+    const resp=await authFetch("/admin/documents",{method:"POST",
       headers:{"Content-Type":"application/json"}, body:JSON.stringify(r.body)});
-    if(!resp.ok){ const e=await resp.json().catch(()=>({})); throw new Error(e.detail||resp.statusText); }
+    const err=await failureMessage(resp); if(err) throw new Error(err);
     await resp.json();
     $("#docUri").value=""; $("#docTitle").value="";   // ready for the next one
     st.textContent="Queued — processing in the background. Add another anytime.";
@@ -836,16 +915,12 @@ $("#examples").innerHTML=EXAMPLES.map(q=>
 document.querySelectorAll(".example").forEach(c=>c.onclick=()=>{ qEl.value=c.textContent; autogrow(); qEl.focus(); });
 
 /* ---------- live metrics (DESIGN.md §3c component 18) ---------- */
-// GET /admin/metrics is gated by the admin bearer token like the other admin
-// routes (confirmed decision) — the browser UI has never sent one for
-// anything, so this page gets its own small token entry (localStorage),
-// rather than retrofitting auth into the unrelated existing register/retry
-// calls (a separate, pre-existing gap — see EVIDENCE.md).
-const METRICS_TOKEN_KEY="ms_admin_token";
-function metricsToken(){ return localStorage.getItem(METRICS_TOKEN_KEY)||""; }
-$("#metricsToken").value=metricsToken();
+// The admin token is now app-wide (component 27), not metrics-only: every
+// mutating call sends it via authFetch(). Same localStorage key, so a token
+// already saved on this page keeps working.
+$("#metricsToken").value=adminToken();
 $("#metricsTokenSave").onclick=()=>{
-  localStorage.setItem(METRICS_TOKEN_KEY, $("#metricsToken").value.trim());
+  setAdminToken($("#metricsToken").value);
   loadMetrics();
 };
 
@@ -858,11 +933,10 @@ function startMetricsPolling(){
 function stopMetricsPolling(){ if(_metricsTimer){ clearInterval(_metricsTimer); _metricsTimer=null; } }
 
 async function loadMetrics(){
-  const token=metricsToken();
-  if(!token){ $("#metricsAuthHint").classList.remove("hidden"); return; }
+  if(!adminToken()){ $("#metricsAuthHint").classList.remove("hidden"); return; }
   try{
-    const resp=await fetch("/admin/metrics", {headers:{Authorization:"Bearer "+token}});
-    if(resp.status===401){ $("#metricsAuthHint").classList.remove("hidden"); return; }
+    const resp=await authFetch("/admin/metrics");
+    if(resp.status===401||resp.status===503){ $("#metricsAuthHint").classList.remove("hidden"); return; }
     if(!resp.ok) return;
     const d=await resp.json();
     $("#metricsAuthHint").classList.add("hidden");
@@ -912,6 +986,13 @@ function renderMetrics(d){
 }
 
 /* ---------- boot ---------- */
+// Keep every admin-token input in sync (sidebar + metrics page) and surface
+// the hint when none is set, so a 401 on "Add source" is explainable before
+// the user hits it rather than after.
+document.querySelectorAll("[data-admin-token]").forEach(el=>el.value=adminToken());
+const _sidebarSave=$("#sidebarTokenSave");
+if(_sidebarSave) _sidebarSave.onclick=()=>setAdminToken($("[data-admin-token]").value);
+syncTokenHint();
 applyMode(); loadConfig(); loadVideos(); loadDocuments(); showView("search");
 </script>
 </body>

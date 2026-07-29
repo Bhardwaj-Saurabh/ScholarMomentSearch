@@ -290,7 +290,18 @@ ASK_MAX_VIDEO_IDS = _int("ASK_MAX_VIDEO_IDS", 50)
 RATE_LIMIT_ENABLED = _envbool("RATE_LIMIT_ENABLED", True)
 RATE_LIMIT_WINDOW_S = _int("RATE_LIMIT_WINDOW_S", 60)
 RATE_LIMIT_MAX = _int("RATE_LIMIT_MAX", 120)        # general endpoints
-RATE_LIMIT_ASK_MAX = _int("RATE_LIMIT_ASK_MAX", 20)  # /api/ask + /ask_stream (LLM cost)
+# 60/min/IP on the LLM path. Chosen above the obvious "20" so a full
+# `benchmark/bench.py` run (which fires dozens of /ask_stream calls) cannot be
+# silently corrupted by 429s that its own measurement code discards — see the
+# disclosed bench interaction in EVIDENCE.md. Still bounds trivial abuse.
+RATE_LIMIT_ASK_MAX = _int("RATE_LIMIT_ASK_MAX", 60)  # /api/ask + /ask_stream (LLM cost)
+# Read Fly-Client-IP / X-Forwarded-For when deciding the caller's address.
+# Behind Fly's proxy, request.client.host is the PROXY, which would put every
+# anonymous caller in one shared bucket. Only trust these where a proxy really
+# terminates the connection — otherwise any client could mint fresh buckets by
+# varying the header, which is worse than the bug it fixes.
+TRUST_PROXY_HEADERS = _envbool("TRUST_PROXY_HEADERS",
+                               ENV not in ("development", "dev", "local", "test", "testing"))
 
 # --- YouTube download hardening ---------------------------------------------------
 # YouTube increasingly answers yt-dlp's default web client with "Sign in to

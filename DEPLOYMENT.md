@@ -87,19 +87,46 @@ internal-DNS host (`clip.process.<app-name>.internal`).
 
 ### 3. Push secrets (once, and whenever they change)
 
-Import everything from `.env` except the local-only bits, then add the YouTube
-cookies as a base64 secret (there's no `./data` mount on Fly, so the file path
-won't work there — the worker decodes the secret to a temp file at runtime):
+Set an **explicit, named list** of secrets. Do not bulk-import `.env`.
+
+> This used to be a `Get-Content .env | fly secrets import` one-liner. It was
+> replaced (DESIGN.md §3e component 27) because bulk import ships whatever the
+> file happens to contain — including, at the time, the published default
+> `ADMIN_TOKEN=change-me`, straight into production. Naming each secret means
+> a placeholder can't ride along unnoticed, and it keeps local-only values
+> (`FLY_*`, `YT_COOKIES_FILE`, a localhost `REDIS_URL`) out of the deploy.
+
+First, make sure `ADMIN_TOKEN` is a real generated value, not a placeholder —
+`fly.toml` sets `ENV = 'production'`, so the API **fails closed with a 503** on
+every protected route if this is missing (that is deliberate: the alternative
+is silently serving them to anyone):
 
 ```powershell
-# import .env (skip FLY_ and the local cookie FILE path)
-Get-Content .env |
-  Where-Object { $_ -match '^[A-Z_]+=.+' -and $_ -notmatch '^FLY_' -and $_ -notmatch '^YT_COOKIES_FILE=' } |
-  fly secrets import
+python -c "import secrets; print(secrets.token_urlsafe(24))"
+```
 
-# YouTube cookies as a secret (needed because Fly's datacenter IP is bot-checked)
+```powershell
+fly secrets set `
+  DATABASE_URL="…" `
+  ADMIN_TOKEN="…" `                # generated above — never a placeholder
+  QDRANT_URL="…" QDRANT_API_KEY="…" `
+  PREFECT_API_URL="…" PREFECT_API_KEY="…" `
+  STORAGE_PROVIDER="…" STORAGE_BUCKET="…" `
+  STORAGE_ACCESS_KEY_ID="…" STORAGE_SECRET_ACCESS_KEY="…" `
+  LLM_PROVIDER="…" LLM_API_KEY="…" LLM_MODEL="…" `
+  REDIS_URL="…"                    # a managed Redis with RediSearch; omit to disable caching
+
+# YouTube cookies as a secret (needed because Fly's datacenter IP is bot-checked;
+# there's no ./data mount on Fly, so the local file path won't work there —
+# the worker decodes this to a temp file at runtime)
 $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes("data/cookies.txt"))
 fly secrets set YT_COOKIES_B64="$b64"
+```
+
+Verify nothing placeholder-shaped made it through before deploying:
+
+```powershell
+fly secrets list          # names + digests only; values are never shown back
 ```
 
 ### 4. Deploy

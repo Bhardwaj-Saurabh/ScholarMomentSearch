@@ -3184,3 +3184,134 @@ one-off rather than silently dropped.
 **Commit**: pending — `src/security.py`, `src/app.py`, `src/config.py`,
 `src/cache.py`, `src/api/search.py`, `fly.toml`, `.env.example`,
 `tests/test_rate_limit.py`, `tests/test_security_authz.py`.
+
+---
+
+### 2026-07-29 — Component 26 closeout: spec-guardian review (two HIGH findings, both fixed)
+
+`spec-guardian` reviewed commit `341a6f7`: **PASS-with-warnings**, and **all
+three EVIDENCE numbers reproduced exactly** (21, 97, 388) — no E4 violation for
+the second component running. It also confirmed the mechanics I'd assumed
+rather than verified: redis-py 8.0.1 does support `expire(nx=True)`, redis-stack
+7.x supports `EXPIRE NX`, a failed EXPIRE can't strand a counter (the `None`
+return fails open and `NX` re-arms the TTL on the next call — self-healing),
+`_bucket` correctly handles trailing slashes and query strings, and fail-open
+holds empirically on all three paths.
+
+**HIGH #1 — the limiter would have broken the deployment it was built to
+precede.** `request.client.host` is the PEER, which behind Fly's proxy is the
+proxy itself. No `--proxy-headers`, `ProxyHeadersMiddleware` or `Fly-Client-IP`
+handling existed anywhere, so on Fly **every anonymous caller would have
+collapsed into one bucket**: 20 requests from any single visitor would have
+starved the entire public deployment, and an attacker could DoS all traffic
+with 20 cheap requests. That is an availability regression introduced by this
+component, and it would have landed on the very deploy Phase 0 exists to make
+safe. Fixed with `security.client_ip()`, which prefers `Fly-Client-IP` (Fly
+sets it; a client cannot append to it) then the left-most `X-Forwarded-For`
+entry — and only when `TRUST_PROXY_HEADERS` is on, defaulting to on outside the
+dev allowlist. Trusting those headers unconditionally would be worse than the
+original bug, since any client could then mint a fresh bucket per request.
+
+**HIGH #2 — the tenant dimension was a free bypass.** The key included
+`X-User-Id`, but `/api/ask` needs no credentials and that header is
+unvalidated, so rotating it yielded unlimited fresh buckets. Combined with #1
+the limiter stopped no deliberate attacker at all while throttling honest
+clients — the worst of both worlds. Now keyed on **IP alone**: the one
+dimension a caller cannot trivially rotate. The cost is that distinct tenants
+behind one NAT share a budget, which is the normal trade-off of IP-based
+limiting and the right way round — shared-but-enforced beats
+separate-but-bypassable. `DESIGN.md` §3e's row prescribed "keyed IP+tenant", so
+the design note was corrected too rather than left implying protection it
+didn't provide.
+
+**MEDIUM — `max_length` on a list bounds the COUNT, not the elements.**
+Verified live by spec-guardian: `{"question":"x","video_ids":["a"*200000]}`
+returned **200**. Now each id is constrained as well.
+
+**LOW, disclosed rather than fixed away — bench fragility.** `bench.py` fires
+dozens of `/ask_stream` calls and its measurement code discards non-200s
+(`if st == 200`), so 429s wouldn't fail loudly — they'd silently produce an
+`inf` latency ratio or recall 0.0. It is safe today only because each ask is a
+real ~10s LLM call, spreading the calls across windows. That safety evaporates
+the moment an answer cache lands (component 22). Mitigated by raising the ask
+default from 20 to **60/min**, with `RATE_LIMIT_ENABLED=false` as the documented
+escape hatch for a benchmarking run; both the reasoning and the residual risk
+are now recorded in `src/config.py` and DESIGN.md §3e rather than left as a trap
+for whoever runs the SLA gate next.
+
+**NIT** — DESIGN.md called it a token bucket; the implementation is a fixed
+window with the usual 2× boundary burst. Design row corrected.
+
+**GREEN after the fixes**: `uv run pytest tests/test_rate_limit.py -q` →
+**26 passed** (was 21; +5 covering both HIGH fixes and the element bound).
+
+---
+
+### 2026-07-29 — Component 27: secrets hygiene + UI auth wiring (Phase 0 complete)
+
+Last Phase-0 component. Two halves of one problem: the app could not be
+deployed safely OR usefully until both were fixed.
+
+**Half 1 — the UI sent no auth on any mutation.** It carried an Authorization
+header on exactly ONE call (the metrics poll). Register, presign, retry, delete
+and document-upload all sent none, so with `ADMIN_TOKEN` set they 401'd and the
+product only functioned with auth DISABLED. Deploying before this would have
+shipped either a broken app or an open one.
+
+**RED**: `ui/auth.test.js` written first → failed, no `auth-logic` block existed.
+
+**IMPLEMENT**: a new `<script id="auth-logic">` block (same extractable,
+DOM-free pattern as `citation-logic`/`ingest-logic`, so plain Node can test it)
+with `authHeaders`/`withAuth`/`authErrorMessage`; then `authFetch()` in the main
+script and all five mutating calls converted. Deliberately NOT converted: the
+presigned PUT to object storage, which goes to a third party on a
+provider-signed URL — attaching our bearer token there would leak the secret
+and can break signature validation. That exclusion is commented at the call
+site. The admin-token input moved from the Metrics page to the sidebar so it is
+reachable from every view (adding, retrying and deleting all need it), both
+inputs sharing one `localStorage` key so an already-saved token keeps working.
+`authErrorMessage` distinguishes 401 (paste a token) from 503 (the SERVER is
+missing its token — the user cannot fix that) from 429 (slow down), instead of
+echoing a bare status code.
+
+**Half 2 — secrets hygiene.** `ADMIN_TOKEN=change-me` was the live local value
+AND the committed example, and `DEPLOYMENT.md` told operators to
+`Get-Content .env | fly secrets import` — which would have shipped the
+published default straight to production. The local `.env` token is now rotated
+to a generated 32-char value (`.env` is gitignored; nothing secret is
+committed), `.env.example` ships EMPTY with the generation command inline, and
+the bulk import is replaced by an explicit named-secret list plus a
+`fly secrets list` verification step, with a note explaining why the one-liner
+was removed.
+
+**GREEN**:
+- `node --test ui/auth.test.js ui/citation.test.js ui/ingest.test.js` →
+  **25 passed** (12 new; the 13 pre-existing locked-block tests still pass, so
+  neither locked script block was disturbed).
+- `<!--MS_MODE-->` placeholder still present exactly **once**.
+- Full Python suite: `uv run pytest tests/ -q` → **393 passed** (was 388; +5
+  from component 26's fixes), 0 regressions.
+- **Live** (`docker compose up -d --build api`):
+  - the retired default `Bearer change-me` → **401**; the rotated token → **200**.
+  - `/` serves `MS_MODE="sample"`, `/get-started` serves `"full"`.
+  - the exact calls the UI now makes, with the token: `POST /admin/documents`
+    → **202**, `POST /api/videos` → **202**, `DELETE /api/videos/{id}` →
+    **200**. Without a token (the old UI's behavior): **401**. Probe rows
+    cleaned up afterward.
+
+A note on the test-realm gotcha, since it cost a cycle: `deepStrictEqual`
+rejected objects returned from the `vm` sandbox even though their contents were
+identical, because the sandbox is a separate realm with its own
+`Object.prototype`. The test copies results into the host realm before
+comparing; the assertion error printing two identical-looking objects is the
+tell.
+
+**Phase 0 is now complete** (components 23–27). The two holes that made a
+deploy unsafe are closed and independently reviewed, auth fails closed,
+requests are bounded and rate-limited, and the UI works WITH auth enabled
+rather than only without it. Next per the roadmap is Phase A: the Fly deploy
+(component 28), which is also what unblocks the in-region SLA re-measure.
+
+**Commit**: pending — `ui/index.html`, `ui/auth.test.js`, `src/security.py`,
+`src/app.py`, `src/config.py`, `src/api/search.py`, `tests/test_rate_limit.py`,
+`.env.example`, `DEPLOYMENT.md`, `DESIGN.md`.

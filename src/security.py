@@ -109,22 +109,56 @@ def _bucket(path: str) -> tuple[str, int]:
     return ("gen", config.RATE_LIMIT_MAX)
 
 
-def rate_limit_check(path: str, client_ip: str, user_id: str) -> int | None:
+def client_ip(headers, peer: str | None) -> str:
+    """The caller's real address.
+
+    `request.client.host` is the PEER, which behind Fly's proxy is the proxy
+    itself — spec-guardian caught that keying on it would collapse every
+    anonymous caller on the deployment into ONE bucket, so 20 requests from
+    anybody would starve all other users. That is an availability regression,
+    not a security control, so the forwarded headers have to be read.
+
+    They are only trusted when `TRUST_PROXY_HEADERS` is on (default: on
+    outside the dev allowlist, since that is exactly where a proxy sits).
+    Trusting them unconditionally would be worse than the bug: any client
+    could then mint a fresh bucket per request just by varying the header.
+    `Fly-Client-IP` is preferred over `X-Forwarded-For` because Fly sets it
+    itself and it cannot be appended to by the client.
+    """
+    if config.TRUST_PROXY_HEADERS:
+        fly = (headers.get("fly-client-ip") or "").strip()
+        if fly:
+            return fly
+        # Left-most entry is the original client; the rest are proxy hops.
+        xff = (headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        if xff:
+            return xff
+    return peer or "unknown"
+
+
+def rate_limit_check(path: str, ip: str) -> int | None:
     """Returns Retry-After seconds when this request should be refused, else
     None.
 
-    Keyed by IP **and** tenant so neither dimension alone can exhaust another
-    caller's budget. Fails OPEN in every uncertain case — disabled by flag, no
-    Redis configured, or `incr_with_expiry` returning None because Redis is
-    unreachable. That is the deliberate trade-off: a Redis outage degrades to
-    unlimited rather than to a dead API, consistent with `src/cache.py`'s
-    contract and with how a Qdrant outage is handled at boot.
+    Keyed on IP ALONE, deliberately. The first cut also keyed on the tenant,
+    which spec-guardian correctly called a free bypass: `/api/ask` needs no
+    credentials and `X-User-Id` is unvalidated, so rotating that header handed
+    out unlimited fresh buckets. The combination was the worst of both worlds —
+    it throttled honest clients while stopping no deliberate attacker. IP is
+    the only dimension a caller cannot trivially rotate, so it is the only one
+    used. The cost is that distinct tenants behind one NAT share a budget,
+    which is the normal trade-off of IP-based limiting and is the right way
+    round: shared-but-enforced beats separate-but-bypassable.
+
+    Fails OPEN in every uncertain case — disabled by flag, no Redis, or
+    `incr_with_expiry` returning None because Redis is unreachable. A Redis
+    outage degrades to unlimited rather than to a dead API, consistent with
+    `src/cache.py`'s contract and the Qdrant-down-at-boot precedent.
     """
     if not config.RATE_LIMIT_ENABLED or not cache.enabled():
         return None
     name, limit = _bucket(path)
-    count = cache.incr_with_expiry(f"rl:{name}:{client_ip}:{user_id}",
-                                   config.RATE_LIMIT_WINDOW_S)
+    count = cache.incr_with_expiry(f"rl:{name}:{ip}", config.RATE_LIMIT_WINDOW_S)
     if count is None:          # couldn't count -> don't limit
         return None
     return config.RATE_LIMIT_WINDOW_S if count > limit else None
