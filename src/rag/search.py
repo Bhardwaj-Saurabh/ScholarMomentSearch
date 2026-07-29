@@ -13,7 +13,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from .. import cache, config, db, llm, metrics, storage
+from .. import cache, config, db, llm, metrics, storage, tracing
 from ..config import (BRANCH_TOP_K, CONFIDENCE_THRESHOLD, CROSS_MODAL_BOOST,
                       FUSION_WINDOW_S, RRF_K, TEXT_CONFIDENCE_THRESHOLD, TOP_K)
 from . import vector_store
@@ -140,6 +140,21 @@ def _media_url(video: dict | None, user_id: str, video_id: str) -> str | None:
 def retrieve(question: str, user_id: str, *, top_k: int | None = None,
              video_id: str | None = None,
              video_ids: list[str] | None = None) -> dict[str, Any]:
+    """Thin tracing wrapper (component 45) around _retrieve_impl — keeps the
+    span boundary out of the retrieval logic itself and out of its several
+    branch points."""
+    with tracing.span("retrieve", top_k=top_k or TOP_K,
+                      scoped=bool(video_id or video_ids)) as sp:
+        r = _retrieve_impl(question, user_id, top_k=top_k,
+                           video_id=video_id, video_ids=video_ids)
+        sp.set_attrs(citations=len(r["citations"]),
+                     best_visual=r["best_visual"], best_text=r["best_text"])
+        return r
+
+
+def _retrieve_impl(question: str, user_id: str, *, top_k: int | None = None,
+                   video_id: str | None = None,
+                   video_ids: list[str] | None = None) -> dict[str, Any]:
     """Multimodal retrieve: query BOTH branches (CLIP frames + transcript text),
     fuse by RRF into time windows, and return numbered moment-citations.
 
@@ -159,15 +174,19 @@ def retrieve(question: str, user_id: str, *, top_k: int | None = None,
     if config.QUERY_ENHANCEMENT_ENABLED:
         from .query_enhance import enhance_query
 
-        queries = enhance_query(question)
+        with tracing.span("query_enhance") as _qe:
+            queries = enhance_query(question)
+            _qe.set_attrs(sub_queries=len(queries), queries=list(queries))
 
     # Visual branch — CLIP text→image.
-    vhits = _merge_hits([
-        vector_store.search(embed_text(q), user_id, top_k=BRANCH_TOP_K,
-                           video_id=video_id, video_ids=video_ids)
-        for q in queries
-    ])
-    best_visual = vhits[0]["score"] if vhits else 0.0
+    with tracing.span("search_visual", queries=len(queries)) as _sv:
+        vhits = _merge_hits([
+            vector_store.search(embed_text(q), user_id, top_k=BRANCH_TOP_K,
+                               video_id=video_id, video_ids=video_ids)
+            for q in queries
+        ])
+        best_visual = vhits[0]["score"] if vhits else 0.0
+        _sv.set_attrs(candidates=len(vhits), best_score=best_visual)
 
     # Text branch — bge query→transcript-chunk (only if transcript is enabled).
     thits: list[dict] = []
@@ -184,16 +203,27 @@ def retrieve(question: str, user_id: str, *, top_k: int | None = None,
         # before component 15/17) still powers the confidence gate; the
         # hybrid, possibly-multi-query calls below only change WHICH
         # candidates get returned for citations, never the gate.
-        gate_hits = vector_store.search_text(embed_query(question), user_id, top_k=1,
-                                             video_id=video_id, video_ids=video_ids)
-        best_text = gate_hits[0]["score"] if gate_hits else 0.0
-        thits = _merge_hits([
-            vector_store.search_text(embed_query(q), user_id, top_k=BRANCH_TOP_K,
-                                     video_id=video_id, video_ids=video_ids, query_text=q)
-            for q in queries
-        ])
+        with tracing.span("search_text", queries=len(queries),
+                          hybrid=config.ENABLE_HYBRID_TEXT_SEARCH) as _st:
+            gate_hits = vector_store.search_text(embed_query(question), user_id, top_k=1,
+                                                 video_id=video_id, video_ids=video_ids)
+            best_text = gate_hits[0]["score"] if gate_hits else 0.0
+            thits = _merge_hits([
+                vector_store.search_text(embed_query(q), user_id, top_k=BRANCH_TOP_K,
+                                         video_id=video_id, video_ids=video_ids, query_text=q)
+                for q in queries
+            ])
+            # best_score is the DENSE-ONLY gate score, deliberately: the hybrid
+            # score is rank-quantized RRF and not comparable to the thresholds
+            # (see the comment above). Recording both avoids a reader assuming
+            # the gate judged the fused number.
+            _st.set_attrs(candidates=len(thits), best_score=best_text,
+                          top_hybrid_score=thits[0]["score"] if thits else 0.0)
 
-    windows = _fuse(vhits, thits)
+    with tracing.span("fuse") as _sf:
+        windows = _fuse(vhits, thits)
+        _sf.set_attrs(windows=len(windows),
+                      top_rrf=round(windows[0]["rrf"], 6) if windows else 0.0)
     if config.RERANK_ENABLED:
         # Component 16: RRF is rank-based (score-agnostic) — a cross-encoder
         # reads the actual question against each window's actual text,
@@ -202,7 +232,21 @@ def retrieve(question: str, user_id: str, *, top_k: int | None = None,
         # every candidate fusion surfaced, not just its own top guesses.
         from .rerank import rerank
 
-        windows = rerank(question, windows)
+        # Record the ordering CHANGE, not just that rerank ran: the reranker
+        # quietly demoting the right chunk is a real failure mode (component
+        # 16), and it is invisible unless before/after are both captured.
+        with tracing.span("rerank", enabled=True, model=config.RERANK_MODEL) as _sr:
+            before = [_hit_key(w["text"]) if w.get("text") else ("frame", w.get("video_id"))
+                      for w in windows]
+            windows = rerank(question, windows)
+            after = [_hit_key(w["text"]) if w.get("text") else ("frame", w.get("video_id"))
+                     for w in windows]
+            _sr.set_attrs(windows_in=len(before), windows_out=len(after),
+                          reordered=before != after)
+    else:
+        with tracing.span("rerank", enabled=False) as _sr:
+            _sr.set_attrs(windows_in=len(windows), windows_out=len(windows),
+                          reordered=False)
     windows = windows[:k]
     videos = db.videos_by_ids(sorted({w["video_id"] for w in windows if w["video_id"]}))
     documents = db.documents_by_ids(sorted({w["text"]["source_id"] for w in windows
@@ -405,7 +449,16 @@ def ask(question: str, user_id: str, *, top_k: int | None = None,
     """Thin wrapper around _ask_impl (DESIGN.md §3c component 18): records
     every call's grounding/abstain outcome in metrics exactly once, without
     restructuring _ask_impl's several early-return paths."""
-    result = _ask_impl(question, user_id, top_k=top_k, video_id=video_id, video_ids=video_ids)
+    with tracing.span("ask", question=question, tenant=user_id,
+                      embed_version=config.EMBED_VERSION,
+                      text_embed_version=config.TEXT_EMBED_VERSION) as sp:
+        result = _ask_impl(question, user_id, top_k=top_k,
+                           video_id=video_id, video_ids=video_ids)
+        # Stamped on the ROOT so a trace list is filterable by outcome without
+        # opening each one — abstained traces are the interesting ones.
+        sp.set_attrs(citations=len(result.get("citations") or []),
+                     abstained=bool(result.get("abstained", False)),
+                     llm_used=bool(result.get("llm_used", False)))
     metrics.record_ask(result)
     return result
 
@@ -426,7 +479,17 @@ def _ask_impl(question: str, user_id: str, *, top_k: int | None = None,
     # Abstain only if NEITHER what's on screen nor what's said looks relevant.
     visual_ok = r["best_visual"] >= CONFIDENCE_THRESHOLD
     text_ok = r["best_text"] >= TEXT_CONFIDENCE_THRESHOLD
-    if CONFIDENCE_THRESHOLD and not visual_ok and not text_ok:
+    gate_abstains = bool(CONFIDENCE_THRESHOLD and not visual_ok and not text_ok)
+    # Both scores AND both thresholds: "should it have abstained?" is the first
+    # question asked of a bad answer, and it is unanswerable from the scores
+    # alone without knowing what they were compared against.
+    with tracing.span("confidence_gate") as _sg:
+        _sg.set_attrs(best_visual=r["best_visual"], best_text=r["best_text"],
+                      visual_threshold=CONFIDENCE_THRESHOLD,
+                      text_threshold=TEXT_CONFIDENCE_THRESHOLD,
+                      visual_ok=visual_ok, text_ok=text_ok,
+                      abstained=gate_abstains)
+    if gate_abstains:
         result.update(answer=ABSTAIN, llm_used=False, abstained=True)
         return result
 
@@ -439,9 +502,21 @@ def _ask_impl(question: str, user_id: str, *, top_k: int | None = None,
                             "on the server, for a synthesized, grounded answer."))
         return result
 
-    moments = _build_moments(user_id, citations)
-    answer = _validate_citations(llm.answer(question, moments, cfg), len(citations))
-    result["answer"] = _check_named_source_attribution(answer, citations, user_id)
+    with tracing.span("build_moments") as _sb:
+        moments = _build_moments(user_id, citations)
+        _sb.set_attrs(moments=len(moments),
+                      with_images=sum(1 for m in moments if m.get("image")))
+    with tracing.span("llm_answer", model=cfg.model, llm_source=source) as _sl:
+        raw = llm.answer(question, moments, cfg)
+        _sl.set_attrs(answer_chars=len(raw or ""))
+    # The two backstops can silently rewrite or withhold an answer. Whether
+    # they fired is exactly what you need when an answer looks wrong.
+    with tracing.span("grounding_check") as _sc:
+        answer = _validate_citations(raw, len(citations))
+        checked = _check_named_source_attribution(answer, citations, user_id)
+        _sc.set_attrs(citations_stripped=answer != raw,
+                      withheld_by_attribution_check=checked != answer)
+    result["answer"] = checked
     result["llm_used"] = True
     result["llm_source"] = source          # "user" = their own hosted model
     result["llm_model"] = cfg.model

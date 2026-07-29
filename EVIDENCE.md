@@ -3731,3 +3731,72 @@ beyond import. And these spans are still synthetic: nothing in `src/rag/` calls
 `span()` yet. That is component 45.
 
 **Commit**: pending — `src/tracing.py`, `src/tracing_opik.py`, `EVIDENCE.md`.
+
+---
+
+### 2026-07-29 — Component 45: RAG read-path spans (and the first thing tracing told us)
+
+Scoped in `DESIGN.md` §3g. Nine spans over the real read path, carrying the
+**decisions** rather than only timings: candidate counts and best scores per
+branch, fused window count, rerank before/after ordering, the confidence gate's
+two scores AND the two thresholds they were judged against, moment/image
+counts, model + answer size, and whether either grounding backstop fired.
+
+**RED**: `tests/test_rag_spans.py` → **8 failed, 2 passed** before instrumentation.
+
+**IMPLEMENT**: `retrieve()` became a thin tracing wrapper around a renamed
+`_retrieve_impl` (keeping the span boundary out of retrieval's several branch
+points, the same shape `ask()`/`_ask_impl` already used for metrics). Spans
+added for `query_enhance`, `search_visual`, `search_text`, `fuse`, `rerank`,
+`confidence_gate`, `build_moments`, `llm_answer`, `grounding_check`, under an
+`ask` root. `search_text` deliberately records BOTH the dense-only gate score
+and the top hybrid score, because they are not comparable and a reader would
+otherwise assume the gate judged the fused number.
+
+**GREEN**:
+- `uv run pytest tests/test_rag_spans.py -q` → **10 passed**.
+- Full suite: `uv run pytest tests/ -q` → **440 passed** (was 430; +10), 0
+  regressions. Two tests specifically assert instrumentation changed nothing:
+  identical answer+citations with tracing on vs off, and an exploding backend
+  cannot break `ask()`.
+- **Live, a real `POST /api/ask` through the full pipeline** (retrieval →
+  rerank → gpt-4o-mini), verified by querying Opik's REST API rather than
+  trusting a log line — trace `019fae2e-fea6-7716-89c4-7a1e9ab8da38` in project
+  `RAGFDE`, **9 spans**, total **15205.8 ms**:
+
+  | span | duration | recorded decision |
+  |---|---|---|
+  | retrieve | 8536.4 ms | citations=6, best_visual=0.28245372 |
+  | search_visual | 731.1 ms | candidates=20, best_score=0.28245372 |
+  | search_text | 1605.0 ms | candidates=20, best_score=0.7766093, hybrid=True |
+  | fuse | 0.2 ms | windows=36, top_rrf=0.045804 |
+  | rerank | 5725.9 ms | windows_in=36, model=ms-marco-MiniLM-L-6-v2 |
+  | confidence_gate | 0.0 ms | best_visual/best_text vs both thresholds |
+  | build_moments | 2.8 ms | moments=6, with_images=0 |
+  | llm_answer | 5304.5 ms | model=gpt-4o-mini, answer_chars=1368 |
+  | grounding_check | 920.8 ms | citations_stripped=False, withheld=False |
+
+**THE FIRST REAL FINDING, and a correction of my own instinct.** That
+rerank number — 5725.9 ms, 38% of the request — looked like it contradicted
+component 16's "negligible latency cost" claim. Rather than assert either way I
+measured again on a warm process. Across subsequent traces:
+
+- `rerank` **cold: 5725.9 ms** (one-time cross-encoder model load)
+- `rerank` **warm: 120.2 / 69.6 / 241.9 / 79.2 ms**
+- `llm_answer`: **6634.2 / 5304.5 / 4069.3 ms**
+- whole-trace: **9998.3 ms** ("What makes BERT bidirectional?"), **15205.8 ms**,
+  **10181.3 ms**
+
+So component 16's claim was correct **for steady state**, and the aggregate in
+`/admin/metrics` had been silently averaging a 5.7-second cold start together
+with ~100 ms warm calls — precisely the conflation per-step tracing exists to
+break apart. It also independently justifies component 39's scoped
+`min_machines_running = 1`: on Fly with scale-to-zero, that 5.7 s model load is
+paid on every cold request, not once.
+
+Steady state, `llm_answer` is now provably the dominant cost (4.1–6.6 s of a
+~10 s request), which is what the original design asserted on intuition and can
+now be shown.
+
+**Commit**: pending — `src/rag/search.py`, `tests/test_rag_spans.py`,
+`EVIDENCE.md`.
