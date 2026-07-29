@@ -45,6 +45,12 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 # every bucket key, Postgres row, and Qdrant point is already user_id-tagged.
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 DEFAULT_USER_ID = os.getenv("DEFAULT_USER_ID", "default")
+# Deployment environment (DESIGN.md §3e component 25). "production" makes the
+# auth layer fail CLOSED when ADMIN_TOKEN is unset, instead of the inherited
+# dev-convenience behavior of quietly opening every mutating route. Anything
+# else (default) keeps that convenience so a fresh cloner can run the stack
+# with no configuration at all.
+ENV = os.getenv("ENV", "development").strip().lower()
 
 # --- Object storage (videos + frame thumbnails) ------------------------------
 # STORAGE_PROVIDER: local | aws | gcp | gcp_native | flyio

@@ -2971,3 +2971,98 @@ correction above):
 
 **Commit**: pending — `src/ingest/urlguard.py`, `tests/test_urlguard.py`,
 `EVIDENCE.md`.
+
+---
+
+### 2026-07-29 — Component 25: hardened auth layer (app-level, additive)
+
+Third Phase-0 component (`DESIGN.md` §3e). Fixes three defects in the inherited
+auth, all of which live in `src/api/videos.py::require_auth` — a
+CLAUDE.md-protected file — so all three are fixed additively in middleware
+rather than by editing it:
+
+1. **Fails OPEN.** `if not ADMIN_TOKEN: return` makes every "protected" route
+   fully public when the token is unset. Reasonable as dev convenience,
+   unacceptable as production posture, and nothing in the code told the two
+   apart.
+2. **Not constant-time** — a plain `!=` on the token string.
+3. **`GET /api/llm` was never gated at all**, returning provider, model,
+   base_url and an API-key hint for whatever tenant the unauthenticated,
+   spoofable `X-User-Id` header names.
+
+**RED**: `tests/test_security_authz.py` written first — **63 errors** on
+collection/run (`src.security` and `config.ENV` did not exist).
+
+**IMPLEMENT**: `src/security.py` (new) — `token_ok()` using
+`hmac.compare_digest` with an exact `Bearer ` scheme match (`bearer `/`Token `/
+`Basic ` rejected rather than normalized); `requires_auth()`; `auth_failure()`
+returning **503** (not 401) when `ADMIN_TOKEN` is unset under `ENV=production`,
+because an absent server secret is a server misconfiguration, not a client
+error. `config.ENV` added (default `development`, preserving today's open
+behavior for a fresh cloner). `src/app.py` gains `_auth_middleware`, registered
+BEFORE `_metrics_middleware` on purpose: Starlette makes the most-recently-added
+middleware outermost, so metrics stays wrapped around auth and a 401 is still
+timed and counted rather than vanishing from the dashboard.
+
+Enforcing ahead of routing also converts "a new route under /admin forgets its
+`Depends(require_auth)`" from a latent vulnerability into a structural
+impossibility — covered by
+`test_unknown_path_under_a_protected_prefix_is_gated`. Existing route-level
+dependencies stay in place: redundant, harmless, protected file untouched.
+
+**Consequential change, disclosed**: rejecting before routing means
+`request.scope["route"]` is `None`, so the metrics middleware would have
+bucketed those requests by RAW path — an attacker-controllable, unbounded
+cardinality label (a burst of failed auth or a 404 scan would grow the metrics
+dict without limit). Unmatched requests now bucket under a fixed
+`"<unmatched>"` label instead. Trade-off stated plainly: individual unmatched
+paths are no longer distinguishable in `/metrics`. Requests that DO match a
+route are unaffected — `/api/videos/{video_id}` still collapses to one row, and
+component 18's existing bucketing tests still pass unchanged.
+
+**Scope boundary held deliberately**: `GET /api/videos`, `GET /admin/sources`
+and `/api/ask` stay public exactly as before. Gating them would break the
+browser UI, which sends no Authorization header on anything — that is component
+27, which depends on this one. Tenancy also remains `X-User-Id`, i.e. data
+partitioning rather than a security boundary (§3e records that as accepted and
+documented, not solved).
+
+**Test-fidelity issue found and fixed**: the dev-convenience test initially
+failed because `src/api/videos.py` binds the token BY VALUE at import
+(`from ..config import ADMIN_TOKEN`), so patching only `config.ADMIN_TOKEN`
+left the route-level check holding the old value and the request 401'd at the
+route instead of the middleware. Patching one place tested a state that cannot
+occur in production (where an unset env var empties both). Now patches both,
+with the reason recorded in the test.
+
+**Third occurrence of the same test-leak bug, now fixed by identity rather than
+discipline**: `test_accepts_correct_token` genuinely reaches its handlers, so
+`POST /api/videos` and `POST /admin/documents` really insert rows — which leaked
+into the shared test Postgres and failed
+`tests/test_reconciler.py::test_reconcile_restarts_a_document_whose_flow_run_actually_died`
+(the same all-tenant stale scan that caught the component-20 and component-23
+leaks). Fixed with an autouse fixture that deletes by known identity, plus an
+autouse fixture mocking `enqueue_document`/`enqueue_video` so these tests stop
+scheduling real Prefect Cloud runs. **4 leaked rows purged** (3 documents, 1
+video) before re-verification.
+
+**GREEN**:
+- `uv run pytest tests/test_security_authz.py -q` → **63 passed**.
+- Full suite: `uv run pytest tests/ -q` → **354 passed** (was 291; +63), run
+  **twice**, 354 both times, 0 regressions. Post-run leak check: `stray docs: 0`,
+  `stray videos: 0`.
+- **Live** (`docker compose up -d --build api`):
+  - `GET /api/llm` — no token **401**, wrong token **401**, correct token
+    **200**. Previously this was a public endpoint.
+  - `DELETE /api/videos/x` with no token → **401**.
+  - Public surface unchanged: `/api/health`, `/api/config`, `/api/videos`,
+    `/admin/sources`, `/` (UI) all **200**.
+  - **Fail-closed proven**, simulating a production deploy that forgot the
+    secret (`ADMIN_TOKEN=` `ENV=production` inside the container):
+    `DELETE /api/videos/x` → **503** *"Server is missing ADMIN_TOKEN — refusing
+    to serve protected routes in production"*; `POST /admin/documents` → **503**;
+    `GET /api/health` → **200** (public reads still serve). Under the inherited
+    code this same configuration served every mutating route to anyone.
+
+**Commit**: pending — `src/security.py`, `src/app.py`, `src/config.py`,
+`tests/test_security_authz.py`.

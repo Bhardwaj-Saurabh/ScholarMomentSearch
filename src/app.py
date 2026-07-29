@@ -23,8 +23,9 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
-from . import config, db, metrics
+from . import config, db, metrics, security
 from .api.admin import router as admin_router
 from .api.metrics import router as metrics_router
 from .api.search import router as search_router
@@ -48,6 +49,31 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="MomentSearch", version="1.0.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def _auth_middleware(request, call_next):
+    """DESIGN.md §3e component 25 — enforce the admin token ahead of routing.
+
+    Registered BEFORE the metrics middleware on purpose. Starlette makes the
+    most-recently-added middleware the OUTERMOST, so declaring metrics second
+    keeps it wrapped around this one, and a 401 rejected here is still timed
+    and counted in the status breakdown rather than vanishing from the
+    dashboard.
+
+    Why middleware and not another `Depends`: the inherited
+    `videos.py::require_auth` is CLAUDE.md-protected (it fails open on an unset
+    token and compares non-constant-time), and a dependency only protects
+    routes that remembered to declare it — `GET /api/llm` never did. Enforcing
+    here fixes both without touching the protected file, and makes "someone
+    adds a route under /admin and forgets the Depends" structurally safe.
+    """
+    failure = security.auth_failure(
+        request.method, request.url.path, request.headers.get("authorization"))
+    if failure is not None:
+        status, detail = failure
+        return JSONResponse({"detail": detail}, status_code=status)
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -76,7 +102,16 @@ async def _metrics_middleware(request, call_next):
     start = time.perf_counter()
     response = await call_next(request)
     route = request.scope.get("route")
-    path = route.path if route is not None else request.url.path
+    # An unmatched path gets a FIXED label, never the raw path. Two ways a
+    # request arrives with no route: a 404 for a path no route matches, and
+    # (since component 25) a request rejected by the auth middleware before
+    # routing ever ran. Both are attacker-controllable, so bucketing them by
+    # raw path is an unbounded-cardinality label — a scan or a burst of failed
+    # auth would grow the metrics dict without limit. The trade-off, stated
+    # plainly: individual unmatched paths are no longer distinguishable in
+    # /metrics. Requests that DO match a route are unaffected and still bucket
+    # by template, so /api/videos/{video_id} stays one row as before.
+    path = route.path if route is not None else "<unmatched>"
 
     body_iterator = getattr(response, "body_iterator", None)
     if body_iterator is None:
