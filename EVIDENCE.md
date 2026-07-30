@@ -5380,6 +5380,61 @@ the unit test.
     QDRANT_URL=http://localhost:16333 uv run pytest tests/ -q
     627 passed, 9 warnings in 62.58s (0:01:02)
 
-**Commit**: pending — `Dockerfile`, `entrypoint.sh` (new),
-`docker-compose.yml`, `.github/workflows/fly-deploy.yml`,
-`tests/test_deploy_config.py`.
+**Commit**: `6285db3`, wording follow-up `c724c2a`. `spec-guardian`
+re-reviewed both against the original HIGH/MEDIUM findings, independently
+re-ran the same class of live docker probes itself (not just re-reading the
+diff), and returned **PASS-with-warnings** — all LOW, none blocking:
+DESIGN.md's row literally says "a static `USER` line" (the entrypoint
+mechanism is architecturally different, justified, and disclosed);
+`runuser` (vs. `gosu`) leaves a permanent root PID 1, harmless but noted;
+the `627 passed` full-suite number was this session's, not independently
+re-run by the reviewing agent.
+
+---
+
+### 2026-07-30 — First-ever Fly bootstrap: app creation, secrets, a real naming collision
+
+Per the user's explicit go-ahead to deploy now, with `FLY_API_TOKEN`
+confirmed absent (`gh secret list` empty) and the Fly app confirmed never
+created (`fly apps list` — five other apps under this account, not this one).
+
+**`fly launch --no-deploy --copy-config --name momentsearch --region iad --yes`**
+silently created `momentsearch-muddy-brook-5223` instead of the requested
+name — Fly app names are globally unique, and `fly apps create momentsearch`
+independently confirmed `Error: Validation failed: Name has already been
+taken` (owned by an unrelated Fly account, not this project). The same
+`--yes` also **overwrote** `fly.toml` and `.github/workflows/fly-deploy.yml`
+with generic templates, silently reverting component 41's CI-gated
+`workflow_run` trigger and the SHA-pinning fix back to a bare
+`push: branches: [main]`. Caught before pushing (`git diff --stat` showed
+32/77 lines changed in files that should have been untouched by an app
+rename); both restored via `git checkout c724c2a --`.
+
+Destroyed the mis-named app (`fly apps destroy momentsearch-muddy-brook-5223
+--yes` — fresh, undeployed, nothing lost) and created `scholarmomentsearch`
+instead (`fly apps create scholarmomentsearch` — succeeded). Updated the two
+places `fly.toml` itself documents needing a change on a name collision:
+`app = '…'` and `CLIP_SERVICE_URL`'s internal-DNS host
+(`clip.process.scholarmomentsearch.internal`) — plus one illustrative
+mention in `DESIGN.md`'s SSRF writeup, for accuracy.
+
+`fly launch` had also auto-created a `FLY_API_TOKEN` GitHub secret scoped to
+the now-destroyed app — regenerated a fresh one correctly scoped to
+`scholarmomentsearch` (`fly tokens create deploy -a scholarmomentsearch -x
+999999h`, piped directly into `gh secret set`, never echoed to this
+transcript) and confirmed via `gh secret list` (name + rotation timestamp
+only, never the value).
+
+**Provisioned for real**: `fly secrets import` from `.env` (all `[A-Z_]+=`
+lines except `FLY_*`, confirmed `.env` itself is gitignored first); `fly
+storage create` provisioned a real Tigris bucket (`bold-mountain-9179`) and
+auto-injected its `AWS_*`/`BUCKET_NAME` credentials; `fly secrets set
+STORAGE_PROVIDER=flyio` overrides `.env`'s `local`-mode value for
+production. `REDIS_URL` is unset on Fly (not in `.env` at all locally
+either) — caching disables itself per component 19's fail-open design, not a
+gap. `fly config validate` — Configuration is valid.
+
+**Not yet done**: the actual first `flyctl deploy` — that happens via the
+now-correctly-gated CI/CD pipeline once this commit reaches `origin/main`.
+
+**Commit**: `1e95879` — `fly.toml`, `DESIGN.md`.
