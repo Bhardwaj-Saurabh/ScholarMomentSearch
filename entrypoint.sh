@@ -8,6 +8,11 @@
 # container start (as root, before dropping to appuser), is what actually
 # persists — build-time chown alone does not. Idempotent and cheap on an
 # already-correct, warm cache.
+#
+# fly.toml has no [mounts] today, so on Fly both paths are already
+# image-baked and appuser-owned from the build-time chown — these two lines
+# are a no-op there. They matter for docker-compose's hf_cache volume (and
+# any future Fly volume) and for STORAGE_PROVIDER=local's ./data bind mount.
 set -e
 chown -R appuser:appuser /home/appuser/.cache 2>/dev/null || true
 [ -d /app/data ] && chown -R appuser:appuser /app/data 2>/dev/null || true
