@@ -5438,3 +5438,92 @@ gap. `fly config validate` — Configuration is valid.
 now-correctly-gated CI/CD pipeline once this commit reaches `origin/main`.
 
 **Commit**: `1e95879` — `fly.toml`, `DESIGN.md`.
+
+---
+
+### 2026-07-30 — First-ever live deploy: three real production incidents, all found and fixed live
+
+Pushed `9635364..b68f031` to `origin/main`. **CI passed** (`gh run view
+30545193149` → `success`), triggering the now-correctly-gated `Fly Deploy`
+workflow. What followed was a genuine, multi-round incident sequence — each
+fix verified against the real, deployed app, not asserted from reasoning.
+
+**Incident 1 — stale `storage_key`s from a provider switch (blocks
+`release_command`).** The very first deploy attempt (`run 30542083336`)
+timed out after 5 minutes waiting on `release_command`; `fly logs` showed
+`botocore.exceptions.ClientError: 404 HeadObject Not Found`. Root cause:
+`.env`'s `DATABASE_URL` (imported verbatim into Fly secrets, since local dev
+and this deploy share one Neon instance) had 16 `doc_seed_*` rows from
+**local dev's `STORAGE_PROVIDER=local` history**, each with a `storage_key`
+like `docs/default/doc_seed_clip_deck.pdf` — a path that only ever existed
+on local disk. `src/ingest/doc_pipeline.py::t_fetch` always prefers an
+existing `storage_key` over re-downloading from `uri`, so every re-index
+attempt 404'd against the brand-new Tigris bucket instead of falling back to
+the public URL. Verified directly against Postgres
+(`select id, status, storage_key from ms_documents where id like
+'doc_seed_%'` — all 16 showed the local-only path). Fixed by clearing
+`storage_key` to NULL for all 16 rows, forcing a fresh fetch+upload against
+the real bucket.
+
+**Incident 2 — the local `docker compose` worker actively corrupting corpus
+state mid-diagnosis.** While re-checking row state, statuses kept changing
+between queries with the worker stopped-and-apparently-not-running — traced
+to `docker compose start worker` (restarted earlier in this session, for an
+unrelated reason) sharing the exact same Prefect Cloud queue and Neon
+Postgres as the Fly deploy. It silently regressed 2 already-`indexed` rows
+(`doc_seed_react_paper`, `doc_seed_lora_paper`) back to `failed` mid-session
+— the same "Prefect Cloud retains its own scheduled-run queue" confound
+already disclosed in this file's 2026-07-29 entry, now observed corrupting a
+*production* deploy attempt, not just a benchmark run. `docker compose stop
+worker` (kept stopped this time) ended the interference; both rows were
+re-indexed directly (`ingest_document(...)` called locally against the real
+Tigris/Postgres/Qdrant, bypassing Fly entirely for a faster iteration loop).
+
+**Incident 3 — three separate OOM-kill loops, one per machine role, found
+and fixed one at a time.** Each only became visible once the prior blocker
+cleared:
+  - `release_command` (no dedicated `[[vm]]` block, uses Fly's small
+    default): `fly logs` — `oom_killed=true`, exit 137. Fixed with
+    `flyctl deploy --vm-memory 4096` (verified: without it, a fully
+    pre-seeded corpus with **zero** real ingest work still OOM'd on
+    model-loading overhead alone; the flag alone, confirmed by two more
+    direct `fly deploy` runs, is what fixed it — not the pre-seeding).
+  - `clip` (fly.toml's own `[[vm]]`, originally `2gb`): `fly machine status`
+    showed repeated `oom_killed=true` restart-loop events. Bumped to `4gb`.
+  - `api` (originally `512mb`): OOM'd under a real `/api/ask` query —
+    `fly logs`: `Out of memory: Killed process ... (uvicorn) total-vm:1698100kB,
+    anon-rss:388784kB`. Bumped to `1gb`.
+
+All three were root-caused from real `fly logs`/`fly machine status` output,
+not guessed — the original `512mb`/`2gb` estimates simply didn't account for
+the combined transformers/torch/ONNX import surface at runtime.
+
+**Final live verification** (after all three fixes, one more `fly deploy`):
+
+    fly machines list -a scholarmomentsearch
+    api   started 1/1 checks   shared-cpu-1x:1024MB
+    clip  started              shared-cpu-2x:4096MB
+    worker started              shared-cpu-2x:2048MB
+
+    curl -s https://scholarmomentsearch.fly.dev/api/health
+    {"ok":true,"postgres":true,"qdrant":true}
+
+    curl -s -X POST https://scholarmomentsearch.fly.dev/api/ask \
+      -d '{"question":"What is attention in transformers?"}'
+    HTTP_STATUS:200 — real citations from BOTH a video (yt_eMlx5fFNoYc,
+    "Attention in transformers, step-by-step") AND a deck
+    (doc_seed_attention_deck, "UIUC ECE537 Lecture 23"), real deeplinks
+    (youtu.be/...?t=...), a real presigned Tigris thumbnail URL, real scores
+    — the assignment's core deliverable, live, on the actual deployed app.
+
+**Disclosed, not fixed tonight**: `fly logs` also showed the Prefect Cloud
+backlog itself is live in production now (`"200 scheduled runs skipped (at
+capacity)"`, `ValueError('no manifest row for doc_7fb6b9567d')` — ghost runs
+targeting rows that no longer exist), consuming real worker cycles. This is
+the same operational gap the 2026-07-29 entry already named as unscoped
+follow-up work (a Prefect-run cleanup on tenant/row deletion); it did not
+block this deploy but should be addressed before relying on
+`ingest_throughput`-sensitive measurements against this app.
+
+**Commit**: pending — `fly.toml` (api/clip memory), `.github/workflows/fly-deploy.yml`
+(`--vm-memory 4096` for release_command).

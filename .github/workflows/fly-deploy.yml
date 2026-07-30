@@ -12,6 +12,13 @@
 #
 # On each push the release_command in fly.toml runs the sample seed gate first;
 # if it fails the deploy aborts and the previous version keeps serving.
+#
+# --vm-memory 4096: the release_command machine has no [[vm]] block of its
+# own (unlike api/worker/clip), so it falls back to Fly's small default —
+# too little for CLIP_SERVICE_URL='' in-process embedding, confirmed live as
+# a real OOM-kill loop (exit_code=137) on the first-ever deploy before this
+# flag was added. This only sizes the one-shot release machine; the
+# persistent process groups keep their own fly.toml [[vm]] memory.
 name: Fly Deploy
 on:
   workflow_run:
@@ -35,6 +42,6 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl deploy --remote-only
+      - run: flyctl deploy --remote-only --vm-memory 4096
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

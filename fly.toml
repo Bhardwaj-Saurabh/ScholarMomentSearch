@@ -80,7 +80,11 @@ primary_region = 'iad'
 
 [[vm]]
   size = 'shared-cpu-1x'
-  memory = '512mb'        # embedding happens in the clip service, api stays thin
+  # Bumped from 512mb: the live deploy's api machine was OOM-killed under a
+  # real /api/ask query (uvicorn total-vm 1.7GB, anon-rss 388MB — the
+  # transformers/torch import surface alone leaves little headroom at 512mb,
+  # even though embedding itself runs in the clip service).
+  memory = '1gb'
   processes = ['api']
 
 [[vm]]
@@ -92,5 +96,8 @@ primary_region = 'iad'
 
 [[vm]]
   size = 'shared-cpu-2x'
-  memory = '2gb'          # the one warm CLIP model (~1.5gb loaded)
+  # Bumped from 2gb: the live deploy's clip machine was being OOM-killed
+  # in a restart loop (exit_code=137, oom_killed=true) under real load —
+  # CLIP + bge + PyTorch/ONNX overhead together exceed the original estimate.
+  memory = '4gb'
   processes = ['clip']
