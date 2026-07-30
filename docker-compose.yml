@@ -6,6 +6,12 @@
 #   Run/queue view:  https://app.prefect.cloud -> Runs
 # Vector store is Qdrant Cloud via QDRANT_URL in .env. To run a local Qdrant
 # instead, add a qdrant service here and blank QDRANT_URL.
+#
+# Component 28: application code runs as non-root appuser (uid 1000), never
+# root — entrypoint.sh chowns the actual mount points (hf_cache, ./data if
+# STORAGE_PROVIDER=local) at container start, since that's the only point a
+# fresh volume/bind-mount's ownership can be fixed, then drops privilege
+# before exec'ing the real command. No manual host-side chmod needed.
 services:
   # Cache (DESIGN.md §3d, components 19-22). redis-stack-server (not vanilla
   # redis) because component 22's semantic answer cache needs RediSearch's
@@ -25,7 +31,7 @@ services:
     command: uvicorn src.clip_service:app --host 0.0.0.0 --port 8001
     env_file: .env
     volumes:
-      - hf_cache:/root/.cache     # model weights cached across restarts
+      - hf_cache:/home/appuser/.cache     # model weights cached across restarts (Dockerfile's non-root appuser)
     restart: unless-stopped
     # Overrides the Dockerfile's default HEALTHCHECK (which targets the api
     # role's :8000/api/health) with this role's own existing /healthz.
@@ -52,7 +58,7 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     volumes:
       - ./data:/app/data
-      - hf_cache:/root/.cache
+      - hf_cache:/home/appuser/.cache
     depends_on:
       - clip
       - redis
@@ -72,7 +78,7 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     volumes:
       - ./data:/app/data          # STORAGE_PROVIDER=local only (dev)
-      - hf_cache:/root/.cache
+      - hf_cache:/home/appuser/.cache
     depends_on:
       clip:
         condition: service_started
@@ -106,7 +112,7 @@ services:
       WORKER_CONCURRENCY: 2
     volumes:
       - ./data:/app/data
-      - hf_cache:/root/.cache
+      - hf_cache:/home/appuser/.cache
     depends_on:
       clip:
         condition: service_started

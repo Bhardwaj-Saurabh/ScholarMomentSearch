@@ -28,7 +28,12 @@ jobs:
       github.event.workflow_run.conclusion == 'success'
     concurrency: deploy-group    # only one deploy at a time
     steps:
+      # Pin the exact commit CI validated — without a ref, checkout defaults
+      # to main's current tip, which can drift ahead if another push lands
+      # while this workflow_run event is in flight (spec-guardian finding).
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - run: flyctl deploy --remote-only
         env:

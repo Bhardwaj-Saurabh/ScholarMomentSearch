@@ -31,11 +31,20 @@ def test_dockerfile_has_a_healthcheck_instruction():
     assert "/api/health" in text
 
 
-def test_dockerfile_runs_as_non_root_user():
-    text = (ROOT / "Dockerfile").read_text()
-    lines = [l.strip() for l in text.splitlines() if l.strip().startswith("USER ")]
-    assert lines, "Dockerfile must switch to a non-root USER before CMD"
-    assert lines[-1] != "USER root"
+def test_dockerfile_drops_to_a_non_root_user_via_entrypoint():
+    """Not a static `USER appuser` line: a live docker-build smoke test caught
+    that mounting hf_cache/./data at container START overwrites whatever a
+    build-time `chown`/`USER` did, silently handing the mount back to root.
+    entrypoint.sh fixes ownership at start, then drops to appuser via
+    `runuser` before exec'ing the real command — verified live (EVIDENCE.md),
+    not just parsed here."""
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    assert "ENTRYPOINT" in dockerfile
+    assert "USER root" not in dockerfile  # never an explicit root pin
+
+    entrypoint = (ROOT / "entrypoint.sh").read_text()
+    assert "runuser -u appuser" in entrypoint or "gosu appuser" in entrypoint
+    assert "chown" in entrypoint
 
 
 def test_compose_api_service_has_a_healthcheck():

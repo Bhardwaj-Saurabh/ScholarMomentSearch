@@ -5288,9 +5288,98 @@ explicit confirmation before pushing to `main` (this repo's deploy pipeline
 now fires automatically off a green CI run on `main`, so the push itself is
 the deploy trigger).
 
-**Commit**: pending — `src/health.py`, `src/api/search.py`, `src/config.py`,
-`fly.toml`, `Dockerfile`, `docker-compose.yml`, `.github/workflows/ci.yml`
-(new), `.github/workflows/fly-deploy.yml`, `tests/conftest.py`,
-`tests/test_health.py` (new), `tests/test_deploy_config.py` (new),
-`tests/test_ci_isolation.py` (new), `tests/test_seeding.py`, plus the 5
-ruff --fix files above.
+**Commit**: `8ebca84` (initial). `spec-guardian` review of that commit
+returned **FAIL** with a real HIGH finding, fixed in a follow-up before push
+— see below.
+
+---
+
+### 2026-07-30 — spec-guardian FAIL on components 28/41, fixed with a live docker build (not just re-reading the diff)
+
+`spec-guardian` reviewed commit `8ebca84` and, rather than trusting the
+Dockerfile's own comment, **built the image and ran it** — catching that the
+comment was simply wrong:
+
+**HIGH**: `useradd --no-create-home` + `chown -R appuser:appuser /app` does
+not make `/root/.cache` (where `docker-compose.yml` mounted `hf_cache`)
+writable by `appuser` — that path is never touched by the chown, and
+`--no-create-home` means `/home/appuser` doesn't exist either. Reproduced
+live:
+
+    uid=1000(appuser) ...
+    mkdir: cannot create directory '/root': Permission denied
+    mkdir: cannot create directory '/home/appuser': Permission denied
+
+This would have broken the CLIP model's cache path and, on Fly, the
+`release_command` seed gate — i.e. it risked breaking the exact deploy
+component 28 exists to enable, undetected by `test_dockerfile_runs_as_non_root_user`,
+which only grepped for a `USER` line rather than building anything.
+
+**Fix, verified with real builds/runs at each step (not re-asserted from
+memory):**
+
+    docker build -t momentsearch-test:latest .   # after useradd --create-home + ENV HOME=/home/appuser
+    docker run --rm momentsearch-test:latest python3 -c "..."
+    -> uid: 1000  HOME: /home/appuser  home exists+writable: True True
+
+That closed the build-time half of the bug. A second, live probe with an
+actual **mounted volume** (not just the image's own filesystem) found a
+SECOND layer of the same problem — a fresh named volume is root-owned at
+mount time regardless of what build-time `chown` did:
+
+    docker volume create hf_cache_test
+    docker run --rm -v hf_cache_test:/home/appuser/.cache momentsearch-test:latest python3 -c "..."
+    -> PermissionError: [Errno 13] Permission denied: '/home/appuser/.cache/huggingface_probe'
+
+Fixed with `entrypoint.sh` (new): starts as root, `chown -R appuser:appuser`
+on the actual mount points (`/home/appuser/.cache`, `/app/data` if present),
+then `exec runuser -u appuser -- "$@"` — application code still never runs as
+root, but the fix lives where mount ownership can actually be corrected
+(container start), not where it can't (image build). Re-verified against
+BOTH failure modes that were live-reproduced above:
+
+    docker run --rm -v hf_cache_test2:/home/appuser/.cache momentsearch-test:latest python3 -c "..."
+    -> running as uid: 1000 / volume-mounted cache write OK: ok
+    docker run --rm -v /tmp/data_probe:/app/data momentsearch-test:latest python3 -c "..."
+    -> running as uid: 1000 / bind-mount data write OK: ok
+
+Then the real stack, not a synthetic probe — `docker compose up -d --build`
+against this session's actual running local dev containers:
+
+    docker ps --format "table {{.Names}}\t{{.Status}}"
+    assignment_3_moment_search_scaled-api-1      Up 13 seconds (healthy)
+    assignment_3_moment_search_scaled-clip-1     Up 52 seconds (healthy)
+    docker inspect assignment_3_moment_search_scaled-seed-1 --format '{{.State.ExitCode}}'
+    0
+    curl -s http://localhost:8000/api/health
+    {"ok":true,"postgres":true,"qdrant":true}
+    curl -s http://localhost:8001/healthz
+    {"ok":true,"model":"clip-ViT-B-32","dim":512}
+
+Both Docker's own HEALTHCHECK (`(healthy)`, not just a text grep) and a real
+`/api/health` request confirm the fix live, against the real Postgres/Qdrant
+this dev stack uses.
+
+**MEDIUM (also fixed)**: `.github/workflows/fly-deploy.yml`'s `workflow_run`
+trigger checked out `main`'s current tip with no `ref:`, so a second push
+landing while a first push's CI run was in flight could deploy a *different*
+commit than the one CI actually gated. Fixed: `ref:
+${{ github.event.workflow_run.head_sha || github.sha }}` (the `|| github.sha`
+fallback covers the `workflow_dispatch` manual-trigger path, which has no
+`workflow_run` context).
+
+**Also updated**: `tests/test_deploy_config.py`'s non-root-user test no
+longer greps for a static `USER` line (structurally impossible now — the
+image starts as root by design, on purpose, so `entrypoint.sh` can fix mount
+ownership) — it instead asserts the `ENTRYPOINT`/`runuser`/`chown` mechanism
+exists in the two files, with the real proof being the live builds above, not
+the unit test.
+
+**Full suite, post-fix** (local disposable Qdrant, matching CI):
+
+    QDRANT_URL=http://localhost:16333 uv run pytest tests/ -q
+    627 passed, 9 warnings in 62.58s (0:01:02)
+
+**Commit**: pending — `Dockerfile`, `entrypoint.sh` (new),
+`docker-compose.yml`, `.github/workflows/fly-deploy.yml`,
+`tests/test_deploy_config.py`.
