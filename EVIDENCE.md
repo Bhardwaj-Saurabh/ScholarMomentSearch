@@ -5527,3 +5527,35 @@ block this deploy but should be addressed before relying on
 
 **Commit**: pending — `fly.toml` (api/clip memory), `.github/workflows/fly-deploy.yml`
 (`--vm-memory 4096` for release_command).
+
+---
+
+### 2026-07-30 — Auth0 secrets silently dropped from the Fly bootstrap (regex bug)
+
+User noticed the live app shows the admin-token box with no "Sign in" button,
+despite component 43 (Auth0) being built. Root cause: the `fly secrets
+import` command run during the bootstrap filtered `.env` with `grep -E
+'^[A-Z_]+=.+'` — a regex that only matches `[A-Z_]`, excluding any key
+containing a **digit**. `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, `AUTH0_AUDIENCE`,
+and `YT_COOKIES_B64` all have a digit (`AUTH0` contains `0`) and were
+silently dropped — confirmed by diffing `.env`'s keys against `fly secrets
+list`'s actual names.
+
+The UI itself was never broken: `adminTokenBoxVisible()` / the Sign-in
+button toggle both read `auth0.enabled` from `/api/config`, which correctly
+reported `false` because the secrets genuinely weren't set — working
+exactly as designed for the `AUTH0_* unset` case.
+
+Fixed: `grep -E '^(AUTH0_DOMAIN|AUTH0_CLIENT_ID|AUTH0_AUDIENCE|YT_COOKIES_B64)=' .env
+| fly secrets import` — applied live via Fly's rolling update (all machines
+confirmed healthy afterward). Verified:
+
+    curl -s https://scholarmomentsearch.fly.dev/api/config
+    "auth0": {"enabled": true, "domain": "dev-kjy65jz0w6efs24i.us.auth0.com", ...}
+
+`audience` is still the literal string `https://momentsearch/api` (a
+pre-existing Auth0 API-identifier value configured on the Auth0 dashboard
+side, not a hostname) — left unchanged since it's an opaque identifier, not
+something that needs to match the renamed Fly app.
+
+**Commit**: none — this was a live secrets fix, no code/config file changed.
