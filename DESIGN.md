@@ -643,6 +643,60 @@ Primary eval:
   manually delete its vectors while leaving the Postgres row `indexed`, restart
   the seed step, confirm it is rebuilt rather than skipped.
 
+### 3k. SLA root-cause fixes: Prefect round-trip waste + orphaned scheduled runs (added 2026-07-31, DECIDED — own scope)
+
+Found while investigating the two red rows component 29 was scoped to re-measure
+in-region (`accept_latency_p95_ms`, `ingest_throughput_chunks_per_s`). The
+in-region re-measure is still the primary lever for both — but decomposing the
+actual timings (isolated per-call measurements this session, EVIDENCE.md
+2026-07-31) turned up two real, fixable code gaps sitting underneath the network
+story, not just RTT.
+
+**Accept latency.** `src/jobs.py`'s `enqueue_video`/`enqueue_document` call
+Prefect's `run_deployment(name="flow/deployment", ...)`. Outside a flow/task
+context (which is exactly the API request-handler's situation) Prefect's own
+`get_or_create_client` has nothing to reuse, so `run_deployment` opens a fresh
+client and calls `read_deployment_by_name()` — a full network round trip to
+resolve a name to a UUID that **never changes across the process's lifetime** —
+on every single accept, before it can even create the flow run. Measured in
+isolation this session: ~299ms for that lookup alone, on top of ~341ms for the
+actual `create_flow_run_from_deployment` call. The lookup is pure waste;
+caching the deployment id once removes a full round trip unconditionally,
+regardless of network location.
+
+**Ingest throughput.** `src/db.py:delete_document()` deletes the Postgres row
+and does additive graph cleanup, but never cancels the document's already-
+scheduled Prefect flow run. This session's own repeated `bench.py`/
+`--resilience` cycles left a ~6,300-run stale Prefect Cloud scheduled backlog
+(manually purged this session, EVIDENCE.md 2026-07-30) that starved the worker
+and produced `ingest_throughput_chunks_per_s: 0.0`. The backlog is cleared for
+now, but the gap that let it accumulate is still open — any further round of
+repeated test cycles, or a real tenant deleting documents, regrows it the same
+way.
+
+Neither fix touches a protected file (`src/jobs.py` and `src/db.py` may both be
+extended additively per CLAUDE.md §5) and neither changes `benchmark/sla.json`.
+
+| # | Component | File | Notes |
+|---|-----------|------|-------|
+| 52 | Prefect deployment-id caching | `src/jobs.py` | Resolve each deployment's id once (module-level cache, populated on first use via `client.read_deployment_by_name()`), then create flow runs with `client.create_flow_run_from_deployment(deployment_id, ...)` directly instead of the by-name `run_deployment()` helper. Saves one full Prefect Cloud round trip per `/admin/documents` and `/admin/videos` accept. A stale cached id (deployment re-registered under a new id) fails the create call — falls back to one re-resolve-and-retry, not a crash. |
+| 53 | Cancel Prefect flow run on document delete | `src/db.py` | `delete_document()` reads the row's stored `flow_run_id` (already captured at registration via `set_document_flow_run_id`, `src/api/admin.py:112`) before deleting, then best-effort cancels that flow run via the Prefect client. Wrapped the same way the existing graph cleanup is — a cancellation failure (run already terminal, Prefect unreachable) must never turn a successful delete into an error. |
+
+Primary eval:
+- **52** — unit: two successive `enqueue_document`/`enqueue_video` calls resolve
+  the deployment id via the Prefect client mock exactly once, not twice; a
+  create-call failure against a stale cached id triggers exactly one
+  re-resolve-and-retry rather than a crash. Live: repeat the isolated per-call
+  timing measurement from this session and confirm the deployment-lookup round
+  trip no longer appears per accept.
+- **53** — unit: deleting a document with a stored `flow_run_id` calls the
+  Prefect client's cancel with that id; a cancellation failure (mocked
+  exception) still lets the Postgres delete complete; a document with no
+  `flow_run_id` (failed before scheduling) deletes cleanly with no cancel
+  attempt. Live: register a document, delete it immediately, confirm via the
+  Prefect API that its flow run reaches a cancelled/terminal state rather than
+  staying scheduled.
+
 ## 4. Corpus & scale plan (right-sized — DECIDED)
 
 The product ships **pre-built with the 8 curated triplets** in `benchmark/corpus.json`
