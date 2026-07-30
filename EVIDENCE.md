@@ -5559,3 +5559,60 @@ side, not a hostname) — left unchanged since it's an opaque identifier, not
 something that needs to match the renamed Fly app.
 
 **Commit**: none — this was a live secrets fix, no code/config file changed.
+
+---
+
+### 2026-07-30 — Fresh re-verification for the README checklist: one real regression-at-the-edge, one confirmed environmental confound
+
+Re-ran the SLA/resilience gates live rather than reuse yesterday's numbers, to
+back README checklist checkmarks with current evidence (E4). Full local
+stack (`docker compose up -d`, `BASE_URL=http://localhost:8000` — bench.py's
+own default of `:8100` doesn't match this compose file's port mapping and
+silently produces `HTTP 0` on every request if unset).
+
+    python benchmark/bench.py
+    [FAIL] accept_latency_p95_ms: 2375.3 (target 300)      — pre-existing, root-caused (Neon+Prefect RTT from a laptop)
+    [PASS] search_p95_during_ingest_ratio: 0.84 (target 1.3)
+    [FAIL] recall_at_10: 0.698 (target 0.7)                  — was 0.771 on 2026-07-29
+    [FAIL] ingest_throughput_chunks_per_s: 0.0 (target 8)
+
+**`recall_at_10` dropped from 0.771 to 0.698** — a real, current number, not
+carried over. Right at the edge (1 query out of 16 flipping accounts for
+0.0625) so this reads as query-set sample noise rather than a code
+regression — nothing retrieval-related changed in this session (only
+deploy/CI infra) — but it is NOT re-verified as passing, so the README
+checklist does not claim it.
+
+**`bench.py --resilience` also failed twice, root-caused, not swept under
+the rug:**
+- First attempt: killed `worker-1`, but that container had already been
+  killed by an EARLIER resilience attempt this session and was never
+  removed (`docker compose up -d worker` left it in `Exited` state rather
+  than replacing it) — so the "kill" was a no-op on an already-dead
+  container, and nothing was actually being tested.
+- Second attempt (`--scale worker=2`): confirmed a genuinely live second
+  replica (`worker-2`) the whole time, yet ingestion still never completed.
+  `docker logs worker-2` showed why: `"200 scheduled runs skipped (at
+  capacity)"`, repeated continuously — the exact Prefect Cloud stale-run
+  backlog already disclosed in the 2026-07-29 entry, now bad enough (from
+  this session's own many repeated `bench.py` invocations across several
+  hours) to starve a fresh resilience test of any real worker capacity at
+  all. The reconciler is doing its job (`[reconcile] doc_XXX stuck in
+  'pending' ... restarting`) — there's simply no free concurrency slot for
+  the restarted runs to land on.
+
+**Disclosed, not fixed**: this is the same environmental confound named as
+unscoped follow-up work on 2026-07-29 (no cleanup path for `bench.py`'s own
+throwaway tenants / their scheduled Prefect runs). It now actively blocks
+clean resilience/throughput measurement in this long-running dev session.
+Recommended fix (not built): purge scheduled runs for ephemeral/`bench-*`
+tenants on cleanup, or have the reconciler deprioritize them.
+
+**What this means for the README checklist**: "No loss" (resilience) and
+"Cross-source recall@10 ≥ 0.70" are left **unchecked** — neither is
+currently, cleanly re-verified passing, and this project's own EDD
+discipline (E4/E5) doesn't allow checking a box on a stale or fabricated
+number. Every other item was independently re-verified before being marked
+done (see README.md's own checklist for what's backed by what).
+
+**Commit**: pending — this entry, plus README.md checklist updates.

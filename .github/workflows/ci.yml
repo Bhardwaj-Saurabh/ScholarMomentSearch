@@ -15,8 +15,10 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: ['**/*.md']   # docs-only pushes must not trigger CI (or, transitively, a deploy)
   pull_request:
     branches: [main]
+    paths-ignore: ['**/*.md']
 
 jobs:
   test:

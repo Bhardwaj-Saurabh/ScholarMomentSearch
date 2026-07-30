@@ -78,3 +78,15 @@ def test_ci_workflow_exists_and_runs_pytest_on_main():
     steps_text = yaml.dump(data)
     assert "pytest" in steps_text
     assert "ruff" in steps_text
+
+
+def test_ci_skips_docs_only_pushes():
+    """A README/EVIDENCE.md-only push must not run CI — and, since fly-deploy.yml
+    triggers off CI's completion, must not deploy either."""
+    data = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    on_block = data.get("on", data.get(True))
+    for trigger in ("push", "pull_request"):
+        ignored = on_block[trigger].get("paths-ignore", [])
+        assert any(p.endswith("*.md") for p in ignored), (
+            f"{trigger} trigger must paths-ignore markdown-only changes"
+        )

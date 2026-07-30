@@ -302,28 +302,40 @@ python benchmark/bench.py --json out.json # machine-readable
 
 ## Requirements checklist
 
-- [ ] **Two new source types** — `POST /admin/documents` ingests **papers (PDF)** and
+> Checked items are backed by a real run in `EVIDENCE.md`, not inspection. Two
+> items are deliberately left unchecked below — see the notes.
+
+- [x] **Two new source types** — `POST /admin/documents` ingests **papers (PDF)** and
       **decks (PDF/PPTX)** through the queue, async, returning `202`.
-- [ ] **One shared index** — papers, decks, and videos land in the **same** Qdrant
-      collection and are retrieved together for a single query.
-- [ ] **Real locators** — paper citations carry a `page`, deck citations a `slide`,
+- [x] **One shared index** — papers, decks, and videos land in the **same** Qdrant
+      collection and are retrieved together for a single query. Verified live on the
+      deployed app: one query returned a video citation and a deck citation together.
+- [x] **Real locators** — paper citations carry a `page`, deck citations a `slide`,
       video citations a timestamp; the UI jumps to each.
-- [ ] **Queue understood & extended** — new flows run on the existing Prefect queue
-      with the same status lifecycle and per-task retries; you can explain in your
-      writeup *why* the queue is there and what a run/retry looked like.
-- [ ] **Decoupled** — a search issued during a large document ingest still meets the
-      search-latency SLA.
-- [ ] **No loss** — worker killed mid-ingest drops nothing; runs resume without
-      redoing finished stages (`--resilience` passes).
-- [ ] **Grounded** — every cited page/slide/moment came from retrieval; empty
-      retrieval returns empty, never a fabricated citation.
-- [ ] **Runs with one command** — `docker compose up` brings up API + worker;
-      secrets from `.env`, never committed.
-- [ ] **Deployed** — the app runs on Fly.io from the one image (like the base repo);
-      the public UI answers cross-source.
-- [ ] **Contract preserved** — the provided video endpoints and UI still work.
-- [ ] **Product evaluation** — a `PRODUCT_EVAL.md` (or PDF) from the eval skill, with
-      a live cross-source query on real media you don't control, submitted with your video.
+- [x] **Queue understood & extended** — new flows run on the existing Prefect queue
+      with the same status lifecycle and per-task retries. The queue exists so
+      `/admin/documents` can return in <300ms while parsing/embedding happen off the
+      request path — a WFQ dispatcher round-robins claims across tenants so one
+      backfill can't starve another tenant's single upload.
+- [x] **Decoupled** — a search issued during a large document ingest still meets the
+      search-latency SLA. Live: `search_p95_during_ingest_ratio: 0.84` (target ≤ 1.3).
+- [ ] **No loss** — `bench.py --resilience` did **not** cleanly pass in this
+      session's final re-verification: this long dev session's own repeated
+      benchmark runs left a large stale Prefect Cloud scheduled-run backlog that
+      saturates the worker before new work gets a turn (`EVIDENCE.md`, 2026-07-30).
+      An environmental confound, not a code regression — the mechanism itself
+      (reconciler restarting stuck runs) is confirmed working in the logs — but
+      it isn't left checked on a number that didn't actually pass today.
+- [x] **Grounded** — every cited page/slide/moment came from retrieval; empty
+      retrieval abstains rather than fabricating a citation (component 36/49).
+- [x] **Runs with one command** — `docker compose up` brings up API + worker;
+      secrets from `.env`, never committed. Re-verified live this session.
+- [x] **Deployed** — the app runs on Fly.io from the one image; the public UI
+      answers cross-source. Live: https://scholarmomentsearch.fly.dev
+- [x] **Contract preserved** — the provided video endpoints and UI still work
+      unmodified (enforced by `spec-guardian` review on every component touching `src/`).
+- [ ] **Product evaluation** — `PRODUCT_EVAL.md` has not been generated yet; run
+      `/fde-momentsearch-scaled-eval` to produce it before submitting.
 
 ---
 
@@ -336,27 +348,33 @@ python benchmark/bench.py --json out.json # machine-readable
 > run the check.
 
 **Contract**
-- [ ] `POST /admin/documents` → `202` `{ id, status:"pending", kind }`, returns before parsing
-- [ ] `GET /admin/sources` returns unified video + document status with `kind` and `pct`
-- [ ] `/ask_stream` citations carry a kind-appropriate `locator` (`start_ms` | `page` | `slide`)
-- [ ] Provided video endpoints and the UI still work unmodified
-- [ ] Status codes: `400` bad input, `401` bad/missing admin token, `502` upstream failure
+- [x] `POST /admin/documents` → `202` `{ id, status:"pending", kind }`, returns before parsing
+- [x] `GET /admin/sources` returns unified video + document status with `kind` and `pct`
+- [x] `/ask_stream` citations carry a kind-appropriate `locator` (`start_ms` | `page` | `slide`)
+- [x] Provided video endpoints and the UI still work unmodified
+- [x] Status codes: `400` bad input, `401` bad/missing admin token, `502` upstream failure
 
 **Ingestion & queue (hard)**
-- [ ] Paper and deck ingest run as queue flows with the same status lifecycle as video
-- [ ] `/admin/documents` schedules a run and returns immediately — no parsing in the request path
-- [ ] A search during a large ingest still meets the search-latency SLA
+- [x] Paper and deck ingest run as queue flows with the same status lifecycle as video
+- [x] `/admin/documents` schedules a run and returns immediately — no parsing in the request path
+- [x] A search during a large ingest still meets the search-latency SLA — live: `search_p95_during_ingest_ratio: 0.84` (≤ 1.3)
 - [ ] Status/upsert ordering is crash-safe: `--resilience` passes with zero loss and no re-run of finished stages
+      — **not left checked**: today's fresh re-run failed on a stale Prefect Cloud
+      scheduled-run backlog (this dev session's own accumulated bench runs), not a
+      code defect — see `EVIDENCE.md` 2026-07-30 for the full root-cause.
 
 **Retrieval**
-- [ ] Papers, decks, and videos share ONE Qdrant collection and are retrieved together
-- [ ] Every `why`/citation cites something actually retrieved; **no invented pages or timestamps**
-- [ ] Cross-source recall@10 ≥ 0.70 on the labeled query set
+- [x] Papers, decks, and videos share ONE Qdrant collection and are retrieved together
+- [x] Every `why`/citation cites something actually retrieved; **no invented pages or timestamps**
+- [ ] Cross-source recall@10 ≥ 0.70 on the labeled query set — today's fresh
+      run measured `0.698` (was `0.771` the day before); right at the edge of a
+      16-query sample (one query = 0.0625), so read as sample noise rather than a
+      regression, but not left checked on an unpassing number.
 
 **Deploy & hygiene**
-- [ ] `docker compose up` runs the whole system with one command
-- [ ] Deployed to Fly.io from the single image; public UI answers cross-source
-- [ ] `.env`, `.venv/`, `__pycache__/`, model caches, and media/PDF artifacts are git-ignored and NOT committed
+- [x] `docker compose up` runs the whole system with one command
+- [x] Deployed to Fly.io from the single image; public UI answers cross-source — live at https://scholarmomentsearch.fly.dev
+- [x] `.env`, `.venv/`, `__pycache__/`, model caches, and media/PDF artifacts are git-ignored and NOT committed
 
 **Self-verify (run all; all must pass)**
 ```bash
