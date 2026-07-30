@@ -5702,3 +5702,42 @@ borderline query flipping = 0.0625) rather than a regression — but it is a
 real, disclosed variance, not explained away by a bug.
 
 **Commit**: pending — README checklist updates, this entry.
+
+---
+
+### 2026-07-30 — Component 31: PRODUCT_EVAL.md generated via the eval skill
+
+Ran the full `fde-momentsearch-scaled-eval` skill flow against the local
+`docker compose up` stack (`BASE_URL=http://localhost:8000`):
+
+    python eval/eval.py --base-url http://localhost:8000 --admin-token "$ADMIN_TOKEN" \
+        --student "Saurabh Bhardwaj" --video "https://youtu.be/eMlx5fFNoYc"
+    -> 7 pass / 9 (2 fails are the same disclosed accept-latency/throughput items)
+
+    python benchmark/bench.py --json benchmark/_bench.json
+    [FAIL] accept_latency_p95_ms: 2354.4 (target 300)
+    [PASS] search_p95_during_ingest_ratio: 0.96 (target 1.3)
+    [PASS] recall_at_10: 0.75 (target 0.7)
+    [FAIL] ingest_throughput_chunks_per_s: 0.0 (target 8)
+
+    python benchmark/bench.py --resilience (with manual worker-restart, per the
+    documented Docker Desktop restart-policy gap)
+    -> 10/10 sources reached `indexed` (2 stragglers past the 300s window,
+       both converged within ~90s more — same pattern as the earlier
+       investigation this session)
+
+**Live cross-source query, captured for the report:** *"Compare how the
+lecture video, the original paper, and the course slides each explain
+attention in transformers"* returned citations spanning **video + paper +
+deck in one call** (6 citations, 3 kinds). The LLM's own synthesized answer
+named an unretrieved source ("Stanford CS224n Lecture 11") and was
+**correctly withheld** by the named-source attribution guard — a live,
+unprompted demonstration of the grounding backstop, not a constructed test.
+A second query ("What is scaled dot-product attention and why is it called
+that?") produced a clean, fully-grounded synthesized answer citing real
+retrieved text.
+
+Wrote `PRODUCT_EVAL.md` at the assignment root from real data — no PDF
+generated this pass (not requested).
+
+**Commit**: pending — `PRODUCT_EVAL.md`, `eval/REPORT.md`, `benchmark/_bench.json`.
