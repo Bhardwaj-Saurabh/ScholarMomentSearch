@@ -194,7 +194,7 @@ deployed*:
    bare `urllib.request.urlopen(uri)`: no IP/host restrictions, redirects followed
    by default, no size cap, and `Content-Type` read only to *guess a file
    extension* rather than to reject non-documents. On Fly this reaches the private
-   6PN mesh (`clip.process.momentsearch.internal`), Redis, and cloud metadata
+   6PN mesh (`clip.process.scholarmomentsearch.internal`), Redis, and cloud metadata
    endpoints — and because the fetched body is embedded into the tenant's corpus,
    `/api/ask` becomes the read-back channel.
 

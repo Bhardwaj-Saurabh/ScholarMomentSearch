@@ -10,7 +10,7 @@
 # fly deploy --ha=false
 # fly scale count worker=2        # more ingest throughput, anytime
 
-app = 'momentsearch'
+app = 'scholarmomentsearch'
 primary_region = 'iad'
 
 [build]
@@ -34,7 +34,7 @@ primary_region = 'iad'
   # Fly private networking: <process>.process.<app>.internal resolves to the
   # clip machine. api + worker send embed batches there (one warm model);
   # clip_service itself ignores this and always runs the model locally.
-  CLIP_SERVICE_URL = 'http://clip.process.momentsearch.internal:8001'
+  CLIP_SERVICE_URL = 'http://clip.process.scholarmomentsearch.internal:8001'
   # DESIGN.md §3e component 25. Anything outside the dev allowlist makes the
   # auth layer fail CLOSED (503) when ADMIN_TOKEN is missing, instead of the
   # inherited behavior of quietly serving every mutating route to anyone.
