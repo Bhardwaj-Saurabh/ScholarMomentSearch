@@ -17,7 +17,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, Field, StringConstraints
 
-from .. import config, db, llm, prompts, storage
+from .. import config, db, health, llm, prompts, storage
 from ..rag import search as rag_search
 from .videos import require_auth, user_id as user_id_dep
 
@@ -38,8 +38,8 @@ def _uid(value: str | None) -> str:
 # ── Meta ─────────────────────────────────────────────────────────────────────
 
 @router.get("/api/health")
-def health():
-    return {"ok": True}
+def get_health():
+    return health.check()
 
 
 @router.get("/api/config")

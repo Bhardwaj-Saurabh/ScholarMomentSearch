@@ -1,3 +1,6 @@
 # Test-only. Runtime deps (including pymupdf, used by src/ingest/paper.py at
 # runtime too) live in requirements.txt.
 pytest>=8.0
+pyyaml>=6.0
+# Component 41: CI's lint gate. Config pinned to E9+F only (see .github/workflows/ci.yml).
+ruff>=0.6

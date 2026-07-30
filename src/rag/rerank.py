@@ -16,7 +16,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
-from .. import config, tracing, tracing
+from .. import config, tracing
 
 
 @lru_cache

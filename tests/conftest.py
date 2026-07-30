@@ -18,6 +18,13 @@ os.environ.setdefault(
     "QDRANT_LOCAL_PATH",
     str(Path(tempfile.gettempdir()) / "momentsearch_test_qdrant"),
 )
+# Component 41: QDRANT_LOCAL_PATH alone isn't enough — vector_store.client()
+# prefers QDRANT_URL whenever it's set, and .env's real QDRANT_URL would
+# otherwise leak in via config.py's load_dotenv() (override=False just means
+# it won't clobber a value already present, and this one wasn't). Force it
+# empty here, before src.config is ever imported, so tests always fall back
+# to the embedded QDRANT_LOCAL_PATH instance.
+os.environ.setdefault("QDRANT_URL", "")
 os.environ.setdefault("ADMIN_TOKEN", "test-admin-token")
 
 

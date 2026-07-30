@@ -5178,3 +5178,119 @@ skip `bench-*`/ephemeral tenants), separate from anything scoped tonight.
 
 **Commit**: pending — this entry only (no code changes from the bench run
 itself).
+
+---
+
+### 2026-07-30 — Components 28 + 41: real health check, CI/CD wiring, a live isolation-bug finding
+
+**Scope**: DESIGN.md §3e rows 28 ("Fly deploy + real health checks") and 41
+("CI pipeline + test-isolation fix"), both previously unbuilt (disclosed in
+ARCHITECTURE.md §9's shipped/not-yet-built table). Triggered by a request to
+deploy with CI/CD actually completed — Phase 0 security (23-27) was already
+verified done in code before this pass started.
+
+**RED (before implementation)** — 7 new tests in `tests/test_health.py`
+(module didn't exist), 6 in `tests/test_deploy_config.py`, 1 in
+`tests/test_ci_isolation.py`:
+
+    uv run pytest tests/test_health.py tests/test_deploy_config.py tests/test_ci_isolation.py -q
+    ERROR tests/test_health.py (ImportError: cannot import name 'health' from 'src')
+    FAILED tests/test_deploy_config.py::test_fly_toml_has_a_real_http_health_check
+    FAILED tests/test_deploy_config.py::test_dockerfile_has_a_healthcheck_instruction
+    FAILED tests/test_deploy_config.py::test_dockerfile_runs_as_non_root_user
+    FAILED tests/test_deploy_config.py::test_compose_api_service_has_a_healthcheck
+    FAILED tests/test_deploy_config.py::test_deploy_workflow_targets_a_real_branch
+    FAILED tests/test_deploy_config.py::test_ci_workflow_exists_and_runs_pytest_on_main
+    FAILED tests/test_ci_isolation.py::test_suite_never_points_at_a_real_qdrant_url
+    (7 failed, matching the audited gaps exactly)
+
+The isolation guard's failure was a **live, real finding, not a hypothetical**:
+`config.QDRANT_URL` resolved to the actual production Qdrant Cloud cluster
+URL from `.env` during a plain `pytest` run — `assert 'https://fd19...cloud.qdrant.io' == ''`.
+
+**Root cause**: `tests/conftest.py` set `QDRANT_LOCAL_PATH` via
+`os.environ.setdefault` but never touched `QDRANT_URL` itself.
+`src/config.py`'s unconditional `load_dotenv()` (override=False) populated
+`QDRANT_URL` from `.env` regardless, and `vector_store.client()` prefers
+`QDRANT_URL` over `QDRANT_LOCAL_PATH` whenever it's set — so every "real
+Qdrant" test, including the tenant-isolation regression test itself, was
+silently running against production.
+
+**IMPLEMENT**:
+- `src/health.py` (new) — `check()` pings Postgres (`SELECT 1`) and Qdrant
+  (`get_collections()`), each wrapped so an exception counts as unhealthy
+  rather than propagating; cached `HEALTH_CACHE_TTL_S=5s` (module-level,
+  per-process) so a tight probe interval can't turn health-checking into load.
+  `GET /api/health` always returns HTTP 200 (degraded, not crash — same
+  philosophy as component 33) with the real per-dependency status in the body.
+- `fly.toml` — `[[http_service.checks]]` against `/api/health`.
+- `Dockerfile` — `HEALTHCHECK` against the same endpoint; non-root `USER appuser`.
+- `docker-compose.yml` — explicit `healthcheck:` for `api` (same check) and
+  `clip` (its existing `/healthz`); disabled for `worker`/`seed`, which never
+  serve HTTP.
+- `.github/workflows/fly-deploy.yml` — trigger changed from `push: branches:
+  [dev]` (a branch that has never existed — this workflow had never once
+  run) to `workflow_run` off the new CI workflow's completion on `main`,
+  `if: conclusion == 'success'`, plus `workflow_dispatch` for a manual trigger.
+- `.github/workflows/ci.yml` (new) — lint (`ruff --select=E9,F`) + `pytest
+  tests/ -x -q` on push/PR to `main`, with real Postgres and Qdrant service
+  containers (not the embedded-Qdrant fallback — see below for why).
+- `tests/conftest.py` — `os.environ.setdefault("QDRANT_URL", "")`, closing
+  the isolation gap at its root.
+- `tests/test_ci_isolation.py` — guards against a real (non-loopback,
+  non-`cloud.qdrant.io`) `QDRANT_URL`, not literally "always empty" — CI's
+  disposable container is a legitimate exception (see next finding).
+
+**A second, downstream finding from fixing the first one**: forcing
+`QDRANT_URL=""` (embedded mode) made the full suite go from 614 passed / 0
+failed to **15 failed** — `uv run pytest tests/ -q` → `15 failed, 612 passed
+in 182.69s`. Investigated rather than reverted: 10 of the 15 (all of
+`test_hybrid_search.py`, plus real-Qdrant tests in `test_cross_source_search.py`,
+`test_doc_pipeline.py`, `test_security_authz.py`) need genuine server-mode
+Qdrant — payload indexes and sparse vectors have no effect in the embedded
+client (Qdrant's own warning: *"Payload indexes have no effect in the local
+Qdrant"*) — so they were only ever passing by accident, against production.
+Fix: a disposable local `qdrant/qdrant` container (started manually here at
+`localhost:16333` to verify; wired as a CI service container for real), not
+embedded mode. The other 5 (`tests/test_seeding.py`) needed a mocking gap
+closed: component 51 added a real Qdrant vector-count check inside
+`_not_indexed_videos`/`_not_indexed_documents`, but this file's mocked
+`ingest_video`/`ingest_document` never write real vectors, and it never
+mocked the count functions either — so it too was silently relying on
+leftover real data in production. Fixed with an autouse fixture stubbing
+`count_document_chunks`/`count_video_chunks` to a positive count, matching
+the file's own stated ORCHESTRATION-only scope (the vector-count check
+itself stays covered by `tests/test_seeding_integrity.py`).
+
+**GREEN**:
+
+    uv run ruff check --select=E9,F src/ tests/ benchmark/
+    All checks passed!
+
+    uv run pytest tests/test_health.py tests/test_deploy_config.py tests/test_ci_isolation.py -q
+    13 passed in 2.69s
+
+    QDRANT_URL=http://localhost:16333 uv run pytest tests/ -q
+    627 passed, 9 warnings in 63.00s (0:01:03)
+
+(627 vs the original 614 = +13 new tests, net of the 5 `ruff --fix`
+unused-import removals applied along the way with no behavior change:
+`benchmark/answer_quality.py`, `src/rag/rerank.py` (a literal duplicate
+`tracing` import), `tests/test_paper_ingest.py`, `tests/test_reconciler.py`,
+`tests/test_seeding.py`.)
+
+**Still red / disclosed**: `bench.py`'s SLA numbers from the prior entry
+(`accept_latency_p95_ms`, `ingest_throughput_chunks_per_s`) are unchanged by
+this pass — component 29's in-region re-measure, which this deploy directly
+unblocks, is the next real test of those. The actual `fly deploy` /
+first-ever-production-push has not run yet as of this entry — pending
+explicit confirmation before pushing to `main` (this repo's deploy pipeline
+now fires automatically off a green CI run on `main`, so the push itself is
+the deploy trigger).
+
+**Commit**: pending — `src/health.py`, `src/api/search.py`, `src/config.py`,
+`fly.toml`, `Dockerfile`, `docker-compose.yml`, `.github/workflows/ci.yml`
+(new), `.github/workflows/fly-deploy.yml`, `tests/conftest.py`,
+`tests/test_health.py` (new), `tests/test_deploy_config.py` (new),
+`tests/test_ci_isolation.py` (new), `tests/test_seeding.py`, plus the 5
+ruff --fix files above.

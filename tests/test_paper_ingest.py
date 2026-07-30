@@ -11,7 +11,6 @@ cross-source recall@10 once wired into the document flow (components 4 and 7).
 from __future__ import annotations
 
 import fitz
-import pytest
 
 from src.ingest import paper
 

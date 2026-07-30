@@ -13,7 +13,6 @@ not-indexed/idempotency logic — that IS what's being proven here.
 """
 from __future__ import annotations
 
-import uuid
 
 import pytest
 
@@ -23,6 +22,21 @@ from src import config, db, seeding
 @pytest.fixture(autouse=True)
 def _schema():
     db.init_schema()
+
+
+@pytest.fixture(autouse=True)
+def _assume_vectors_exist_once_indexed(monkeypatch):
+    """Component 51 added a real Qdrant vector-count check inside
+    _not_indexed_videos/_not_indexed_documents (src/seeding.py::_row_has_vectors).
+    This file mocks ingest_video/ingest_document at the status-flip level, per
+    its own docstring's ORCHESTRATION-only scope — no real vectors are ever
+    written here, so without this the vector-count check would (correctly,
+    but irrelevantly to what this file tests) treat every "indexed" row as
+    unconfirmed and this suite would depend on whatever real Qdrant backend
+    happens to be configured. The vector-count check itself is exercised in
+    tests/test_seeding_integrity.py."""
+    monkeypatch.setattr(seeding.vector_store, "count_document_chunks", lambda *a, **k: 1)
+    monkeypatch.setattr(seeding.vector_store, "count_video_chunks", lambda *a, **k: 1)
 
 
 @pytest.fixture

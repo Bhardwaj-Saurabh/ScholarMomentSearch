@@ -66,6 +66,17 @@ primary_region = 'iad'
   min_machines_running = 0
   processes = ['api']
 
+  # Component 28: GET /api/health now actually pings Postgres + Qdrant
+  # (src/health.py) and always answers 200 (degraded, not crash) — this check
+  # is a liveness probe on the process itself, not a dependency gate; the
+  # degradation detail lives in the response body for `fly checks list`.
+  [[http_service.checks]]
+    path = '/api/health'
+    method = 'GET'
+    interval = '15s'
+    timeout = '5s'
+    grace_period = '10s'
+
 [[vm]]
   size = 'shared-cpu-1x'
   memory = '512mb'        # embedding happens in the clip service, api stays thin

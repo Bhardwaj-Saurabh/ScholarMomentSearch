@@ -1,4 +1,9 @@
-# Continuous deployment to Fly.io on every push to dev.
+# Continuous deployment to Fly.io — gated behind CI (component 41), not a
+# raw push trigger. Previously this triggered on `push: branches: [dev]`, a
+# branch that has never existed in this repo, so the workflow had never run
+# even once; component 28 fixes that and ties the deploy to `main` explicitly
+# via the CI workflow's own completion, so a failing lint/test run can never
+# reach `flyctl deploy`.
 # See https://fly.io/docs/app-guides/continuous-deployment-with-github-actions/
 #
 # Setup (once): create a deploy token and add it as a repo secret named
@@ -9,13 +14,18 @@
 # if it fails the deploy aborts and the previous version keeps serving.
 name: Fly Deploy
 on:
-  push:
-    branches:
-      - dev
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch: {}
 jobs:
   deploy:
     name: Deploy app
     runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     concurrency: deploy-group    # only one deploy at a time
     steps:
       - uses: actions/checkout@v4

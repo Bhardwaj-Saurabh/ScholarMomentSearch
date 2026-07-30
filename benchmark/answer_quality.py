@@ -35,7 +35,7 @@ import os
 import sys
 import urllib.request
 
-from benchmark.bench import QUALITY, ROOT, _labeled_queries, _req
+from benchmark.bench import QUALITY, _labeled_queries, _req
 from src import injection
 
 _JUDGE_TIMEOUT_S = 60

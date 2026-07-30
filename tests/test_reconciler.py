@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import pytest
 
-from src import config, db, jobs, reconciler
+from src import db, jobs, reconciler
 
 
 @pytest.fixture(autouse=True)

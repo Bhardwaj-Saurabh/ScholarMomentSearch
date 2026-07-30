@@ -1,0 +1,70 @@
+# Component 41 (DESIGN.md §3e). Runs on every push to main and every PR
+# targeting it; fly-deploy.yml triggers off this workflow's *completion*
+# (workflow_run) rather than push directly, so a deploy can never ship code
+# that failed lint or tests.
+#
+# Real service containers, not conftest.py's embedded-Qdrant fallback: fixing
+# the isolation bug (QDRANT_URL leaking a real secret into tests, see
+# tests/test_ci_isolation.py) surfaced that several tests genuinely need
+# server-mode Qdrant — payload indexes and sparse vectors have no effect in
+# the embedded/on-disk client, so hybrid-search and cross-source tests were
+# only ever passing because they were silently hitting the PRODUCTION
+# cluster. QDRANT_URL below points at a disposable container instead — same
+# behavior, zero production access.
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Lint + test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: momentsearch_test
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      qdrant:
+        image: qdrant/qdrant:latest
+        ports:
+          - 16333:6333
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: |
+          uv pip install --system torch --index-url https://download.pytorch.org/whl/cpu
+          uv pip install --system -r requirements.txt -r requirements-dev.txt
+
+      # Deliberately narrow rule set (E9 syntax errors + F pyflakes) rather
+      # than ruff's full stylistic default — this CI's job is to gate the
+      # deploy on real bugs (undefined names, unused imports), not to impose
+      # an unrelated codebase-wide style migration as a side effect of
+      # shipping the deploy pipeline.
+      - name: Lint (ruff, E9+F only)
+        run: ruff check --select=E9,F src/ tests/ benchmark/
+
+      - name: Test
+        env:
+          ADMIN_TOKEN: test-admin-token
+          QDRANT_URL: http://localhost:16333
+        run: pytest tests/ -x -q

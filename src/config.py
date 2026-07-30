@@ -399,6 +399,11 @@ QDRANT_QUANTIZATION = _envbool("QDRANT_QUANTIZATION", True)
 QDRANT_ON_DISK = _envbool("QDRANT_ON_DISK", True)
 QDRANT_HNSW_ON_DISK = _envbool("QDRANT_HNSW_ON_DISK", True)
 
+# Component 28: how long GET /api/health caches its Postgres/Qdrant pings —
+# short enough to catch a real outage quickly, long enough that Fly's
+# repeated probe interval doesn't hammer either dependency on every hit.
+HEALTH_CACHE_TTL_S = _int("HEALTH_CACHE_TTL_S", 5)
+
 # --- Retrieval / faithfulness ------------------------------------------------------
 TOP_K = _int("TOP_K", 6)                 # frames fed to the multimodal LLM (3-8)
 KNN_K = _int("KNN_K", 24)                # candidates fetched before trimming to TOP_K

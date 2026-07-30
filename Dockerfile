@@ -26,5 +26,18 @@ COPY ui/ ui/
 # src/samples.py._load_corpus() reads this at runtime (seed gate, component 10)
 COPY benchmark/corpus.json benchmark/corpus.json
 
+# Component 28: don't run any of the four runnables as root. /app is owned by
+# the new user so writable paths under it (e.g. local-storage dev mode) still
+# work; the hf_cache/model-cache volume is mounted read-write by whichever
+# uid docker-compose gives it, which stays root:root on the host side.
+RUN useradd --no-create-home --uid 1000 appuser \
+ && chown -R appuser:appuser /app
+USER appuser
+
 EXPOSE 8000
+# Same convention as fly.toml's [[http_service.checks]] and docker-compose's
+# api healthcheck — all three point at src/health.py's real dependency check
+# via GET /api/health, not just "is the process alive."
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD python -c "import urllib.request as u; u.urlopen('http://localhost:8000/api/health', timeout=4)" || exit 1
 CMD ["uvicorn", "src.app:app", "--host", "0.0.0.0", "--port", "8000"]

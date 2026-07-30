@@ -27,6 +27,15 @@ services:
     volumes:
       - hf_cache:/root/.cache     # model weights cached across restarts
     restart: unless-stopped
+    # Overrides the Dockerfile's default HEALTHCHECK (which targets the api
+    # role's :8000/api/health) with this role's own existing /healthz.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request as u; u.urlopen('http://localhost:8001/healthz', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
 
   # STARTUP GATE — indexes the four sample talks and exits. api + worker wait
   # for it to finish (service_completed_successfully), so the UI is NEVER
@@ -48,6 +57,10 @@ services:
       - clip
       - redis
     restart: "no"
+    # One-shot and short-lived — the Dockerfile's HTTP HEALTHCHECK doesn't
+    # apply to it (it never serves :8000).
+    healthcheck:
+      disable: true
 
   api:
     build: .
@@ -68,6 +81,17 @@ services:
       seed:
         condition: service_completed_successfully   # UI up only after samples ready
     restart: unless-stopped
+    # Same check as the Dockerfile's default HEALTHCHECK, spelled out
+    # explicitly rather than relied on implicitly — Compose's healthcheck
+    # merging with an image's baked-in HEALTHCHECK is inconsistent across
+    # versions, and this is the one role that actually serves :8000.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request as u; u.urlopen('http://localhost:8000/api/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
 
   worker:
     build: .
@@ -93,6 +117,9 @@ services:
     restart: unless-stopped
     # Need more throughput? Replicas multiply it (all share the one clip model):
     # docker compose up -d --scale worker=3   (-> 6 videos at once)
+    # Never serves :8000 — the Dockerfile's HTTP HEALTHCHECK doesn't apply.
+    healthcheck:
+      disable: true
 
 volumes:
   hf_cache:
