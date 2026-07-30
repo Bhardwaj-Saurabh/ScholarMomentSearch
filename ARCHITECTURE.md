@@ -78,16 +78,36 @@ diagram: the **auth/tenancy boundary** (every request, both paths) and **tracing
 (every span, both paths).
 
 ```mermaid
+%%{init: {'flowchart': {'curve': 'linear', 'nodeSpacing': 40, 'rankSpacing': 60, 'htmlLabels': true}}}%%
 flowchart TB
-  classDef actor fill:#1d4ed8,stroke:#1e3a8a,stroke-width:2px,color:#ffffff
-  classDef app fill:#f1f5f9,stroke:#475569,stroke-width:1.5px,color:#0f172a
-  classDef state fill:#fef9c3,stroke:#a16207,stroke-width:1.5px,color:#0f172a
-  classDef ext fill:#dcfce7,stroke:#15803d,stroke-width:1.5px,color:#0f172a
+  classDef actor fill:#edf0f3,stroke:#55606c,stroke-width:1.5px,color:#23282e
+  classDef gate fill:#fbe7ea,stroke:#a92f47,stroke-width:1.5px,color:#6d1626
+  classDef reject fill:#f7d3d7,stroke:#b0233b,stroke-width:1.8px,color:#6b0f1f
+  classDef app fill:#e2ecfb,stroke:#2454b0,stroke-width:1.5px,color:#12285a
+  classDef state fill:#fcf0d8,stroke:#a9740c,stroke-width:1.5px,color:#603f04
+  classDef ext fill:#dff4e9,stroke:#1f8a4c,stroke-width:1.5px,color:#0f4d2a
 
-  U(["👤 Researcher"]):::actor
-  A(["🛠️ Admin · CI · Benchmark"]):::actor
+  subgraph LEGEND ["<b>LEGEND</b>"]
+    direction LR
+    L1["Actor / client"]:::actor
+    L2["Security check"]:::gate
+    L3["Rejected"]:::reject
+    L4["App service"]:::app
+    L5["Managed state"]:::state
+    L6["External service"]:::ext
+    L1 ~~~ L2 ~~~ L3 ~~~ L4 ~~~ L5 ~~~ L6
+  end
 
-  subgraph RUNTIME ["APPLICATION RUNTIME — stateless containers · one Docker image"]
+  U["<b>Researcher</b><br/>public entry"]:::actor
+  A["<b>Admin / CI / Benchmark</b>"]:::actor
+
+  RESOLVE["<code>resolve_tenant()</code><br/>Auth0 JWT (RS256) or ADMIN_TOKEN"]:::gate
+  AUTHCHK["<code>auth_failure()?</code><br/>mutating route, ENV=production"]:::gate
+  RATELIM["<code>rate_limit_check()</code><br/>Redis token bucket · fail OPEN"]:::gate
+  REJECT401["<b>401 / 403</b><br/>rejected · still metered"]:::reject
+  REJECT429["<b>429</b><br/>Retry-After · still metered"]:::reject
+
+  subgraph RUNTIME ["<b>APPLICATION RUNTIME</b> — stateless containers · one Docker image"]
     direction LR
     API["<b>API</b><br/>FastAPI :8000<br/>register · search · UI<br/>/ask_stream SSE ★"]:::app
     EMB["<b>Embedding Service</b><br/>:8001 — warm models<br/>CLIP 512d · bge 384d"]:::app
@@ -95,20 +115,26 @@ flowchart TB
     SEED["<b>Seed Gate</b><br/>one-shot at deploy<br/>8 triplets, vector-verified ★"]:::app
   end
 
-  subgraph STATE ["MANAGED STATE — every durable byte is rented"]
+  subgraph STATE ["<b>MANAGED STATE</b> — every durable byte is rented"]
     direction LR
     PG[("<b>Neon Postgres</b><br/>manifest · status<br/>entity graph ★")]:::state
     MQ[["<b>Prefect Cloud</b><br/>work queue<br/>runs · retries · dashboard"]]:::state
     VDB[("<b>Qdrant Cloud</b><br/>moments — visual<br/>moments_text — hybrid ★")]:::state
     OBJ[("<b>Object Storage</b><br/>Tigris · S3 · GCS<br/>media · frames · docs")]:::state
     RDS[("<b>Redis Stack ★</b><br/>ephemeral cache only<br/>fail-open, never source of truth")]:::state
+    PG ~~~ MQ ~~~ VDB ~~~ OBJ ~~~ RDS
   end
 
   LLMX["<b>LLM Providers</b><br/>OpenAI · Anthropic · NVIDIA<br/>answer synthesis · slide captions ★"]:::ext
 
-  U ---->|"Ⓐ ask a question (public)"| API
-  U -->|"① add source · 202 (login required ★)"| API
-  A -->|"① backfill · 202"| API
+  U -->|"Ⓐ ask a question (public)"| RESOLVE
+  U -->|"① add source · 202 (login required ★)"| RESOLVE
+  A -->|"① backfill · 202"| RESOLVE
+  RESOLVE --> AUTHCHK
+  AUTHCHK -->|"fail"| REJECT401
+  AUTHCHK -->|"pass"| RATELIM
+  RATELIM -->|"429"| REJECT429
+  RATELIM -->|"routed"| API
   API -->|"② insert pending"| PG
   API -->|"③ schedule run"| MQ
   WK -->|"④ long-poll runs"| MQ
@@ -124,10 +150,15 @@ flowchart TB
   API -.->|"cache reads/writes ★, fail-open"| RDS
   SEED -.->|"pre-indexes corpus, vector-verified ★, exits 0 before UI serves"| PG
 
-  linkStyle 0,11,12,13 stroke:#1d4ed8,stroke-width:2.5px
-  linkStyle 1,2,3,4,5,6,7,8,9,10,14 stroke:#d97706,stroke-width:2px
-  linkStyle 15,16 stroke:#64748b,stroke-width:1.5px
+  linkStyle 9,25,26,27 stroke:#2454b0,stroke-width:2.5px
+  linkStyle 10,11,17,18,19,20,21,22,23,24,28 stroke:#b3660f,stroke-width:2px
+  linkStyle 12,13,14,15,16 stroke:#a92f47,stroke-width:1.8px
+  linkStyle 29,30 stroke:#6b7280,stroke-width:1.5px,stroke-dasharray:5 5
 ```
+
+The gate chain (`resolve_tenant → auth_failure? → rate_limit_check`) is the same middleware
+detailed in §3.3 — shown here compressed to one lane so it reads as what it is: one shared
+front door for both paths, not a fork per path.
 
 | | Write path (amber) | | Read path (blue) |
 |---|---|---|---|
@@ -145,17 +176,18 @@ means a slower, not wrong, next request).
 ### 3.2 Deployment topology
 
 ```mermaid
+%%{init: {'flowchart': {'curve': 'linear', 'nodeSpacing': 40, 'rankSpacing': 60}}}%%
 flowchart LR
   classDef gate fill:#fee2e2,stroke:#b91c1c,stroke-width:1.5px,color:#0f172a
   classDef proc fill:#f1f5f9,stroke:#475569,stroke-width:1.5px,color:#0f172a
   classDef edge fill:#dbeafe,stroke:#1d4ed8,stroke-width:1.5px,color:#0f172a
 
-  WWW(["🌐 public HTTPS<br/>force_https · auto-start"]):::edge
+  WWW["<b>Public HTTPS</b><br/>force_https · auto-start"]:::edge
 
-  subgraph FLY ["FLY.IO — one image · region iad · private IPv6 mesh"]
+  subgraph FLY ["<b>FLY.IO</b> — one image · region iad · private IPv6 mesh"]
     direction LR
     REL["<b>release_command</b><br/>python -m src.seed<br/>seed fails ⇒ deploy aborts,<br/>traffic stays on old version"]:::gate
-    subgraph PROCS ["process groups — sized per role"]
+    subgraph PROCS ["<b>Process groups</b> — sized per role"]
       direction TB
       FAPI["<b>api</b><br/>shared-cpu-1x · 512 MB<br/>:8000 · scale: N machines"]:::proc
       FWK["<b>worker</b><br/>shared-cpu-2x · 2 GB<br/>restart always<br/>fly scale count worker=N"]:::proc
@@ -186,24 +218,27 @@ Every request, both paths, passes through one middleware before routing — regi
 *before* the metrics middleware so a rejection is still timed and counted, not invisible:
 
 ```mermaid
+%%{init: {'flowchart': {'curve': 'linear', 'nodeSpacing': 40, 'rankSpacing': 55}}}%%
 flowchart LR
   classDef step fill:#f1f5f9,stroke:#475569,stroke-width:1.5px,color:#0f172a
   classDef reject fill:#fee2e2,stroke:#b91c1c,stroke-width:1.5px,color:#0f172a
   classDef ok fill:#dcfce7,stroke:#15803d,stroke-width:1.5px,color:#0f172a
 
-  REQ["Request<br/>Authorization: Bearer …"]:::step
-  RESOLVE["resolve_tenant()<br/>Auth0 JWT? RS256-verify,<br/>tenant = sha256(sub)[:32]<br/>ADMIN_TOKEN? honors X-User-Id"]:::step
-  ANON["anonymous + no valid credential<br/>→ pinned to DEFAULT_USER_ID<br/>(closes a cross-tenant read: a header-<br/>chosen tenant + public reads = leak)"]:::step
-  FAIL["auth_failure()?<br/>mutating route, no valid credential,<br/>ENV=production ⇒ fail CLOSED"]:::reject
-  RATE["rate_limit_check()<br/>keyed on real client IP<br/>(Fly-Client-IP / trusted XFF)<br/>Redis token bucket, fail OPEN"]:::step
-  OK["routed — tenant is now<br/>cryptographically pinned in scope"]:::ok
+  REQ["<b>Request</b><br/>Authorization: Bearer …"]:::step
+  RESOLVE["<b>resolve_tenant()</b><br/>Auth0 JWT? RS256-verify,<br/>tenant = sha256(sub)[:32]<br/>ADMIN_TOKEN? honors X-User-Id"]:::step
+  ANON["<b>Anonymous fallback</b><br/>no valid credential →<br/>pinned to DEFAULT_USER_ID<br/>(closes a cross-tenant read: a header-<br/>chosen tenant + public reads = leak)"]:::step
+  FAIL["<b>auth_failure()?</b><br/>mutating route, no valid credential,<br/>ENV=production ⇒ fail CLOSED"]:::reject
+  RATE["<b>rate_limit_check()</b><br/>keyed on real client IP<br/>(Fly-Client-IP / trusted XFF)<br/>Redis token bucket, fail OPEN"]:::step
+  OK["<b>Routed</b><br/>tenant is now<br/>cryptographically pinned in scope"]:::ok
+  REJ2["<b>Rejected — 401/403</b><br/>still metered"]:::reject
+  REJ3["<b>Rejected — 429</b><br/>Retry-After, still metered"]:::reject
 
   REQ --> RESOLVE
   RESOLVE -->|"token present"| FAIL
   RESOLVE -->|"no token"| ANON --> FAIL
-  FAIL -->|"401/403"| REJ2["rejected, still metered"]:::reject
+  FAIL -->|"401/403"| REJ2
   FAIL -->|"pass"| RATE
-  RATE -->|"429 + Retry-After"| REJ3["rejected, still metered"]:::reject
+  RATE -->|"429 + Retry-After"| REJ3
   RATE -->|"pass"| OK
 ```
 
@@ -230,30 +265,31 @@ One question ("ask a live one") emits one trace with a span per real decision �
 per timing:
 
 ```mermaid
+%%{init: {'flowchart': {'curve': 'linear', 'nodeSpacing': 35, 'rankSpacing': 55}}}%%
 flowchart TB
   classDef span fill:#f1f5f9,stroke:#475569,stroke-width:1.5px,color:#0f172a
   classDef decision fill:#fef9c3,stroke:#a16207,stroke-width:1.5px,color:#0f172a
   classDef backend fill:#dcfce7,stroke:#15803d,stroke-width:1.5px,color:#0f172a
 
-  ROOT["ask (root span)<br/>full provenance: prompt/embed/<br/>chunker/corpus versions"]:::span
-  QE["query_enhance<br/>(opt-in, off)"]:::span
-  EMB["embed_text · embed_query · embed_sparse<br/>cache hit/miss tagged"]:::span
-  SV["search_visual"]:::span
-  ST["search_text — hybrid"]:::span
-  FU["fuse — RRF"]:::span
-  GB["graph_boost<br/>(opt-in, off)"]:::span
-  RR["rerank<br/>before/after ordering"]:::span
-  CG["confidence_gate<br/>DECISION: score + threshold"]:::decision
-  BM["build_moments"]:::span
-  LA["llm_answer<br/>tokens/cost/model/prompt_version"]:::span
-  GC["grounding_check<br/>DECISION: citations stripped?<br/>named-source withheld?<br/>injection_detected?"]:::decision
+  ROOT["<b>ask</b> (root span)<br/>full provenance: prompt/embed/<br/>chunker/corpus versions"]:::span
+  QE["<b>query_enhance</b><br/>(opt-in, off)"]:::span
+  EMB["<b>embed_text · embed_query · embed_sparse</b><br/>cache hit/miss tagged"]:::span
+  SV["<b>search_visual</b>"]:::span
+  ST["<b>search_text</b> — hybrid"]:::span
+  FU["<b>fuse</b> — RRF"]:::span
+  GB["<b>graph_boost</b><br/>(opt-in, off)"]:::span
+  RR["<b>rerank</b><br/>before/after ordering"]:::span
+  CG["<b>confidence_gate</b><br/>DECISION: score + threshold"]:::decision
+  BM["<b>build_moments</b>"]:::span
+  LA["<b>llm_answer</b><br/>tokens/cost/model/prompt_version"]:::span
+  GC["<b>grounding_check</b><br/>DECISION: citations stripped?<br/>named-source withheld?<br/>injection_detected?"]:::decision
 
   ROOT --> QE --> EMB --> SV
   EMB --> ST --> FU --> GB --> RR --> CG --> BM --> LA --> GC
 
-  FACADE["src/tracing.py — ONE local facade<br/>fans out, nothing in search.py<br/>imports either SDK directly"]:::span
-  OPIK["Opik<br/>full-fidelity: question + chunk text"]:::backend
-  OTEL["OTel<br/>OTLP exporter"]:::backend
+  FACADE["<b>src/tracing.py</b> — ONE local facade<br/>fans out, nothing in search.py<br/>imports either SDK directly"]:::span
+  OPIK["<b>Opik</b><br/>full-fidelity: question + chunk text"]:::backend
+  OTEL["<b>OTel</b><br/>OTLP exporter"]:::backend
 
   ROOT -.-> FACADE
   FACADE -.-> OPIK
@@ -390,33 +426,39 @@ convention `CLIP_SERVICE_URL`/`AUTH0_*` already use.
 ### 5.1 The three flows
 
 ```mermaid
+%%{init: {'flowchart': {'curve': 'linear', 'nodeSpacing': 35, 'rankSpacing': 55}}}%%
 flowchart TB
-  REG["registration: /api/videos or /admin/documents NEW<br/>ownership-checked ★ → insert pending row → 202 in &lt;300 ms"] --> DISP
+  classDef reg fill:#f1f5f9,stroke:#475569,stroke-width:1.5px,color:#0f172a
+  classDef video fill:#e0e7ff,stroke:#4338ca,stroke-width:1.5px,color:#0f172a
+  classDef paper fill:#fef3c7,stroke:#b45309,stroke-width:1.5px,color:#0f172a
+  classDef deck fill:#dcfce7,stroke:#15803d,stroke-width:1.5px,color:#0f172a
 
-  DISP["WFQ dispatcher (every 3 s):<br/>admit pending rows round-robin per user,<br/>capped at DISPATCH_MAX_INFLIGHT → Prefect run"]
+  REG["<b>Registration</b><br/>/api/videos or /admin/documents NEW<br/>ownership-checked ★ → insert pending row → 202 in &lt;300 ms"]:::reg --> DISP
 
-  subgraph VF ["ms-ingest-video (PROVIDED)"]
+  DISP["<b>WFQ Dispatcher</b> (every 3 s)<br/>admit pending rows round-robin per user,<br/>capped at DISPATCH_MAX_INFLIGHT → Prefect run"]:::reg
+
+  subgraph VF ["<b>ms-ingest-video</b> (PROVIDED)"]
     direction TB
-    V1["fetch: yt-dlp ≤480p or bucket download<br/>sha256 → duplicate check → skipped"]
-    V2["sample: ffmpeg single-pass MJPEG in memory<br/>interval or scene, ≤400 frames<br/>dHash dedup Hamming ≤4<br/>thumbnails → object storage"]
-    V3["embed-index: CLIP batches of 128<br/>→ moments upsert, uuid5 IDs"]
-    V4["transcript (the audio path):<br/>yt-dlp json3 captions → ~20 s chunks<br/>→ bge → moments_text<br/>best-effort, never fails the flow"]
+    V1["<b>Fetch</b><br/>yt-dlp ≤480p or bucket download<br/>sha256 → duplicate check → skipped"]:::video
+    V2["<b>Sample</b><br/>ffmpeg single-pass MJPEG in memory<br/>interval or scene, ≤400 frames<br/>dHash dedup Hamming ≤4<br/>thumbnails → object storage"]:::video
+    V3["<b>Embed-index</b><br/>CLIP batches of 128<br/>→ moments upsert, uuid5 IDs"]:::video
+    V4["<b>Transcript</b> (the audio path)<br/>yt-dlp json3 captions → ~20 s chunks<br/>→ bge → moments_text<br/>best-effort, never fails the flow"]:::video
     V1 --> V2 --> V3 --> V4
   end
 
-  subgraph PF ["ms-ingest-document · paper (NEW)"]
+  subgraph PF ["<b>ms-ingest-document · paper</b> (NEW)"]
     direction TB
-    P0["fetch: SSRF-guarded download ★<br/>scheme/IP allowlist, redirect re-check,<br/>size cap, content-type allowlist<br/>→ sha256 dup check → docs/ storage"]
-    P1["parse: PyMuPDF per-page text + sections<br/>+ TABLE extraction (ruling-lines) ★<br/>+ FIGURE detection → vision caption ★<br/>page-aware chunks — page in payload"]
-    P2["embed-index: bge (+ bm25 sparse ★) via clip service<br/>→ moments_text upsert, kind=paper, page=N<br/>→ entity extraction → graph mentions ★"]
+    P0["<b>Fetch</b><br/>SSRF-guarded download ★<br/>scheme/IP allowlist, redirect re-check,<br/>size cap, content-type allowlist<br/>→ sha256 dup check → docs/ storage"]:::paper
+    P1["<b>Parse</b><br/>PyMuPDF per-page text + sections<br/>+ TABLE extraction (ruling-lines) ★<br/>+ FIGURE detection → vision caption ★<br/>page-aware chunks — page in payload"]:::paper
+    P2["<b>Embed-index</b><br/>bge (+ bm25 sparse ★) via clip service<br/>→ moments_text upsert, kind=paper, page=N<br/>→ entity extraction → graph mentions ★"]:::paper
     P0 --> P1 --> P2
   end
 
-  subgraph DF ["ms-ingest-document · deck (NEW)"]
+  subgraph DF ["<b>ms-ingest-document · deck</b> (NEW)"]
     direction TB
-    D0["fetch: SSRF-guarded ★ PDF or PPTX → sha256 dup check"]
-    D1["parse: 1 slide = 1 unit; extract text;<br/>image-heavy slides → vision-LLM caption"]
-    D2["embed-index: bge (+ sparse ★) → moments_text upsert<br/>kind=deck, slide=N → graph mentions ★"]
+    D0["<b>Fetch</b><br/>SSRF-guarded ★ PDF or PPTX → sha256 dup check"]:::deck
+    D1["<b>Parse</b><br/>1 slide = 1 unit; extract text;<br/>image-heavy slides → vision-LLM caption"]:::deck
+    D2["<b>Embed-index</b><br/>bge (+ sparse ★) → moments_text upsert<br/>kind=deck, slide=N → graph mentions ★"]:::deck
     D0 --> D1 --> D2
   end
 
@@ -424,6 +466,9 @@ flowchart TB
   DISP --> P0
   DISP --> D0
 ```
+
+Color lanes are the three flows, not three severities: indigo = video (PROVIDED), amber =
+paper (NEW), green = deck (NEW) — same palette convention as §3.1's read/write edge colors.
 
 Papers and decks mirror the video flow exactly: same 202-then-queue contract, same
 dispatcher, same per-task retry policy (fetch 2×, embed 2×), same deterministic-ID
