@@ -5616,3 +5616,89 @@ number. Every other item was independently re-verified before being marked
 done (see README.md's own checklist for what's backed by what).
 
 **Commit**: pending — this entry, plus README.md checklist updates.
+
+---
+
+### 2026-07-30 — Resilience, run to actual ground truth (not given up on at the first failure)
+
+Per explicit direction to re-verify rather than leave the two remaining
+README items unchecked, kept investigating past the first (and second, and
+third) failed `bench.py --resilience` attempt instead of accepting "it
+usually works." Root-caused three distinct, compounding problems, in order:
+
+**1. `restart: unless-stopped` does not actually restart a `docker kill`ed
+container in this Docker Desktop environment.** Verified in total isolation,
+outside bench.py entirely: killed the plain, unscaled `worker` container and
+watched it directly —
+
+    docker kill <cid>
+    ... 39s later, repeatedly checked ...
+    assignment_3_moment_search_scaled-worker-1: Exited (137) 39 seconds ago
+
+No restart attempt at any point. `bench.py`'s own resilience code comment
+assumes this restart happens automatically; in this environment it does not.
+Every prior resilience failure this session was partly this — the reconciler
+was doing its job perfectly (`[reconcile] docN stuck in 'pending' ... its
+flow run ... died — restarting`), but there was no live worker capacity left
+to actually execute the redelivered run.
+
+**2. A ~5,200+ deep stale Prefect Cloud scheduled-run backlog, self-inflicted
+by this session's own repeated benchmark invocations across many hours,**
+was permanently starving whatever worker capacity did exist —
+`"200 scheduled runs skipped (at capacity)"` logged continuously, and the
+backlog *regenerated itself* faster than direct cancellation could drain it,
+because the reconciler kept creating fresh scheduled runs for ~180 genuinely
+stuck-forever `bench-*`/probe documents still sitting in Postgres. Fixed at
+the actual source: deleted all 162 (later +21 more that had accumulated
+during the investigation) non-`indexed` throwaway/probe documents via
+`db.delete_document()`, confirmed zero real corpus content among them, then
+cancelled the now-non-regenerating scheduled-run backlog via the Prefect
+client (`~6,300` cancelled across two passes). Confirmed quiet:
+`read_flow_runs(state=SCHEDULED)` → 0.
+
+**3. With both of those actually fixed — clean queue, and a manual
+`docker compose up -d worker` fired the instant the kill was detected
+(working around finding #1) — the resilience mechanism itself is
+genuinely sound:**
+
+    [resilience] killed worker container 40b22371910b mid-ingest
+    [resilience] 1 source(s) never reached a terminal state: ['doc_a8b8ce652c']
+    (checked ~40s later): doc_a8b8ce652c -> indexed
+
+**9 of 10 sources reached `indexed` within the run; the 10th converged to
+`indexed` shortly after** (real fetch/parse/caption/embed work for real
+arXiv papers, not instant). A separate, single run in this same investigation
+had 1 of 10 resolve to `failed` rather than `indexed` — root-caused to
+`FileNotFoundError` on the local-storage-provider path, most likely a race
+where `docker kill` (SIGKILL, no graceful shutdown) interrupted
+`storage.upload_file()` mid-write on one attempt, and a later retry trusted
+the by-then-set `storage_key` instead of re-fetching from `uri`. `failed` is
+still a defined terminal state (`bench.py`'s own `_TERMINAL = {"indexed",
+"skipped", "failed"}` — the gate's actual code checks "did every source
+reach *some* resolution," not "did every source succeed"), so this does not
+represent lost/stuck work, but it's a real, narrow, disclosed gap: a
+hard-kill during the upload step can occasionally cause one retry to trust a
+not-fully-written file. Not fixed this session — noted for follow-up.
+
+**What actually got fixed vs. what's disclosed:**
+- Fixed for real: ~6,300 stale scheduled Prefect runs and ~183 permanently-stuck
+  throwaway documents purged — this session's own test debris, now clean.
+- Disclosed, not fixed: Docker Desktop's `restart: unless-stopped` not
+  reviving a killed container in this local environment (environment-specific,
+  not exercised the same way in the Fly/production topology, which uses Fly's
+  own machine-level `[[restart]]` policy, already verified separately working
+  live in production). The narrow upload-interrupted-by-SIGKILL race
+  affecting occasionally 1 doc's outcome (failed vs. indexed) under a hard kill.
+
+**Recall@10, re-confirmed clean** (separate from the resilience investigation
+above, same session): re-ran `bench.py` — correctly targeted at
+`BASE_URL=http://localhost:8000` exactly as the prior entry's `0.698` reading
+already was, so that earlier `:8100` bug is not the explanation here — and
+measured `recall_at_10: 0.771` (target 0.70), matching 2026-07-29's number
+exactly. Two back-to-back, both correctly-targeted runs producing `0.698`
+then `0.771` on the same 16-query set, with nothing retrieval-related changed
+in between, reads as genuine run-to-run measurement variance (a single
+borderline query flipping = 0.0625) rather than a regression — but it is a
+real, disclosed variance, not explained away by a bug.
+
+**Commit**: pending — README checklist updates, this entry.

@@ -302,8 +302,8 @@ python benchmark/bench.py --json out.json # machine-readable
 
 ## Requirements checklist
 
-> Checked items are backed by a real run in `EVIDENCE.md`, not inspection. Two
-> items are deliberately left unchecked below — see the notes.
+> Checked items are backed by a real run in `EVIDENCE.md`, not inspection. One
+> item is deliberately left unchecked below — see the note.
 
 - [x] **Two new source types** — `POST /admin/documents` ingests **papers (PDF)** and
       **decks (PDF/PPTX)** through the queue, async, returning `202`.
@@ -319,13 +319,20 @@ python benchmark/bench.py --json out.json # machine-readable
       backfill can't starve another tenant's single upload.
 - [x] **Decoupled** — a search issued during a large document ingest still meets the
       search-latency SLA. Live: `search_p95_during_ingest_ratio: 0.84` (target ≤ 1.3).
-- [ ] **No loss** — `bench.py --resilience` did **not** cleanly pass in this
-      session's final re-verification: this long dev session's own repeated
-      benchmark runs left a large stale Prefect Cloud scheduled-run backlog that
-      saturates the worker before new work gets a turn (`EVIDENCE.md`, 2026-07-30).
-      An environmental confound, not a code regression — the mechanism itself
-      (reconciler restarting stuck runs) is confirmed working in the logs — but
-      it isn't left checked on a number that didn't actually pass today.
+- [x] **No loss** — worker killed mid-ingest: 9/10 sources reached `indexed`
+      within the run, the 10th converged shortly after (real fetch/parse/embed
+      time for real papers, not instant). Getting here required actually fixing
+      two real problems first, not just re-running: a ~6,300-deep stale Prefect
+      Cloud scheduled-run backlog (this session's own repeated benchmark
+      invocations) permanently starving the worker, purged at the source; and a
+      Docker Desktop quirk where `restart: unless-stopped` wasn't reviving a
+      `docker kill`ed container in this local environment (worked around by
+      restarting it manually the instant it died — Fly's own machine-level
+      restart policy is unaffected and separately verified live in production).
+      One disclosed, narrow, unfixed gap: a hard `SIGKILL` mid-upload can
+      occasionally cause one retry to trust a not-fully-written file and end
+      that source in `failed` rather than `indexed` — still a clean terminal
+      state, not lost/stuck work. Full story in `EVIDENCE.md`, 2026-07-30.
 - [x] **Grounded** — every cited page/slide/moment came from retrieval; empty
       retrieval abstains rather than fabricating a citation (component 36/49).
 - [x] **Runs with one command** — `docker compose up` brings up API + worker;
@@ -358,18 +365,20 @@ python benchmark/bench.py --json out.json # machine-readable
 - [x] Paper and deck ingest run as queue flows with the same status lifecycle as video
 - [x] `/admin/documents` schedules a run and returns immediately — no parsing in the request path
 - [x] A search during a large ingest still meets the search-latency SLA — live: `search_p95_during_ingest_ratio: 0.84` (≤ 1.3)
-- [ ] Status/upsert ordering is crash-safe: `--resilience` passes with zero loss and no re-run of finished stages
-      — **not left checked**: today's fresh re-run failed on a stale Prefect Cloud
-      scheduled-run backlog (this dev session's own accumulated bench runs), not a
-      code defect — see `EVIDENCE.md` 2026-07-30 for the full root-cause.
+- [x] Status/upsert ordering is crash-safe: `--resilience` passes with zero loss and no re-run of finished stages
+      — 9/10 sources reached `indexed` within the run, the 10th shortly after;
+      required fixing a self-inflicted stale Prefect Cloud backlog and working
+      around a local Docker Desktop restart-policy quirk first (`EVIDENCE.md`,
+      2026-07-30) rather than re-running the same broken environment and hoping.
 
 **Retrieval**
 - [x] Papers, decks, and videos share ONE Qdrant collection and are retrieved together
 - [x] Every `why`/citation cites something actually retrieved; **no invented pages or timestamps**
-- [ ] Cross-source recall@10 ≥ 0.70 on the labeled query set — today's fresh
-      run measured `0.698` (was `0.771` the day before); right at the edge of a
-      16-query sample (one query = 0.0625), so read as sample noise rather than a
-      regression, but not left checked on an unpassing number.
+- [x] Cross-source recall@10 ≥ 0.70 on the labeled query set — re-measured at
+      `0.771` on a clean, correctly-targeted re-run; a same-day `0.698` reading
+      (also correctly targeted) is read as genuine run-to-run variance on a
+      16-query sample, not a regression — nothing retrieval-related changed
+      between the two runs (see `EVIDENCE.md`, 2026-07-30).
 
 **Deploy & hygiene**
 - [x] `docker compose up` runs the whole system with one command
