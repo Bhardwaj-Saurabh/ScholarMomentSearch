@@ -472,3 +472,41 @@ Every FDE project is submitted as a **Product Evaluation + a video demo**.
   compose up` should start one; check `worker.py` logs and your `PREFECT_API_*` keys.
 - **Everything is video and nothing else appears** → confirm your new flow upserts to
   the **same** collection with a `kind` payload, and that retrieval isn't filtering it out.
+
+---
+
+## How I ran it
+
+**LLM / embedding providers**
+- Answer synthesis: OpenAI `gpt-4o-mini` (server-side key; the app also supports a
+  per-tenant BYO-LLM override — OpenAI, Anthropic, or NVIDIA — via `ms_user_llms`).
+- Visual embedding: CLIP `ViT-B/32` (512-d), for video frames + cross-modal search.
+- Text embedding: `BAAI/bge-small-en-v1.5` (384-d dense) + BM25 (sparse), fused with
+  Qdrant-native RRF — this is the shared cross-source text space (video transcripts +
+  paper chunks + deck chunks all in one collection, `moments_text`).
+
+**Deployed for real, on Fly.io**
+- Live app: **https://scholarmomentsearch.fly.dev** (region `iad`; app name is
+  `scholarmomentsearch`, not `momentsearch` — that name was already taken globally).
+- One Docker image, three Fly process groups: `api` (1 GB), `worker` (2 GB),
+  `clip` (4 GB, one warm model). `release_command` runs the seed gate before any
+  new version takes traffic — a failing seed aborts the deploy, old version keeps
+  serving.
+- Managed dependencies: Neon (Postgres), Qdrant Cloud (vectors), Prefect Cloud
+  (ingest queue), Tigris via `fly storage create` (object storage). Optional and
+  fail-open when unset: Redis Stack (cache), Auth0 (real login — search itself
+  stays public), Opik + OpenTelemetry (tracing).
+- CI/CD: GitHub Actions — `.github/workflows/ci.yml` (ruff + pytest, real Postgres +
+  Qdrant service containers) gates `.github/workflows/fly-deploy.yml` via
+  `workflow_run`, so a failing lint/test run can never reach `flyctl deploy`. A push
+  to `main` is the deploy trigger.
+
+**Run it locally**
+```bash
+cp .env.example .env        # fill in your provider keys
+docker compose up --build   # API + UI at http://localhost:8000
+```
+`uv run pytest tests/ -x -q` runs the test suite (627 passing); `python
+benchmark/bench.py` runs the SLA/recall gates. Full architecture, every SLA number
+from a real run, and a dated incident log (including the deploy issues found and
+fixed while standing this up) live in `ARCHITECTURE.md` and `EVIDENCE.md`.
