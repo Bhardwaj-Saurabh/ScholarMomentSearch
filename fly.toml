@@ -11,7 +11,7 @@
 # fly scale count worker=2        # more ingest throughput, anytime
 
 app = 'scholarmomentsearch'
-primary_region = 'iad'
+primary_region = 'lhr'
 
 [build]
 
