@@ -218,7 +218,11 @@ def _post(path: str, payload: dict, timeout: int = 600) -> dict:
                 url, data=body, headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read())
-        except urllib.error.URLError as exc:
+        # ConnectionError covers RemoteDisconnected/ConnectionReset — what
+        # callers actually see while an OOM-killed clip machine restarts
+        # (observed live 2026-07-31). Only URLError got the ride-it-out
+        # retry before, so a restart window hard-failed in-flight ingests.
+        except (urllib.error.URLError, ConnectionError) as exc:
             last = exc
             time.sleep(5)
     raise RuntimeError(f"CLIP service unreachable at {config.CLIP_SERVICE_URL}: {last}")
@@ -259,6 +263,16 @@ def _embed_text_uncached(text: str, key: str) -> np.ndarray:
     return result
 
 
+# Component 57 follow-up: cap how many chunks ride in ONE clip-service
+# request. A whole document per request (189 chunks observed) times six
+# concurrent ingests OOM-killed the 4GB clip machine (exit_code=137,
+# oom_killed=true — Fly event log 2026-07-31). Sub-batching bounds the
+# service's per-request memory; the lock inside the service serializes the
+# actual model work either way, so this costs only a few extra HTTP round
+# trips per large document.
+EMBED_DOCS_BATCH = 64
+
+
 def embed_docs(texts: list[str]) -> np.ndarray:
     """Transcript chunks -> text vectors. Provider decides: OpenAI API, else bge
     via the remote clip service, else bge in-process."""
@@ -267,7 +281,10 @@ def embed_docs(texts: list[str]) -> np.ndarray:
     if config.CLIP_SERVICE_URL:
         if not texts:
             return np.zeros((0, config.TEXT_EMBED_DIM), dtype=np.float32)
-        vecs = _post("/embed/docs", {"texts": texts})["vectors"]
+        vecs: list = []
+        for i in range(0, len(texts), EMBED_DOCS_BATCH):
+            vecs.extend(_post("/embed/docs",
+                              {"texts": texts[i:i + EMBED_DOCS_BATCH]})["vectors"])
         return np.asarray(vecs, dtype=np.float32)
     return embed_docs_local(texts)
 

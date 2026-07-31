@@ -66,6 +66,12 @@ primary_region = 'lhr'
   # live 2026-07-31, masking the real per-doc errors). We don't want a
   # metrics exporter thread per flow run anyway.
   PREFECT_TELEMETRY_ENABLE_RESOURCE_METRICS = 'false'
+  # First connection from any fresh process (each Prefect flow subprocess!)
+  # pays a cold 6PN DNS lookup for fly-*.upstash.io that can exceed the 0.3s
+  # default — measured: first ping 36-48ms once resolved, but the lookup
+  # alone intermittently blew the budget and flipped that process to
+  # no-cache. 1.5s still fails fast when Redis is genuinely down.
+  REDIS_SOCKET_TIMEOUT_S = '1.5'
 
 # Infra backstop: if a machine's process ever exits (crash, OOM, a dependency
 # outage that slips past the code's own retry loop), always bring it back —
