@@ -413,3 +413,49 @@ def test_t_fetch_missing_row_is_a_clean_noop_not_a_retrying_failure():
     for a row that will never come back. It must behave like the duplicate
     case instead: return "" so the flow exits as a no-op."""
     assert doc_pipeline.t_fetch.fn("doc_never_existed_xyz", "u_doc_test") == ""
+
+
+def test_t_caption_runs_captions_concurrently_not_serially(monkeypatch):
+    """Component 57 (DESIGN.md §3m): the caption loop was strictly serial —
+    one blocking vision call per image chunk. Four mocked 0.2s captions must
+    complete in ~one sleep's time, not four."""
+    import time
+
+    monkeypatch.setattr(doc_pipeline.llm, "env_config", lambda: object())
+
+    def _slow_caption(image_jpeg, cfg):
+        time.sleep(0.2)
+        return "a concrete caption"
+
+    monkeypatch.setattr(doc_pipeline.llm, "caption_image", _slow_caption)
+    chunks = [{"locator_key": "slide", "locator": i, "text": f"s{i}",
+               "needs_caption": True, "image_jpeg": b"jpeg"} for i in range(4)]
+    t0 = time.perf_counter()
+    out = doc_pipeline.t_caption.fn("doc_cap_par", "u_doc_test", chunks)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 0.55, f"serial would take ~0.8s, got {elapsed:.3f}s"
+    # Captions land on the right chunks, in order, appended to existing text.
+    assert [c["text"] for c in out] == [f"s{i} a concrete caption" for i in range(4)]
+
+
+def test_t_caption_one_failed_caption_does_not_break_the_others(monkeypatch):
+    monkeypatch.setattr(doc_pipeline.llm, "env_config", lambda: object())
+
+    def _flaky(image_jpeg, cfg):
+        if image_jpeg == b"bad":
+            raise RuntimeError("provider hiccup")
+        return "ok caption"
+
+    monkeypatch.setattr(doc_pipeline.llm, "caption_image", _flaky)
+    chunks = [
+        {"locator_key": "slide", "locator": 1, "text": "a",
+         "needs_caption": True, "image_jpeg": b"good"},
+        {"locator_key": "slide", "locator": 2, "text": "b",
+         "needs_caption": True, "image_jpeg": b"bad"},
+        {"locator_key": "slide", "locator": 3, "text": "c",
+         "needs_caption": True, "image_jpeg": b"good"},
+    ]
+    out = doc_pipeline.t_caption.fn("doc_cap_flaky", "u_doc_test", chunks)
+    assert out[0]["text"] == "a ok caption"
+    assert out[1]["text"] == "b"          # failed caption -> original text kept
+    assert out[2]["text"] == "c ok caption"

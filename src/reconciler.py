@@ -38,7 +38,7 @@ from __future__ import annotations
 import threading
 import time
 
-from . import config, db, jobs
+from . import config, db, jobs, liveness
 
 # Anything that hasn't reached a terminal state yet. Deliberately includes
 # "pending": the original resilience-test finding left 2 documents stuck at
@@ -108,7 +108,22 @@ def _flow_run_dead(flow_run_id: str | None) -> bool:
         return False
     if run.state is None:
         return False
-    return run.state.type != StateType.COMPLETED
+    if run.state.type == StateType.COMPLETED:
+        return False
+    # Component 57 (DESIGN.md §3m): SCHEDULED means "created, awaiting
+    # pickup" — healthy backlog whenever a worker is actually polling, and
+    # under real load (16 docs vs a handful of slots) later waves sit here
+    # far past the stale window. Restarting them minted duplicate flow runs
+    # exactly while throughput was measured. The worker heartbeat is the
+    # discriminator; it reads False on ANY doubt (no Redis, expired, error),
+    # so this never strands a run — it only stops punishing healthy backlog.
+    # PENDING and RUNNING deliberately still restart: killed-mid-launch
+    # leaves PENDING and killed-mid-execution leaves RUNNING even while a
+    # RESTARTED worker heartbeats, and the resilience gate depends on both
+    # shapes recovering.
+    if run.state.type == StateType.SCHEDULED and liveness.worker_alive():
+        return False
+    return True
 
 
 def reconcile_once(stale_after_s: float | None = None) -> int:

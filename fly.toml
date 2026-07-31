@@ -42,6 +42,13 @@ primary_region = 'lhr'
   # Without this line the fail-closed guarantee would be inert on the actual
   # deployment — the exact gap spec-guardian flagged.
   ENV = 'production'
+  # Component 57 (DESIGN.md §3m): throughput. Six concurrent flow runs
+  # (was 2 — bench submits 16 docs, so 8 sequential waves of 2), and a 2s
+  # runner poll (Prefect's default 10s put up to ~80s of pure pickup latency
+  # inside the measured window). Only worker.py reads these; harmless on the
+  # other process groups. Overrides the same-named imported secrets.
+  WORKER_CONCURRENCY = '6'
+  PREFECT_RUNNER_POLL_FREQUENCY = '2'
 
 # Infra backstop: if a machine's process ever exits (crash, OOM, a dependency
 # outage that slips past the code's own retry loop), always bring it back —
@@ -95,9 +102,11 @@ primary_region = 'lhr'
 
 [[vm]]
   size = 'shared-cpu-2x'
-  # Runs are light now (download + ffmpeg; embedding is remote) — 2gb fits
-  # WORKER_CONCURRENCY=2. Scale workers horizontally, not vertically.
-  memory = '2gb'
+  # Bumped from 2gb with WORKER_CONCURRENCY 2→6 (component 57): each Prefect
+  # flow run is its own subprocess loading fitz + the BM25 sparse model +
+  # fresh DB/Qdrant/boto3 clients (~300-500MB apiece), so six concurrent runs
+  # need real headroom — 2gb fit exactly two.
+  memory = '4gb'
   processes = ['worker']
 
 [[vm]]

@@ -95,6 +95,12 @@ def main():
     # document stuck forever otherwise — see src/reconciler.py.
     from . import reconciler
     reconciler.start_in_background()
+    # Component 57: heartbeat so the reconciler can tell "SCHEDULED because a
+    # worker hasn't picked it up yet" (healthy backlog, leave it) from
+    # "SCHEDULED because no worker exists" (restart it). Fails open to the
+    # old restart-happy behavior when Redis is absent.
+    from . import liveness
+    liveness.start_heartbeat_in_background()
     limit = int(os.getenv("WORKER_CONCURRENCY", "2"))
     deployments = _build_deployments()
     # serve() talks to Prefect Cloud on startup; a transient outage (e.g. a 503)

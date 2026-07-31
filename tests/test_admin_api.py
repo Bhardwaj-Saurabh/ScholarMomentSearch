@@ -321,3 +321,25 @@ def test_background_dispatch_skips_a_row_deleted_before_it_ran(client, monkeypat
     admin_module._dispatch_document("doc_already_deleted_xyz", "default", "paper",
                                     "https://example.com/x.pdf")
     assert not called, "dispatch must not enqueue a run for a deleted row"
+
+
+def test_retry_document_returns_502_on_enqueue_failure(client, monkeypatch, cleanup):
+    """Retry is the designated recovery path for a failed background dispatch
+    (component 56), so its upstream-failure semantics matter: a Prefect
+    failure here must be the contract's 502, not a raw 500 — and the row must
+    flip back to failed so the button stays available."""
+    resp = client.post("/admin/documents", json={
+        "uri": "https://arxiv.org/pdf/1706.03762", "kind": "paper"}, headers=AUTH)
+    doc_id = resp.json()["id"]
+    cleanup.append(doc_id)
+    db.set_document_status(doc_id, "failed", error="first failure")
+
+    from src.api import admin as admin_module
+
+    def _boom(*a, **k):
+        raise RuntimeError("Prefect Cloud unreachable")
+
+    monkeypatch.setattr(admin_module.jobs, "enqueue_document", _boom)
+    resp = client.post(f"/admin/documents/{doc_id}/retry", headers=AUTH)
+    assert resp.status_code == 502
+    assert db.get_document(doc_id)["status"] == "failed"

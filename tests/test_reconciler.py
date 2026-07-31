@@ -106,6 +106,10 @@ def test_flow_run_dead_true_for_every_non_completed_state(monkeypatch):
     except COMPLETED is treated as restart-worthy."""
     from prefect.client.schemas.objects import StateType
 
+    # Component 57 refined SCHEDULED: it stays restart-worthy only when no
+    # worker heartbeat is present (pinned False here so the original contract
+    # is what's under test, regardless of any local Redis).
+    monkeypatch.setattr(reconciler.liveness, "worker_alive", lambda: False)
     for bad in (StateType.CRASHED, StateType.FAILED, StateType.CANCELLED,
                StateType.RUNNING, StateType.PENDING, StateType.SCHEDULED):
         monkeypatch.setattr(reconciler, "_read_flow_run", lambda fid, _b=bad: _FakeRun(_b))
@@ -247,3 +251,66 @@ def test_reconcile_still_skips_non_pending_rows_with_no_flow_run_id(monkeypatch,
     reconciler.reconcile_once()
     assert not called
     assert db.get_document("doc_seedlike1")["status"] == "embedding"
+
+
+# ── Component 57 (DESIGN.md §3m) — SCHEDULED backlog vs dead run ─────────────
+# A SCHEDULED run is "created, waiting for pickup". With a real backlog (bench
+# submits 16 docs against a handful of worker slots) later waves sit SCHEDULED
+# well past the stale window, and treating that as dead re-enqueued them —
+# duplicate flow runs minted exactly while throughput was being measured. The
+# discriminator is the component-57 worker heartbeat: SCHEDULED + a live
+# worker polling = healthy backlog, leave it. No heartbeat (worker actually
+# dead, or Redis off/unreachable) = today's restart behavior. PENDING and
+# RUNNING keep restarting regardless — a worker killed mid-launch leaves
+# PENDING, killed mid-execution leaves RUNNING, and both MUST recover for the
+# resilience gate.
+
+def test_reconcile_leaves_scheduled_backlog_alone_when_a_worker_is_alive(monkeypatch, cleanup):
+    from prefect.client.schemas.objects import StateType
+
+    cleanup.append("doc_backlog_c57a")
+    _make_document("doc_backlog_c57a", "pending", age_s=200, flow_run_id="sched-c57a")
+    monkeypatch.setattr(reconciler, "_read_flow_run",
+                        lambda fid: _FakeRun(StateType.SCHEDULED))
+    monkeypatch.setattr(reconciler.liveness, "worker_alive", lambda: True)
+    called = []
+    monkeypatch.setattr(reconciler.jobs, "enqueue_document",
+                        lambda *a, **k: called.append(a) or "dup-run")
+    assert reconciler.reconcile_once() == 0
+    assert not called, "healthy SCHEDULED backlog must not be re-enqueued"
+
+
+def test_reconcile_restarts_a_scheduled_run_when_no_worker_is_alive(monkeypatch, cleanup):
+    from prefect.client.schemas.objects import StateType
+
+    cleanup.append("doc_backlog_c57b")
+    _make_document("doc_backlog_c57b", "pending", age_s=200, flow_run_id="sched-c57b")
+    monkeypatch.setattr(reconciler, "_read_flow_run",
+                        lambda fid: _FakeRun(StateType.SCHEDULED))
+    monkeypatch.setattr(reconciler.liveness, "worker_alive", lambda: False)
+
+    def _fake_enqueue(doc_id, uid, kind):
+        return "rescued-c57b"
+
+    monkeypatch.setattr(reconciler.jobs, "enqueue_document", _fake_enqueue)
+    assert reconciler.reconcile_once() >= 1
+    assert db.get_document("doc_backlog_c57b")["flow_run_id"] == "rescued-c57b"
+
+
+def test_reconcile_restarts_a_pending_run_even_with_a_live_worker(monkeypatch, cleanup):
+    """Killed-mid-launch leaves the run stuck PENDING while the restarted
+    worker heartbeats happily — the resilience gate depends on this shape
+    still recovering."""
+    from prefect.client.schemas.objects import StateType
+
+    cleanup.append("doc_backlog_c57c")
+    _make_document("doc_backlog_c57c", "fetching", age_s=200, flow_run_id="pend-c57c")
+    monkeypatch.setattr(reconciler, "_read_flow_run",
+                        lambda fid: _FakeRun(StateType.PENDING))
+    monkeypatch.setattr(reconciler.liveness, "worker_alive", lambda: True)
+
+    def _fake_enqueue(doc_id, uid, kind):
+        return "rescued-c57c"
+
+    monkeypatch.setattr(reconciler.jobs, "enqueue_document", _fake_enqueue)
+    assert reconciler.reconcile_once() >= 1

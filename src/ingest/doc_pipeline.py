@@ -25,6 +25,7 @@ in a non-terminal state instead of a false positive (DESIGN.md component 4).
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -117,8 +118,9 @@ def t_fetch(doc_id: str, user_id: str) -> str:
     key = storage.doc_key(user_id, doc_id, path.suffix)
     storage.upload_file(path, key, "application/pdf" if path.suffix == ".pdf" else
                         "application/vnd.openxmlformats-officedocument.presentationml.presentation")
-    db.set_document_storage_key(doc_id, key)
-    db.set_document_status(doc_id, "fetching", source_hash=source_hash)
+    # One write, not two (component 57): storage_key and source_hash land in
+    # the same UPDATE.
+    db.set_document_status(doc_id, "fetching", source_hash=source_hash, storage_key=key)
     return str(path)
 
 
@@ -127,7 +129,9 @@ def t_parse(doc_id: str, user_id: str, path: str, kind: str) -> list[dict]:
     """PDF/PPTX -> normalized chunk dicts: {locator_key, locator, text,
     section, needs_caption, image_jpeg}. locator_key is 'page' for papers,
     'slide' for decks — the exact field name the citation payload carries."""
-    db.set_document_status(doc_id, "parsing", progress=0.0)
+    # Component 57: the old progress=0.0 write here was a separate round trip
+    # bracketing seconds of work — the per-kind write below already flips the
+    # row to 'parsing', so the lifecycle (component 1) is unchanged.
     if kind == "paper":
         raw = paper_mod.parse_pdf(Path(path))
         chunks = [{"locator_key": "page", "locator": c.page, "text": c.text,
@@ -158,15 +162,25 @@ def t_caption(doc_id: str, user_id: str, chunks: list[dict]) -> list[dict]:
     cfg = llm.env_config()
     if cfg is None:
         return chunks
-    for c in chunks:
-        if not c["needs_caption"] or not c.get("image_jpeg"):
-            continue
+    todo = [c for c in chunks if c["needs_caption"] and c.get("image_jpeg")]
+    if not todo:
+        return chunks
+
+    def _caption_one(c: dict) -> None:
         try:
             caption = llm.caption_image(c["image_jpeg"], cfg)
             c["text"] = f"{c['text']} {caption}".strip()
         except Exception as exc:
             print(f"[doc-caption] {doc_id} {c['locator_key']} {c['locator']}: "
                  f"caption failed ({type(exc).__name__}: {exc}) — using extracted text only")
+
+    # Component 57 (DESIGN.md §3m): the captions were the only genuinely
+    # per-chunk network work in the flow, and they ran strictly serially — an
+    # image-heavy deck paid one full vision round trip per slide. Bounded
+    # fan-out; each caption still fails independently (same best-effort
+    # contract as before, now proven by a dedicated test).
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        list(ex.map(_caption_one, todo))
     return chunks
 
 

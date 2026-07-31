@@ -157,8 +157,16 @@ def retry_document(doc_id: str, uid: str = Depends(user_id_dep)):
     if row is None or row["user_id"] != uid:
         raise HTTPException(404, "Document not found.")
     db.set_document_status(doc_id, "pending", error=None)
-    flow_run_id = jobs.enqueue_document(doc_id, uid, row["kind"])
-    db.set_document_flow_run_id(doc_id, flow_run_id)
+    # Deliberately synchronous, unlike registration (component 56): the retry
+    # response carries flow_run_id, and this is the recovery path for a failed
+    # background dispatch — so an upstream failure here is the contract's 502,
+    # with the row flipped back to failed so retry stays available.
+    try:
+        flow_run_id = jobs.enqueue_document(doc_id, uid, row["kind"])
+        db.set_document_flow_run_id(doc_id, flow_run_id)
+    except Exception as exc:
+        db.set_document_status(doc_id, "failed", error=f"enqueue: {exc}")
+        raise HTTPException(502, "Failed to schedule ingestion.") from exc
     return {"id": doc_id, "status": "pending", "flow_run_id": flow_run_id}
 
 
