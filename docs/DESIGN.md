@@ -697,6 +697,50 @@ Primary eval:
   Prefect API that its flow run reaches a cancelled/terminal state rather than
   staying scheduled.
 
+### 3l. Parallel visual + text branch search (added 2026-07-31, DECIDED — own scope)
+
+Found while answering a direct question about search latency: `src/rag/search.py`'s
+`_retrieve_impl` runs the visual branch (CLIP frame search) and the text branch (hybrid
+dense+sparse search) **sequentially** — the text branch doesn't start until the visual
+branch's `_merge_hits(...)` call has fully returned — despite `ARCHITECTURE.md`'s own §6
+sequence diagram drawing them as a `par ... and ...` block. The diagram was aspirational,
+not descriptive; this component closes that gap for real. The two branches have no data
+dependency (neither reads the other's output before its own Qdrant call), so today's
+`visual_time + text_time` should be `max(visual_time, text_time)`.
+
+**The real complication, found by reading `src/tracing.py` before writing any code**:
+`_stack()` (the current-span stack `search_visual`/`search_text` push themselves onto) is
+`threading.local()` — deliberately, so concurrent *requests* (Starlette's own sync-handler
+thread pool) never cross-contaminate each other's spans. But that same isolation means a
+NEW worker thread spawned *mid-request* (to run the two branches concurrently) starts with
+an empty stack: `tracing.span("search_visual")` inside it would see no parent, mint a fresh
+`trace_id`, and produce a disconnected second trace root instead of nesting under
+`retrieve` — silently breaking every trace tree component 45 built, exactly the kind of
+regression `tests/test_rag_spans.py` already guards (`s["retrieve"]["parent"] ==
+s["ask"]["id"]`, `len({r["trace_id"] for r in sink.spans}) == 1`).
+
+**Fix, scoped narrowly:** two new functions in `tracing.py` — `current_stack()` (a
+snapshot of the calling thread's span stack) and `adopt_stack(stack)` (install a captured
+stack as the calling thread's own) — let `_retrieve_impl` capture its stack once in the
+main thread, then have each `ThreadPoolExecutor`-submitted branch function adopt it before
+opening its own span. No change to `tracing.py`'s public contract otherwise; no change to
+what any span records, only to which thread computes it.
+
+| # | Component | File | Notes |
+|---|-----------|------|-------|
+| 54 | Parallel visual + text branch search | `src/rag/search.py`, `src/tracing.py` | `search_visual` and `search_text` run as two `ThreadPoolExecutor` tasks instead of sequential calls; span-stack propagation (`current_stack`/`adopt_stack`) keeps both branches correctly nested under `retrieve` in the trace tree. Behavior-preserving: same hits, same fusion input, same span attributes — only the wall-clock shape changes. |
+
+Primary eval:
+- **54** — unit: with both branches mocked to sleep a fixed duration, total
+  `_retrieve_impl` wall time is close to `max(visual_sleep, text_sleep)`, not
+  their sum (RED today: it's the sum). Regression: `search_visual` and
+  `search_text` spans still report the SAME `trace_id` as `ask`/`retrieve`,
+  and `search_visual`'s/`search_text`'s `parent` is still `retrieve`'s span
+  id — the existing `tests/test_rag_spans.py` nesting assertions must keep
+  passing unchanged. `test_results_are_identical_with_tracing_off`-style
+  check: citations/fusion output byte-identical to the pre-parallelization
+  behavior on the same stubbed inputs.
+
 ## 4. Corpus & scale plan (right-sized — DECIDED)
 
 The product ships **pre-built with the 8 curated triplets** in `benchmark/corpus.json`
