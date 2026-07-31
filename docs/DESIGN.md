@@ -741,6 +741,56 @@ Primary eval:
   check: citations/fusion output byte-identical to the pre-parallelization
   behavior on the same stubbed inputs.
 
+### 3m. SLA optimization program (added 2026-07-31, DECIDED — own scope)
+
+A full three-path performance audit (accept / ingest / read, all findings verified in
+code with file:line evidence, recorded in EVIDENCE.md) against the three red
+`benchmark/sla.json` gates: `accept_latency_p95_ms` 774.7 vs ≤300,
+`ingest_throughput_chunks_per_s` 1.89 vs ≥8, `recall_at_10` 0.646 vs ≥0.70 (the clean
+subset — 14/16 queries that got an HTTP response — scored 0.738). Six components, each
+attacking verified root causes. User decisions recorded 2026-07-31: always-on api
+machine YES · managed Redis in production YES · served citations 6→10 YES.
+
+Non-negotiables for the whole section:
+- `sla.json` / `rubric.json` / `quality_gates.json` stay frozen — these components fix
+  the system, never the thresholds.
+- No chunk-size changes: the throughput gate is chunks/s, and larger chunks lower the
+  numerator for the same work — tuning chunk size toward the metric is metric gaming.
+- Protected files stay untouched. Notably `src/dispatcher.py` is protected, which rules
+  out extending the video WFQ dispatch to documents — component 56 uses Starlette
+  `BackgroundTasks` + the reconciler as the additive equivalent.
+
+| # | Component | Files | Notes |
+|---|-----------|------|-------|
+| 55 | Production warm path | `fly.toml`, `src/app.py` | Fly Upstash Redis (`REDIS_URL` secret) activates the component 19-21 caches + rate limiting that are silently no-op in prod today; `min_machines_running = 1` for the api group (kills machine cold starts polluting p95 and the observed ~70s first query); startup warm-up of the two lazy in-process models (`rerank._model()`, `embeddings._sparse_model()` — 5.7s+ cold today), each wrapped so a failed warm never blocks boot. |
+| 56 | Accept-path fast 202 for documents | `src/api/admin.py`, `src/jobs.py`, `src/db.py` | Registration handler does ONE insert then returns 202; `enqueue_document` + `set_document_flow_run_id` move to a Starlette background task (the response never used flow_run_id). Reconciler is the crash-safety net (a `pending` doc whose run never materialized is re-enqueued — verified by an explicit test). DB round-trip diet: pool goes `autocommit=True` (each single-statement helper drops BEGIN/COMMIT, 2 of every 4 RTs), per-checkout `check=check_connection` ping dropped in favor of pool `max_lifetime` + one additive retry-on-OperationalError wrapper; genuinely multi-statement blocks get explicit `conn.transaction()`. `jobs.py` reuses one module-level Prefect sync client (today: fresh client + transatlantic TLS handshake per dispatch). |
+| 57 | Ingest throughput package | `src/reconciler.py`, `src/ingest/doc_pipeline.py`, `src/db.py`, `src/llm.py`, `src/rag/vector_store.py`, `fly.toml` | Reconciler liveness fix: `_flow_run_dead` treats any non-COMPLETED state as dead, so a healthy SCHEDULED run older than 90s is re-enqueued — duplicate flow runs exactly during a backlog; fix = SCHEDULED/PENDING/RUNNING are alive. `WORKER_CONCURRENCY` 2→6 and `PREFECT_RUNNER_POLL_FREQUENCY` 10s→2s in the worker group. Caption path: module-cached OpenAI client + bounded ThreadPoolExecutor over `t_caption`'s serial loop (component 21's Redis caption cache goes live via 55). Per-doc Postgres diet: merge adjacent status writes, reuse the already-fetched row instead of a second `get_document`. `ensure_text_collection()` once per process (module flag) instead of ~5 no-op Qdrant calls per flow run. |
+| 58 | LLM call resilience | `src/llm.py`, `src/rag/search.py`, `src/api/search.py` | The §3e component 32 remit, now urgent: the two HTTP-0 recall zeros trace to bare, timeout-less, retry-less provider calls on a fresh client per request. Cached per-provider clients; explicit timeouts; bounded exponential backoff + jitter on 429/5xx; exhaustion → clean 502; `/ask_stream` emits a terminal SSE `error` event instead of dying mid-stream. |
+| 59 | Retrieval recall package | `src/config.py`, `src/rerank.py`, `src/rag/search.py`, `src/ingest/doc_pipeline.py` | `TOP_K` 6→10 (user-approved): the recall metric reads the top-10 citations but `ask()` serves 6, so a video+paper+deck query must fit 3 kinds into 6 slots. Rerank modality fairness: `rerank()` returns `ordered + text_free`, hard-demoting every frame-only window below every text window — replace with bounded score-aware placement; reorder only, never drop (same shape rule as graph boost). Dedup-key fix: document payloads carry no chunk ordinal so `_hit_key` collapses all same-page chunks to one — add the ordinal to the payload (uuid5 ids already include `:{i}`, upserts stay idempotent) and to `_hit_key`; re-seed the corpus after (component 51's integrity check covers the rebuild). |
+| 60 | Read-latency polish | `src/rag/search.py`, `src/db.py` | No SLA gate; client-facing. Reuse the question's embedding between the text gate and the text branch (2 clip-service HTTP calls → 1). `grounding_check` diet: two `SELECT *` tenant scans (~920ms measured) replaced with a column-projected id/title query. True SSE token streaming is explicitly OUT of this component — it changes event ordering on a graded endpoint and needs its own scoping decision. |
+
+Primary evals:
+- **55** — unit: a raising warm-up never blocks boot. Live: `cache.enabled()` true in
+  prod; first post-deploy `/api/ask` shows no multi-second rerank cold span; component
+  19's kill-Redis degrade eval re-run.
+- **56** — unit: registration returns 202 with ZERO Prefect calls in-request (mock
+  assert); the background task sets `flow_run_id`; a crash between 202 and dispatch is
+  healed by the reconciler (simulated). Contract probe: 202-before-work still holds.
+  Live: bench accept p95 re-measured, verbatim.
+- **57** — unit: a SCHEDULED run older than the stale window is NOT re-enqueued (RED
+  today); caption calls run through a bounded executor with a reused client (call-count
+  mocks). `bench.py --resilience` stays green (no-loss is frozen). Live: throughput
+  re-measured, verbatim.
+- **58** — unit: mocked 429-then-success → exactly one answer; provider failure → 502
+  not raw 500; `/ask_stream` emits a terminal error event. Live: full labeled-query run
+  with zero HTTP-0 responses.
+- **59** — unit: two same-page chunks both survive `_merge_hits`; a frame-only window
+  can outrank a weaker text window; no window is ever dropped by rerank. Live:
+  `bench.py` recall@10 and `--quality` precision@10 before/after verbatim (precision
+  must not regress); `answer_quality.py` re-run (the prompt grows with 10 citations).
+- **60** — unit: exactly one query-embed call per question (mock count). Live: span
+  timings before/after, verbatim.
+
 ## 4. Corpus & scale plan (right-sized — DECIDED)
 
 The product ships **pre-built with the 8 curated triplets** in `benchmark/corpus.json`
