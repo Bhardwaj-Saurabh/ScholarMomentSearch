@@ -128,6 +128,19 @@ def _sparse_model():
     return SparseTextEmbedding(config.SPARSE_EMBED_MODEL)
 
 
+def warm_sparse() -> None:
+    """Load the BM25 sparse embedder ahead of the first request (component 55,
+    DESIGN.md §3m). There is no clip-service route for sparse vectors, so this
+    model always loads in-process — lazily, on the first hybrid search of each
+    process, until warmed here. Fail-open like every other warm-up."""
+    if not config.ENABLE_HYBRID_TEXT_SEARCH:
+        return
+    try:
+        _sparse_model()
+    except Exception as exc:
+        print(f"[warmup] sparse embedder load failed ({exc!r}) — first hybrid search will pay it")
+
+
 def embed_sparse_docs(texts: list[str]) -> list:
     """BM25-style sparse vectors for transcript/paper/deck chunks (passage
     side)."""

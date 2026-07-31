@@ -26,6 +26,20 @@ def _model():
     return CrossEncoder(config.RERANK_MODEL)
 
 
+def warm() -> None:
+    """Load the cross-encoder ahead of the first request (component 55,
+    DESIGN.md §3m). Measured lazily: 5725.9ms cold in-process, 68s worst case
+    when the first-ever call also downloads the model — a cost that lands on a
+    real user's query unless paid at boot. Fail-open: a failed warm just means
+    the first rerank pays the load, exactly as before."""
+    if not config.RERANK_ENABLED:
+        return
+    try:
+        _model()
+    except Exception as exc:
+        print(f"[warmup] reranker load failed ({exc!r}) — first rerank will pay it")
+
+
 def _window_text(w: dict[str, Any]) -> str | None:
     """The text a window carries, if any — transcript for a video window,
     page/slide text for a document window. None for a pure frame match."""

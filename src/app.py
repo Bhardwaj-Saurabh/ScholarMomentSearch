@@ -19,6 +19,7 @@ Run:
 """
 from __future__ import annotations
 
+import threading
 import time
 from contextlib import asynccontextmanager
 
@@ -31,7 +32,20 @@ from .api.metrics import router as metrics_router
 from .api.search import router as search_router
 from .api.videos import require_auth as videos_require_auth
 from .api.videos import router as videos_router
-from .rag import vector_store
+from .rag import embeddings, rerank, vector_store
+
+
+def _warm_models() -> None:
+    """Component 55 (DESIGN.md §3m): pre-load the two lazy in-process models —
+    the cross-encoder reranker (5.7s cold, 68s with the first-ever download)
+    and the BM25 sparse embedder — so no user request pays that cost. Runs in
+    a daemon thread from the lifespan: a slow model download must never delay
+    serving or fail a health check, and a broken one must never block boot."""
+    for name, fn in (("reranker", rerank.warm), ("sparse embedder", embeddings.warm_sparse)):
+        try:
+            fn()
+        except Exception as exc:
+            print(f"[startup] {name} warm-up failed ({exc!r}) — first use will pay the load")
 
 
 @asynccontextmanager
@@ -61,6 +75,9 @@ async def lifespan(app: FastAPI):
             print(f"[startup] pushed prompts to Opik: {', '.join(pushed)}")
     except Exception as exc:
         print(f"[startup] tracing backends unavailable ({exc!r}) — continuing untraced")
+    # Component 55: warm the lazy models off the boot path. Daemon thread so a
+    # cold model download (up to ~68s first-ever) can never block serving.
+    threading.Thread(target=_warm_models, name="model-warmup", daemon=True).start()
     yield
 
 

@@ -64,7 +64,11 @@ primary_region = 'lhr'
   force_https = true
   auto_stop_machines = 'stop'
   auto_start_machines = true
-  min_machines_running = 0
+  # Component 55 (DESIGN.md §3m, user-approved 2026-07-31): one api machine
+  # stays up so no request pays a machine cold start + lazy model loads — the
+  # measured cost was a ~70s first query after idle, and it polluted every
+  # p95 the benchmark records.
+  min_machines_running = 1
   processes = ['api']
 
   # Component 28: GET /api/health now actually pings Postgres + Qdrant
