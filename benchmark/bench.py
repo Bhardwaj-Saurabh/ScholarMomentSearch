@@ -65,21 +65,32 @@ def p95(xs):
 
 def measure_accept_latency(n=30):
     """POST /admin/documents should enqueue-and-return fast (no parsing in-request).
-    Deletes its own probe documents afterward (component 34's DELETE route) —
-    without this, every bench.py run permanently littered Postgres with
-    fake-URL documents the reconciler retried forever, each retry adding a
-    fresh Prefect scheduled run. That ongoing leak, not one-time debris, is
-    what was actually starving ingest_throughput_chunks_per_s
-    (EVIDENCE.md 2026-07-31)."""
-    lat, ids = [], []
+
+    Deletes each probe IMMEDIATELY after its own request (component 34's
+    DELETE route) rather than batching all n deletes until after the whole
+    loop. Found the hard way (EVIDENCE.md 2026-07-31): batching left a wide
+    window — the whole ~n-request loop's duration — during which the worker
+    could pick up a probe's scheduled flow run and start `t_fetch()` reading
+    the very row this function was about to delete, producing a real
+    'ValueError: no manifest row for doc_X' crash instead of the probe's
+    intended fast, harmless 404. Deleting inline shrinks that window to
+    roughly one request's own latency, which comfortably beats Prefect's
+    poll interval in the common case — but per-probe cancellation racing an
+    already-started worker pickup is a real, disclosed possibility, not
+    fully eliminated. Also the actual fix for the worker-capacity waste this
+    caused: an orphaned probe's fetch task was retrying twice (30s + 120s
+    backoff, ~150s total) before giving up, tying up one of only
+    WORKER_CONCURRENCY(=2) worker slots the whole time — that's what was
+    starving ingest_throughput_chunks_per_s in the SAME bench.py run, not
+    old debris from a previous one."""
+    lat = []
     for i in range(n):
         st, body, ms = _req("POST", "/admin/documents", token=ADMIN,
                             body={"uri": f"https://example.com/probe_{i}.pdf",
                                   "kind": "paper", "title": f"probe {i}"})
         if st == 202:
             lat.append(ms)
-            ids.append(json.loads(body)["id"])
-    _delete_documents(ids)
+            _delete_documents([json.loads(body)["id"]])
     return p95(lat) if lat else float("inf")
 
 
@@ -338,22 +349,27 @@ def _fresh_bench_tenant(label: str) -> str:
     return f"bench-{label}-{uuid.uuid4().hex[:10]}"
 
 
-def run_concurrent_ingest_load(n: int = 20) -> None:
+def run_concurrent_ingest_load(n: int = 20) -> tuple[list[str], str]:
     """Fire n REAL document registrations (real arXiv PDFs, not throwaway
     URLs) so search-during-ingest measures genuine fetch/parse/embed
     contention, not just a fast-failing HTTP GET. Runs under its own fresh
     tenant (see _fresh_bench_tenant) so these actually parse+embed instead of
-    deduping against the seeded corpus. The submitted flows keep running in
-    the worker process independently of this function's return, so the
-    contention window for the caller's concurrent search-p95 measurement is
-    unaffected by deleting right away — component 34's DELETE route (via
-    component 53) cleanly cancels whatever stage each is at. No wait-for-
-    terminal here on purpose: this measurement never needed these documents
-    to finish, only to be in flight, and waiting would add real wall-clock
-    time to every bench.py run for no benefit."""
+    deduping against the seeded corpus.
+
+    Returns (ids, user) rather than deleting here: an earlier version deleted
+    immediately after submission, reasoning the flows "keep running
+    independently" — true, but deleting the row out from under a flow that
+    had ALREADY started reading it (a race, not a guarantee) produced a real
+    'ValueError: no manifest row for doc_X' worker crash (EVIDENCE.md
+    2026-07-31), not a clean cancel. The caller deletes these only after its
+    own concurrent search-p95 "during" measurement completes — by then the
+    flows have had the whole measurement's wall-clock time to run, which
+    doesn't eliminate the race but shrinks it from 'immediately' to 'after a
+    real processing window', matching the actual disclosed-not-eliminated
+    tolerance this project already uses for the SIGKILL-mid-upload race."""
     user = _fresh_bench_tenant("load")
     ids = _submit_documents(_cycle_to_n(_load_corpus_uris(), n), user=user)
-    _delete_documents(ids, user=user)
+    return ids, user
 
 
 def measure_throughput(n: int = 16, timeout_s: float = 600.0) -> float:
@@ -495,7 +511,8 @@ def main():
     with ThreadPoolExecutor(max_workers=1) as ex:
         load_fut = ex.submit(run_concurrent_ingest_load, 20)
         during = measure_search_p95()
-        load_fut.result()
+        load_ids, load_user = load_fut.result()
+    _delete_documents(load_ids, user=load_user)
     ratio = (during / idle) if idle else float("inf")
     gate("search_p95_during_ingest_ratio", round(ratio, 2),
          ratio <= SLA["search_p95_during_ingest_ratio_max"], SLA["search_p95_during_ingest_ratio_max"])
