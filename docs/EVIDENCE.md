@@ -5863,3 +5863,95 @@ carries none of this local session's history.
 **Commit**: `f1bedfe` (components 52-53 code), `fd1b534` (component 34
 code), `5cfa727` (the delete-before-pickup race fix) — all on top of
 `c45a978` (DESIGN.md §3k scope). This entry.
+
+---
+
+## 2026-07-31 (later) — Production migrated to London (Fly `lhr` + Neon/Qdrant
+`eu-west-2`), an OOM found and fixed, and component 54: parallel branch search
+
+**Region migration.** Neon (`us-east-2`) and Qdrant Cloud (`us-west-1`) were
+both recreated in `eu-west-2` (London) at the user's request, to align with
+the home-network testing this whole investigation was run from. Isolated
+Postgres round-trip timing, same method as the earlier entries: **400-620ms
+(us-east-2) -> 57-68ms (eu-west-2)**, an ~8x drop. Fly's `iad` machines were
+cloned to `lhr` one process group at a time (api, worker, clip), verified
+individually, then all `iad` machines destroyed — `fly.toml`'s
+`primary_region` updated to `lhr` to match.
+
+**A real, separate production incident found and fixed along the way**: the
+new Qdrant cluster returned `403 Forbidden` to every Fly-originated request
+(local connections from this laptop worked fine with the same URL). Tested
+from BOTH `iad` and a cloned `lhr` machine — identical 403 in both regions,
+ruling out an IP-allowlist theory. Root cause: the Qdrant API key in `.env`
+did not match the (recreated) cluster; once the user regenerated and set the
+correct key, `/api/health` immediately reported `{"ok":true,"postgres":true,
+"qdrant":true}` from production, confirmed live with a real `/api/ask` query
+returning genuine cited results.
+
+**A second, unrelated production incident found and fixed**: the first
+production `bench.py` run against the migrated stack measured
+`accept_latency_p95_ms: 8834.8` — worse than the ORIGINAL pre-migration
+number. `fly logs` showed why: `Out of memory: Killed process 650 (uvicorn)
+total-vm:2654600kB` — the single `api` machine (`shared-cpu-1x`, 1024MB) was
+being OOM-killed and rebooting mid-benchmark, twice within minutes, and a few
+of the 30 sequential requests landed during that reboot window. Resized to
+`shared-cpu-2x`/3gb (`fly machine update --vm-size shared-cpu-2x --vm-memory
+3072`); no further OOM in logs afterward.
+
+**Real, clean production bench.py numbers post-fix**:
+```
+accept_latency_p95_ms: 774.7 (target 300) — FAIL, but down from 2354.4 originally
+search_p95_during_ingest_ratio: 1.0 (target 1.3) — PASS
+recall_at_10: 0.646 (target 0.70) — FAIL, flagged unclean by bench.py itself:
+  2/16 labeled queries hit "HTTP 0" (RemoteDisconnected), correlating with an
+  isolated worker flow crash at the same timestamp — not a quality regression
+ingest_throughput_chunks_per_s: 1.89 (target 8) — FAIL, but real: up from 0.0.
+  Documents are now genuinely indexing in production; WORKER_CONCURRENCY=2 is
+  the likely remaining constraint now that network latency no longer masks it
+```
+None of the three original SLA gates are fully green yet, but all three moved
+in the right direction by a real, measured amount, and the two production
+incidents above (wrong API key, undersized api machine) are now fixed for
+good, not just for this one test run.
+
+**Component 54 — parallel visual + text branch search.** Found while
+answering a direct question about search latency: `src/rag/search.py`'s
+`_retrieve_impl` ran the visual (CLIP) and text (hybrid dense+sparse) search
+branches sequentially, despite `ARCHITECTURE.md`'s own §6 diagram drawing
+them as concurrent (`par ... and ...`) — the diagram was aspirational, not
+descriptive. Fixed for real via `ThreadPoolExecutor`, with one real
+complication found by reading `src/tracing.py` before writing any code:
+`_stack()` is `threading.local()` on purpose (so concurrent requests never
+cross-contaminate spans), which means a worker thread spawned mid-request
+starts with an empty span stack — `search_visual`/`search_text` would have
+silently become disconnected trace roots instead of children of `retrieve`.
+Added `tracing.current_stack()`/`adopt_stack()` to propagate the span
+context into each branch's thread before it opens its own span.
+
+Full EDD: scoped in `DESIGN.md` §3l (component 54, own commit) before any
+code. Evals written and confirmed RED first:
+- `tests/test_tracing.py`: 4 new tests for `current_stack`/`adopt_stack`
+  (snapshot correctness, cross-thread nesting, and — the regression lock —
+  a test proving the ORIGINAL bug is real: a plain `threading.Thread`
+  without `adopt_stack()` produces a disconnected `trace_id` and `parent:
+  None`).
+- `tests/test_rag_spans.py`: a timing test (both branches mocked to
+  `time.sleep`; asserts wall time tracks the SLOWER branch, not the sum —
+  measured RED at 0.662s against a 0.5s threshold, matching the predicted
+  sequential 3×SLEEP_S exactly) and a nesting-regression test (`search_visual`/
+  `search_text` still report `parent == retrieve.id` and share one
+  `trace_id` after parallelization).
+- One early false-RED found and fixed in the timing test itself: the first
+  run measured 8-10s, not the predicted ~0.6s — traced to `RERANK_ENABLED`
+  defaulting to `True` and loading a real cross-encoder model on first use
+  in the test process, entirely unrelated to the branch-search timing being
+  measured. Disabled explicitly in the test once found.
+
+GREEN: `tests/test_tracing.py` 20/20, `tests/test_rag_spans.py` 12/12. Full
+suite: **647 passed** (up from 640 — 7 new tests), same 9 pre-existing
+unrelated failures, 0 regressions.
+
+**Commit**: `2148e24` (DESIGN.md §3l scope), `d6a30dd` (component 54 code).
+Region migration and the two production incidents were operational actions
+(Fly/Neon/Qdrant console + CLI work), not code changes, so they have no
+separate commit — this entry is their record.
