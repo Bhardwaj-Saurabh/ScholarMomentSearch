@@ -405,7 +405,10 @@ QDRANT_HNSW_ON_DISK = _envbool("QDRANT_HNSW_ON_DISK", True)
 HEALTH_CACHE_TTL_S = _int("HEALTH_CACHE_TTL_S", 5)
 
 # --- Retrieval / faithfulness ------------------------------------------------------
-TOP_K = _int("TOP_K", 6)                 # frames fed to the multimodal LLM (3-8)
+# 6 -> 10 (component 59, DESIGN.md §3m, user-approved 2026-07-31): the
+# recall@10 metric reads the top-10 citations, but ask() only served 6 — a
+# query expecting video+paper+deck had to fit three kinds into six slots.
+TOP_K = _int("TOP_K", 10)                # moments fed to the multimodal LLM
 KNN_K = _int("KNN_K", 24)                # candidates fetched before trimming to TOP_K
 # Gate 1: abstain WITHOUT calling the LLM if BOTH branches' best raw score is
 # below their threshold. Fusion scores are RRF (tiny), so the gate uses each

@@ -9,7 +9,14 @@ into rank, letting a borderline match tie a genuinely strong one).
 
 Frame-only windows (pure visual match, no transcript/chunk text at that
 instant) have nothing for a text cross-encoder to read — they keep their
-original fused order and always rank after every text-scored window.
+FUSED-RANK POSITION (component 59, DESIGN.md §3m). The original shape
+(`ordered + text_free`) demoted every pure-visual moment below every text
+window; with BRANCH_TOP_K=20 text candidates that meant a visual-only moment
+effectively could never reach the final top-k, directly costing recall on
+queries expecting a video citation. The cross-encoder never read those
+windows, so it has no basis to demote them: text windows re-sort by CE score
+among the positions text windows collectively held, frame-only windows hold
+their own fused positions. Reorder only — never drop, never add.
 """
 from __future__ import annotations
 
@@ -49,7 +56,7 @@ def _window_text(w: dict[str, Any]) -> str | None:
 
 def rerank(question: str, windows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Re-score every text-bearing window against the question; frame-only
-    windows keep their original relative order and rank after all of them."""
+    windows keep their fused-rank position (see module docstring)."""
     scored: list[tuple[dict[str, Any], str]] = []
     text_free: list[dict[str, Any]] = []
     for w in windows:
@@ -73,6 +80,11 @@ def rerank(question: str, windows: list[dict[str, Any]]) -> list[dict[str, Any]]
                       frame_only=len(text_free),
                       top_score=float(max(scores)) if len(scores) else 0.0,
                       min_score=float(min(scores)) if len(scores) else 0.0)
-    ordered = [w for (w, _text), _score in
-              sorted(zip(scored, scores), key=lambda item: item[1], reverse=True)]
-    return ordered + text_free
+    ordered = iter(w for (w, _text), _score in
+                   sorted(zip(scored, scores), key=lambda item: item[1], reverse=True))
+    # Position merge (component 59): walk the ORIGINAL fused order — a text
+    # position gets the next-best text window by cross-encoder score, a
+    # frame-only position keeps its own window. Same length, same identities,
+    # only the order among text windows changes.
+    frames = iter(text_free)
+    return [next(ordered) if _window_text(w) else next(frames) for w in windows]

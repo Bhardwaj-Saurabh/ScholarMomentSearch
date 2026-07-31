@@ -86,3 +86,26 @@ def test_tie_break_key_is_stable_for_hits_containing_none():
     b = rag_search._hit_key({"source_id": "doc_a", "page": 3})
     assert str(a) == str(b)
     assert None in a          # the shape this is guarding
+
+
+# ── Component 59 (DESIGN.md §3m) — same-page chunks must not collapse ────────
+# Document payloads carried no chunk ordinal, so every chunk from the same
+# page shared one _hit_key and _merge_hits kept only the best-scoring one —
+# silently discarding retrieved evidence even with a single sub-query.
+
+def test_two_chunks_from_the_same_page_both_survive_merge():
+    a = {"source_id": "doc_a", "kind": "paper", "page": 7, "chunk": 0,
+         "text": "the encoder stacks six identical layers", "score": 0.9}
+    b = {"source_id": "doc_a", "kind": "paper", "page": 7, "chunk": 1,
+         "text": "multi-head attention uses eight heads", "score": 0.8}
+    out = rag_search._merge_hits([[a, b]])
+    assert len(out) == 2, "distinct chunks on one page are distinct evidence"
+
+
+def test_identical_chunk_from_two_subqueries_still_dedupes():
+    a = {"source_id": "doc_a", "kind": "paper", "page": 7, "chunk": 0,
+         "text": "same chunk", "score": 0.7}
+    a2 = dict(a, score=0.9)
+    out = rag_search._merge_hits([[a], [a2]])
+    assert len(out) == 1
+    assert out[0]["score"] == 0.9  # best-scoring instance kept

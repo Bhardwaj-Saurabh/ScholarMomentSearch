@@ -6,8 +6,11 @@ chunk) against the raw question with a small cross-encoder, and sort by that
 score — RRF is rank-based (score-agnostic) by design, so two windows that tie
 or nearly tie on fused score may be very differently relevant once the actual
 text is read against the actual question. Frame-only windows (nothing for a
-text cross-encoder to read) keep their original order and rank after every
-text-scored window.
+text cross-encoder to read) keep their FUSED-RANK POSITION (component 59,
+DESIGN.md §3m): the old `ordered + text_free` shape demoted every pure-visual
+moment below every text window, which with 20 text candidates meant a
+visual-only moment effectively could never reach the final top-k at all —
+directly costing recall on queries expecting a video citation.
 
 Most tests here mock `rerank._model()` — pure reordering logic, no need for
 a real model download. One real-model test proves the actual cross-encoder
@@ -51,13 +54,39 @@ def test_rerank_reorders_by_cross_encoder_score(monkeypatch):
     assert out[1]["text"]["text"] == "mostly irrelevant filler text"
 
 
-def test_rerank_frame_only_windows_keep_original_order_after_text_windows(monkeypatch):
+def test_rerank_frame_only_window_keeps_its_fused_rank_position(monkeypatch):
+    """Component 59: a frame-only window that FUSION ranked first stays first —
+    the cross-encoder has nothing to read for it, so it has no basis to demote
+    it below text it also didn't compare against."""
     text_w = _video_window("some transcript text")
     frame_w = _frame_only_window()
     monkeypatch.setattr(rerank, "_model", lambda: _FakeCrossEncoder([0.5]))
-    out = rerank.rerank("q", [frame_w, text_w])  # frame_w listed first originally
-    assert out[0] is text_w   # text-scored window always ranks first
-    assert out[1] is frame_w  # frame-only window ranks after, never crashes
+    out = rerank.rerank("q", [frame_w, text_w])  # frame_w fused-ranked first
+    assert out[0] is frame_w  # keeps its fused position
+    assert out[1] is text_w
+
+
+def test_rerank_frame_only_window_can_outrank_a_weaker_text_window(monkeypatch):
+    """The discriminating fairness eval: text windows re-sort by cross-encoder
+    score AMONG the positions text windows collectively held; the frame-only
+    window holds its own fused position between them."""
+    text_low = _doc_window("mostly irrelevant filler")
+    frame_w = _frame_only_window()
+    text_high = _doc_window("the exact answer")
+    monkeypatch.setattr(rerank, "_model", lambda: _FakeCrossEncoder([0.1, 0.9]))
+    out = rerank.rerank("q", [text_low, frame_w, text_high])
+    assert out[0] is text_high  # best text takes the best text position
+    assert out[1] is frame_w    # fused position 2 stays a frame position
+    assert out[2] is text_low
+
+
+def test_rerank_never_drops_or_adds_windows(monkeypatch):
+    windows = [_doc_window("a"), _frame_only_window(), _doc_window("b"),
+               _frame_only_window(), _video_window("c")]
+    monkeypatch.setattr(rerank, "_model", lambda: _FakeCrossEncoder([0.3, 0.9, 0.6]))
+    out = rerank.rerank("q", windows)
+    assert len(out) == len(windows)
+    assert {id(w) for w in out} == {id(w) for w in windows}
 
 
 def test_rerank_all_frame_only_returns_windows_unchanged(monkeypatch):
@@ -80,9 +109,9 @@ def test_rerank_multiple_frame_only_windows_preserve_relative_order(monkeypatch)
     frame_1, frame_2 = _frame_only_window(rrf=0.9), _frame_only_window(rrf=0.8)
     monkeypatch.setattr(rerank, "_model", lambda: _FakeCrossEncoder([0.5]))
     out = rerank.rerank("q", [frame_1, frame_2, text_w])
-    assert out[0] is text_w
-    assert out[1] is frame_1  # original relative order among frame-only windows preserved
-    assert out[2] is frame_2
+    assert out[0] is frame_1  # fused positions 1-2 stay frame positions,
+    assert out[1] is frame_2  # in their original relative order
+    assert out[2] is text_w
 
 
 # ── Real cross-encoder: proves it actually favors the relevant passage ─────

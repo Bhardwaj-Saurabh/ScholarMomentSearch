@@ -196,10 +196,14 @@ def t_embed_index(doc_id: str, user_id: str, kind: str, chunks: list[dict]) -> i
     texts = [c["text"] for c in chunks]
     vectors = embed_docs(texts)
     payloads = [
+        # "chunk" ordinal (component 59): without it, every chunk from the
+        # same page shared one _hit_key and _merge_hits kept only the best —
+        # silently discarding retrieved evidence. Matches the :{i} already in
+        # the uuid5 point id, so re-ingests stay idempotent.
         {"user_id": user_id, "source_id": doc_id, "kind": kind,
          c["locator_key"]: c["locator"], "section": c.get("section"),
-         "text": c["text"], "embed_version": TEXT_EMBED_VERSION}
-        for c in chunks
+         "text": c["text"], "embed_version": TEXT_EMBED_VERSION, "chunk": i}
+        for i, c in enumerate(chunks)
     ]
     vector_store.upsert_document_chunks(user_id, doc_id, kind, vectors, payloads)
     db.set_document_status(doc_id, "indexed", chunk_count=len(chunks),

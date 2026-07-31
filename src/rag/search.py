@@ -32,9 +32,16 @@ def _seconds(ms: int) -> str:
 def _hit_key(h: dict[str, Any]) -> tuple:
     """Point identity for dedup across possibly-multiple sub-query result
     sets (component 17) — a video frame (video_id+idx), a video transcript
-    chunk (video_id+ms), or a document chunk (source_id+page/slide)."""
+    chunk (video_id+ms), or a document chunk (source_id+page/slide+chunk).
+
+    "chunk" (component 59, DESIGN.md §3m): paper pages split into several
+    chunks (paper.py::_split_within_page), and without the ordinal every
+    chunk from one page shared a key here — _merge_hits kept only the best
+    and silently discarded the rest of the retrieved evidence. Vectors
+    ingested before the ordinal existed simply carry None, which reproduces
+    the old (collapsing) behavior for them rather than breaking anything."""
     return (h.get("video_id"), h.get("idx"), h.get("ms"),
-           h.get("source_id"), h.get("page"), h.get("slide"))
+           h.get("source_id"), h.get("page"), h.get("slide"), h.get("chunk"))
 
 
 def _merge_hits(hit_lists: list[list[dict]]) -> list[dict]:
