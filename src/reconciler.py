@@ -124,7 +124,18 @@ def reconcile_once(stale_after_s: float | None = None) -> int:
         last = _RECENTLY_RESTARTED.get(doc_id)
         if last is not None and now - last < _COOLDOWN_S:
             continue
-        if not _flow_run_dead(row.get("flow_run_id")):
+        # Component 56 (DESIGN.md §3m): registration now returns 202 after the
+        # DB insert alone and dispatches to Prefect in a background task. A
+        # crash between the two leaves 'pending' + flow_run_id NULL — for that
+        # ONE shape, NULL means "accepted but never dispatched" and the row
+        # must be re-enqueued or the document is lost forever (this sweep is
+        # the deferral's crash-safety net). Every other active status with
+        # NULL keeps the original component-10 skip below: a row mid-stage
+        # with no flow run is in-process seeding, which updates its own
+        # status as it works.
+        if row["status"] == "pending" and not row.get("flow_run_id"):
+            pass  # stale + never dispatched -> restart
+        elif not _flow_run_dead(row.get("flow_run_id")):
             continue
         print(f"[reconcile] {doc_id} stuck in '{row['status']}' — its flow run "
               f"{row.get('flow_run_id')} died — restarting", flush=True)

@@ -38,10 +38,20 @@ def pool() -> ConnectionPool:
     if _pool is None or _pool_pid != os.getpid():
         # check= pings each connection before lending it out — Neon silently
         # drops idle SSL connections, which otherwise 500s the first request
-        # after a quiet period.
+        # after a quiet period. Kept deliberately (component 56 considered
+        # dropping it): removing the ping risks sporadic 500s against the
+        # frozen error_rate_max_pct gate to save one ~60ms round trip.
+        #
+        # autocommit=True (component 56, DESIGN.md §3m): psycopg otherwise
+        # wraps every statement in an implicit BEGIN + COMMIT — two extra
+        # server round trips per checkout, ~130ms at Neon's 57-68ms RTT, paid
+        # by EVERY single-statement helper in this module. Nearly all of them
+        # are single statements; the one block that wants multi-statement
+        # atomicity (wfq_claim) opens an explicit conn.transaction().
         _pool = ConnectionPool(DATABASE_URL, min_size=1, max_size=5,
                                check=ConnectionPool.check_connection,
-                               kwargs={"row_factory": dict_row})
+                               kwargs={"row_factory": dict_row,
+                                       "autocommit": True})
         _pool_pid = os.getpid()
     return _pool
 
@@ -649,7 +659,12 @@ def wfq_claim(limit: int) -> list[dict]:
     """
     if limit <= 0:
         return []
-    with pool().connection() as conn:
+    # Explicit transaction (component 56): the pool is autocommit now, and
+    # while the UPDATE's WHERE status='pending' guard is what actually makes
+    # the claim race-safe, the SELECT+UPDATE pair keeps its original
+    # one-transaction semantics — the protected dispatcher depends on this
+    # function, so its behavior stays byte-identical.
+    with pool().connection() as conn, conn.transaction():
         picked = conn.execute(
             """
             SELECT id FROM (

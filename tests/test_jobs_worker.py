@@ -166,3 +166,44 @@ def test_dispatcher_module_untouched_by_this_component():
     source = inspect.getsource(dispatcher)
     assert "document" not in source.lower()
     assert "ms_documents" not in source
+
+
+def test_one_prefect_client_reused_across_dispatches(monkeypatch):
+    """Component 56 (DESIGN.md §3m): component 52 cached the deployment ID but
+    still built a brand-new Prefect client — a fresh TCP+TLS handshake to a
+    US-hosted control plane — on every dispatch. One long-lived client per
+    process, constructed once."""
+    constructions = []
+
+    class _FakeSyncClient:
+        def __init__(self):
+            constructions.append(1)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read_deployment_by_name(self, name):
+            fake_dep = MagicMock()
+            fake_dep.id = "dep-uuid-fixed"
+            return fake_dep
+
+        def create_flow_run_from_deployment(self, deployment_id, *, parameters, name):
+            fake_run = MagicMock()
+            fake_run.id = "flow-run-xyz"
+            return fake_run
+
+    import prefect.client.orchestration as orch
+    monkeypatch.setattr(orch, "get_client",
+                        lambda sync_client=False: _FakeSyncClient())
+    monkeypatch.setattr(jobs, "_client", None, raising=False)
+    jobs._deployment_id_cache.clear()
+
+    jobs.enqueue_document("doc_a", "u1", "paper")
+    jobs.enqueue_document("doc_b", "u1", "paper")
+    jobs.enqueue_video("yt_c", "u1")
+
+    assert sum(constructions) == 1, (
+        f"expected ONE Prefect client for the process, got {sum(constructions)} constructions")

@@ -204,3 +204,46 @@ def test_reconcile_does_not_restart_the_same_row_twice_within_the_cooldown(monke
     assert first == 1
     assert second == 0
     assert calls["n"] == 1
+
+
+# ── Component 56 (DESIGN.md §3m) — the 202-then-crash safety net ─────────────
+# Registration now returns 202 after the DB insert alone; the Prefect dispatch
+# runs in a background task. If the API process dies between the 202 and the
+# dispatch, the row is left 'pending' with flow_run_id NULL — a shape the
+# sweep used to skip unconditionally (it meant "seeded in-process, no Prefect
+# run ever existed"). For 'pending' specifically, NULL now means "accepted but
+# never dispatched", and a stale row in that shape must be re-enqueued or the
+# document is lost forever. Other active statuses with NULL keep the old skip:
+# a row at fetching/parsing/embedding with no flow run is in-process seeding,
+# which actively updates its own status.
+
+def test_reconcile_restarts_a_stale_pending_row_that_was_never_dispatched(monkeypatch, cleanup):
+    cleanup.append("doc_nodispatch1")
+    _make_document("doc_nodispatch1", "pending", age_s=200, flow_run_id=None)
+
+    calls = {}
+
+    def _fake_enqueue(doc_id, uid, kind):
+        calls["id"] = doc_id
+        return "rescued-run-1"
+
+    monkeypatch.setattr(reconciler.jobs, "enqueue_document", _fake_enqueue)
+    restarted = reconciler.reconcile_once()
+    assert restarted >= 1
+    assert calls.get("id") == "doc_nodispatch1"
+    row = db.get_document("doc_nodispatch1")
+    assert row["flow_run_id"] == "rescued-run-1"
+
+
+def test_reconcile_still_skips_non_pending_rows_with_no_flow_run_id(monkeypatch, cleanup):
+    """The original component-10 guard: an in-process seeded row mid-stage has
+    no flow run to check and must never be guessed at."""
+    cleanup.append("doc_seedlike1")
+    _make_document("doc_seedlike1", "embedding", age_s=200, flow_run_id=None)
+
+    called = []
+    monkeypatch.setattr(reconciler.jobs, "enqueue_document",
+                        lambda *a, **k: called.append(a) or "nope")
+    reconciler.reconcile_once()
+    assert not called
+    assert db.get_document("doc_seedlike1")["status"] == "embedding"

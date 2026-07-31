@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 
 from .. import db, jobs, storage, trace_link, tracing
@@ -77,8 +77,38 @@ class DocumentRequest(BaseModel):
     title: str | None = None
 
 
+def _dispatch_document(doc_id: str, uid: str, kind: str, uri: str) -> None:
+    """Component 56 (DESIGN.md §3m): the Prefect dispatch, moved OUT of the
+    request. The accept path is 202-after-one-insert; this runs as a Starlette
+    background task once the response has been sent, so the caller never waits
+    on a transatlantic Prefect Cloud round trip. A dispatch failure lands on
+    the ROW (status='failed', visible in /admin/sources, recoverable via the
+    retry endpoint) instead of a 502 response — and a crash between the 202
+    and this task leaves 'pending' + flow_run_id NULL, a shape the reconciler
+    now re-enqueues (its component-56 extension), so the document can't be
+    stranded.
+
+    Component 46's trace correlation moves with it: the span opens HERE, in
+    the background thread, so the registration trace's root is the dispatch —
+    still one trace per registration, joined by the worker via the stashed
+    trace id. Via Redis rather than a flow parameter — `ingest_video`'s
+    signature is in a protected file and changing `ingest_document`'s would
+    alter a registered Prefect deployment. Fails open: no Redis just means an
+    uncorrelated worker trace."""
+    try:
+        with tracing.span("register_document", doc_id=doc_id, tenant=uid,
+                          kind=kind, uri=uri) as _sp:
+            trace_link.stash(doc_id, tracing.current_trace_id() or "")
+            flow_run_id = jobs.enqueue_document(doc_id, uid, kind)
+            _sp.set_attrs(flow_run_id=flow_run_id)
+        db.set_document_flow_run_id(doc_id, flow_run_id)
+    except Exception as exc:
+        db.set_document_status(doc_id, "failed", error=f"enqueue: {exc}")
+
+
 @router.post("/documents", status_code=202, dependencies=[Depends(require_auth)])
-def register_document(req: DocumentRequest, uid: str = Depends(user_id_dep)):
+def register_document(req: DocumentRequest, background_tasks: BackgroundTasks,
+                      uid: str = Depends(user_id_dep)):
     if not req.kind or req.kind not in _ALLOWED_KINDS:
         raise HTTPException(400, f"kind must be one of {_ALLOWED_KINDS}.")
     if not req.uri or not req.uri.strip():
@@ -96,25 +126,11 @@ def register_document(req: DocumentRequest, uid: str = Depends(user_id_dep)):
         "storage_key": storage_key, "source_hash": None, "title": req.title,
     })
 
-    # Fire-and-forget schedule, exactly like /api/videos' register(): insert
-    # (done above) -> enqueue -> 202. A failure here is the upstream's fault
-    # (Prefect Cloud unreachable), not the caller's — 502, not 400/500.
-    try:
-        # Component 46: open a span for the registration and stash its trace id
-        # so the WORKER joins the same trace seconds later. Via Redis rather
-        # than a flow parameter — `ingest_video`'s signature is in a protected
-        # file and changing `ingest_document`'s would alter a registered
-        # Prefect deployment. Fails open: no Redis just means an uncorrelated
-        # worker trace.
-        with tracing.span("register_document", doc_id=row["id"], tenant=uid,
-                          kind=req.kind, uri=req.uri) as _sp:
-            trace_link.stash(row["id"], tracing.current_trace_id() or "")
-            flow_run_id = jobs.enqueue_document(row["id"], uid, req.kind)
-            _sp.set_attrs(flow_run_id=flow_run_id)
-        db.set_document_flow_run_id(row["id"], flow_run_id)
-    except Exception as exc:
-        db.set_document_status(row["id"], "failed", error=f"enqueue: {exc}")
-        raise HTTPException(502, "Failed to schedule ingestion.") from exc
+    # Insert -> 202; the Prefect dispatch runs after the response is sent
+    # (component 56). Same shape the provided video path already has under
+    # ENABLE_FAIR_DISPATCH: register returns after the DB write alone and the
+    # scheduling happens outside the request.
+    background_tasks.add_task(_dispatch_document, row["id"], uid, req.kind, req.uri)
 
     return {"id": row["id"], "status": row["status"], "kind": row["kind"]}
 

@@ -97,7 +97,14 @@ def test_register_document_storage_ref_sets_storage_key(client, cleanup):
     assert row["uri"] == "storage://decks/kdd-keynote.pdf"
 
 
-def test_register_document_returns_502_on_enqueue_failure(client, monkeypatch, cleanup):
+def test_register_document_stays_202_when_enqueue_fails(client, monkeypatch, cleanup):
+    """Component 56 (DESIGN.md §3m): Prefect dispatch is deferred to a
+    background task, so a Prefect-Cloud failure can no longer fail the accept —
+    the caller gets its 202 (the insert succeeded and the row exists), and the
+    failure surfaces on the ROW as status='failed' (visible in /admin/sources,
+    recoverable via the retry endpoint), not as a request error. This is the
+    discriminating eval for the deferral: under the old in-request dispatch
+    this exact scenario returned 502."""
     captured = {}
 
     def _boom(doc_id, user_id, kind):
@@ -109,11 +116,25 @@ def test_register_document_returns_502_on_enqueue_failure(client, monkeypatch, c
 
     resp = client.post("/admin/documents", json={
         "uri": "https://arxiv.org/pdf/1706.03762", "kind": "paper"}, headers=AUTH)
-    assert resp.status_code == 502
-    assert captured["doc_id"]
+    assert resp.status_code == 202
+    assert captured["doc_id"], "dispatch must still be attempted (in the background)"
     cleanup.append(captured["doc_id"])
     row = db.get_document(captured["doc_id"])
     assert row["status"] == "failed"
+    assert "enqueue" in (row["error"] or "")
+
+
+def test_register_document_sets_flow_run_id_in_background(client, cleanup):
+    """TestClient runs BackgroundTasks to completion before returning, so the
+    flow_run_id written by the deferred dispatch is observable right after."""
+    resp = client.post("/admin/documents", json={
+        "uri": "https://arxiv.org/pdf/1706.03762", "kind": "paper"}, headers=AUTH)
+    assert resp.status_code == 202
+    doc_id = resp.json()["id"]
+    cleanup.append(doc_id)
+    row = db.get_document(doc_id)
+    assert row["flow_run_id"] == "fake-flow-run-id"
+    assert row["status"] == "pending"
 
 
 def test_list_sources_returns_unified_shape(client, cleanup):
