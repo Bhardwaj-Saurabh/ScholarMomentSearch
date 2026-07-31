@@ -126,6 +126,51 @@ def test_delete_document_removes_row():
     assert db.get_document(doc_id) is None
 
 
+# ── Component 53 (DESIGN.md §3k) — cancel the Prefect flow run on delete ────
+# delete_document() used to only delete the row + graph rows, never the
+# document's scheduled Prefect flow run. Repeated bench.py/test cycles this
+# project ran left a ~6,300-run stale Prefect Cloud backlog (EVIDENCE.md
+# 2026-07-30) that starved the worker and tanked ingest_throughput_chunks_per_s
+# — this is the fix that stops it regrowing.
+
+def test_delete_document_cancels_its_flow_run(monkeypatch):
+    cancelled = []
+    monkeypatch.setattr(db, "_cancel_flow_run", lambda fid: cancelled.append(fid))
+
+    doc_id = _doc_id()
+    db.upsert_pending_document(_mk_doc(doc_id))
+    db.set_document_flow_run_id(doc_id, "flow-run-123")
+    db.delete_document(doc_id)
+
+    assert cancelled == ["flow-run-123"]
+    assert db.get_document(doc_id) is None
+
+
+def test_delete_document_with_no_flow_run_id_skips_cancel(monkeypatch):
+    cancelled = []
+    monkeypatch.setattr(db, "_cancel_flow_run", lambda fid: cancelled.append(fid))
+
+    doc_id = _doc_id()
+    db.upsert_pending_document(_mk_doc(doc_id))  # never scheduled -> no flow_run_id
+    db.delete_document(doc_id)
+
+    assert cancelled == []
+    assert db.get_document(doc_id) is None
+
+
+def test_delete_document_survives_cancel_failure(monkeypatch):
+    def _boom(fid):
+        raise RuntimeError("Prefect Cloud unreachable")
+    monkeypatch.setattr(db, "_cancel_flow_run", _boom)
+
+    doc_id = _doc_id()
+    db.upsert_pending_document(_mk_doc(doc_id))
+    db.set_document_flow_run_id(doc_id, "flow-run-456")
+
+    db.delete_document(doc_id)  # must not raise
+    assert db.get_document(doc_id) is None
+
+
 def test_list_sources_unifies_videos_and_documents(cleanup):
     doc_id, video_id = _doc_id(), f"yt_{uuid.uuid4().hex[:11]}"
     cleanup["documents"].append(doc_id)

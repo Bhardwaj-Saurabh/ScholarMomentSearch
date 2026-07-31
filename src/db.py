@@ -523,21 +523,46 @@ def graph_delete_source(source_id: str, user_id: str | None = None) -> None:
                 "DELETE FROM ms_graph_mentions WHERE source_id = %s", (source_id,))
 
 
+def _cancel_flow_run(flow_run_id: str) -> None:
+    from prefect.client.orchestration import get_client
+    from prefect.states import Cancelled
+
+    with get_client(sync_client=True) as c:
+        c.set_flow_run_state(flow_run_id, state=Cancelled(), force=True)
+
+
 def delete_document(doc_id: str) -> None:
     # Component 50: read the owning tenant BEFORE the delete, so the graph
     # purge below can carry a user_id filter (CLAUDE.md §5). Wrapped so a
     # lookup failure cannot affect the delete itself.
     owner = None
+    flow_run_id = None
     try:
         with pool().connection() as conn:
             row = conn.execute(
-                "SELECT user_id FROM ms_documents WHERE id = %s", (doc_id,)).fetchone()
+                "SELECT user_id, flow_run_id FROM ms_documents WHERE id = %s",
+                (doc_id,)).fetchone()
         owner = (row or {}).get("user_id")
+        flow_run_id = (row or {}).get("flow_run_id")
     except Exception:
         owner = None
+        flow_run_id = None
 
     with pool().connection() as conn:
         conn.execute("DELETE FROM ms_documents WHERE id = %s", (doc_id,))
+
+    # Component 53 (DESIGN.md §3k): a deleted document's already-scheduled
+    # Prefect flow run used to keep running/queued forever — repeated
+    # bench.py/test cycles this project ran left a ~6,300-run stale Prefect
+    # Cloud backlog (EVIDENCE.md 2026-07-30) that starved the worker and
+    # tanked ingest_throughput_chunks_per_s. Best-effort: a cancellation
+    # failure (run already terminal, Prefect unreachable) must never turn a
+    # successful delete into an error.
+    if flow_run_id:
+        try:
+            _cancel_flow_run(flow_run_id)
+        except Exception:
+            pass
 
     # Additive cleanup of the new graph table only — the document delete above
     # is unchanged. Swallowed because a graph-hygiene failure must not turn a
