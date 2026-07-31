@@ -5955,3 +5955,50 @@ unrelated failures, 0 regressions.
 Region migration and the two production incidents were operational actions
 (Fly/Neon/Qdrant console + CLI work), not code changes, so they have no
 separate commit — this entry is their record.
+
+---
+
+## 2026-07-31 — Component 55: production warm path (Redis + always-on + model warm-up)
+
+**Scope**: `DESIGN.md` §3m (components 55-60 scoped in commit `85248af` after a full
+three-path performance audit; user approved always-on machine, managed Redis in prod,
+and citations 6→10 on 2026-07-31).
+
+**Evals (RED first)**: new `tests/test_warmup.py`, 7 tests — `rerank.warm()` loads the
+model / skips when `RERANK_ENABLED` is off / never raises; `embeddings.warm_sparse()`
+same trio for the BM25 model; `app._warm_models()` survives both warms raising.
+Confirmed RED: 7/7 failed with `AttributeError` (no `warm`/`warm_sparse`/`_warm_models`
+existed).
+
+**Implementation**: `rerank.warm()` + `embeddings.warm_sparse()` (fail-open, flag-aware),
+called from a daemon thread in `app.py`'s lifespan so a cold model download can never
+block boot or fail a health check. `fly.toml`: `min_machines_running = 1` for the api
+group. Provisioned Fly Upstash Redis `scholarmomentsearch-redis` (lhr, pay-as-you-go,
+eviction on) and set `REDIS_URL` as a staged secret; no code change needed — the
+component 19-21 caches and the component 26 rate limiter activate by config alone.
+
+**GREEN (unit)**: `uv run pytest tests/test_warmup.py -q` → `7 passed in 2.89s`.
+Full suite: `654 passed, 10 failed in 183.11s` — 9 are the known pre-existing
+real-Qdrant environment failures; the 10th
+(`test_security_authz.py::test_public_routes_stay_public[POST-/api/ask-body4]`,
+`ValueError: Sparse vector bm25 is not found in the collection`) was verified
+pre-existing by re-running it against unmodified HEAD via `git stash` — it fails there
+identically, so 0 regressions from this component.
+
+**GREEN (live, production)** after `fly deploy` (all machines updated, health 1/1):
+- `fly ssh console -C "python -c 'from src import cache; ...'"` →
+  `enabled: True`, `roundtrip: {'ok': True}` — the app's own cache module round-trips
+  through the new Redis with its real 0.3s socket timeout.
+- One boot log line `[cache] Redis unavailable (network:TimeoutError) — degrading to
+  no-cache` at machine start — a transient 6PN DNS race during boot, and exactly the
+  fail-open behavior component 19 requires (verified reachable 47.7ms cold / 1.2ms warm
+  immediately after).
+- Warm-up confirmed in logs on the api machine (`83d1d6db741d68`): HF Hub fetch +
+  `Loading weights: 100%|| 105/105` ~30-45s after boot, in the daemon thread, while the
+  health check stayed green.
+- First `/api/ask` after boot: **10.18s**, second: **5.28s** (previous first-query cost
+  after idle: **69.9s**). The remaining first-vs-second delta is within the measured
+  4.1-6.6s LLM-answer variance, not a model load.
+
+**Still red** (expected — later components): accept p95, throughput, recall gates
+unchanged by this component; re-measured at the end of the program.
