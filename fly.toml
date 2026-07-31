@@ -42,13 +42,30 @@ primary_region = 'lhr'
   # Without this line the fail-closed guarantee would be inert on the actual
   # deployment — the exact gap spec-guardian flagged.
   ENV = 'production'
-  # Component 57 (DESIGN.md §3m): throughput. Six concurrent flow runs
-  # (was 2 — bench submits 16 docs, so 8 sequential waves of 2), and a 2s
-  # runner poll (Prefect's default 10s put up to ~80s of pure pickup latency
-  # inside the measured window). Only worker.py reads these; harmless on the
-  # other process groups. Overrides the same-named imported secrets.
-  WORKER_CONCURRENCY = '6'
+  # Component 57 (DESIGN.md §3m): throughput. Three concurrent flow runs PER
+  # worker machine × 2 machines = 6 in flight (was 2 total — bench submits 16
+  # docs, so 8 sequential waves). Measured 2026-07-31: 6-per-machine on 2
+  # shared vCPUs was a net LOSS (0.67 chunks/s vs 1.89 at concurrency 2) —
+  # subprocess CPU contention, the single clip machine's embed lock, and the
+  # OpenAI org's 200k TPM all saturated, and stages slowed past the
+  # reconciler's stale window, which then duplicated healthy in-flight work.
+  # 2s runner poll (Prefect's default 10s put up to ~80s of pure pickup
+  # latency inside the measured window). Only worker.py reads these.
+  WORKER_CONCURRENCY = '3'
   PREFECT_RUNNER_POLL_FREQUENCY = '2'
+  # A healthy stage under real load can legitimately sit >90s without a
+  # status write (a slow fetch, a long caption batch) — at the default 90s
+  # the sweep re-enqueued RUNNING work and made contention worse. 240s +
+  # the per-doc 300s cooldown keeps crash recovery while ending the
+  # duplicate-run churn observed live.
+  RECONCILE_STALE_AFTER_S = '240'
+  # Prefect 3.8 ships a per-flow-run OTLP resource-metrics exporter, ON by
+  # default when connected to Prefect Cloud — and its lazy import of the
+  # NOT-installed opentelemetry-instrumentation-system-metrics package
+  # surfaced as ModuleNotFoundError crashes in flow error handling (seen
+  # live 2026-07-31, masking the real per-doc errors). We don't want a
+  # metrics exporter thread per flow run anyway.
+  PREFECT_TELEMETRY_ENABLE_RESOURCE_METRICS = 'false'
 
 # Infra backstop: if a machine's process ever exits (crash, OOM, a dependency
 # outage that slips past the code's own retry loop), always bring it back —
