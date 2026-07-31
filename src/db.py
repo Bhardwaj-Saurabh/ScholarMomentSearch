@@ -593,6 +593,33 @@ def _pct(progress: float | None) -> int | None:
     return round(progress * 100) if progress is not None else None
 
 
+def list_source_titles(user_id: str) -> list[dict]:
+    """title + kind only, in ONE round trip — for search.py's named-source
+    attribution backstop (component 60, DESIGN.md §3m), which runs on every
+    LLM-generated answer and previously paid two `SELECT *` tenant scans
+    (list_videos + list_documents, ~920.8ms measured) to read two columns.
+    Same short-TTL cache treatment as list_sources: a just-registered source
+    missing from the backstop for a few seconds is harmless (the check only
+    ever WITHHOLDS an answer, it never fabricates)."""
+    cache_key = f"source_titles:{user_id}"
+    cached = cache.get_json(cache_key)
+    if cached is not None:
+        return cached
+    with pool().connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT title, 'video' AS kind FROM ms_videos
+             WHERE user_id = %s AND title IS NOT NULL
+            UNION ALL
+            SELECT title, kind FROM ms_documents
+             WHERE user_id = %s AND title IS NOT NULL
+            """,
+            (user_id, user_id),
+        ).fetchall()
+    cache.set_json(cache_key, rows, ttl=POLL_CACHE_TTL_S)
+    return rows
+
+
 def list_sources(user_id: str) -> list[dict]:
     """Unified status for GET /admin/sources: videos + documents, normalized to
     {id, kind, status, title, pct, chunk_count}, newest first. chunk_count is

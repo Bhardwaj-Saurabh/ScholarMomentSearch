@@ -245,12 +245,18 @@ def _retrieve_impl(question: str, user_id: str, *, top_k: int | None = None,
             # candidates get returned for citations, never the gate.
             with tracing.span("search_text", queries=len(queries),
                               hybrid=config.ENABLE_HYBRID_TEXT_SEARCH) as _st:
-                gate_hits = vector_store.search_text(embed_query(question), user_id, top_k=1,
+                # Component 60: gate and branch share the question's embedding
+                # — it was computed twice (two clip-service calls when the
+                # embed cache is cold or Redis is off).
+                question_vec = embed_query(question)
+                gate_hits = vector_store.search_text(question_vec, user_id, top_k=1,
                                                      video_id=video_id, video_ids=video_ids)
                 best_text = gate_hits[0]["score"] if gate_hits else 0.0
                 thits = _merge_hits([
-                    vector_store.search_text(embed_query(q), user_id, top_k=BRANCH_TOP_K,
-                                             video_id=video_id, video_ids=video_ids, query_text=q)
+                    vector_store.search_text(
+                        question_vec if q == question else embed_query(q),
+                        user_id, top_k=BRANCH_TOP_K,
+                        video_id=video_id, video_ids=video_ids, query_text=q)
                     for q in queries
                 ])
                 # best_score is the DENSE-ONLY gate score, deliberately: the hybrid
@@ -478,7 +484,10 @@ def _check_named_source_attribution(answer: str, citations: list[dict[str, Any]]
     (returns the answer unchanged) on any lookup error — never let a
     hardening check break the read path."""
     try:
-        all_sources = db.list_sources(user_id)
+        # Component 60: title+kind is all this check reads — the old
+        # db.list_sources() call pulled every column of every row in the
+        # tenant's two tables (~920.8ms measured in a production trace).
+        all_sources = db.list_source_titles(user_id)
     except Exception:
         return answer
 

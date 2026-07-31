@@ -19,7 +19,7 @@ failure the same re-check found (a false-premise question whose answer
 contradicted its own correctly-cited source) — that needs a different kind
 of check, not attempted here.
 
-Pure logic only, no network: db.list_sources is monkeypatched (a real check
+Pure logic only, no network: db.list_source_titles is monkeypatched (a real check
 needs live tenant data).
 """
 from __future__ import annotations
@@ -36,7 +36,7 @@ def test_short_name_strips_the_parenthetical_and_colon_suffix():
 def test_check_named_source_flags_an_uncited_source_named_in_prose(monkeypatch):
     """The exact repro: 0 CLIP citations retrieved (all 6 are LoRA), but the
     answer names 'the CLIP paper' as if it were evidence."""
-    monkeypatch.setattr(search.db, "list_sources", lambda uid: [
+    monkeypatch.setattr(search.db, "list_source_titles", lambda uid: [
         {"title": "CLIP (Radford et al. 2021)"},
         {"title": "LoRA (Hu et al. 2021)"},
     ])
@@ -49,7 +49,7 @@ def test_check_named_source_flags_an_uncited_source_named_in_prose(monkeypatch):
 
 
 def test_check_named_source_allows_naming_an_actually_cited_source(monkeypatch):
-    monkeypatch.setattr(search.db, "list_sources", lambda uid: [
+    monkeypatch.setattr(search.db, "list_source_titles", lambda uid: [
         {"title": "GPT-3: Language Models are Few-Shot Learners (Brown et al. 2020)"},
     ])
     citations = [{"title": "GPT-3: Language Models are Few-Shot Learners (Brown et al. 2020)"}]
@@ -66,7 +66,7 @@ def test_check_named_source_catches_a_colloquial_short_name_mismatch(monkeypatch
     real violation entirely (0 CoT citations retrieved, all were RAG
     content, yet the answer confidently described CoT's mechanism). Needs
     substring/prefix matching, not exact equality."""
-    monkeypatch.setattr(search.db, "list_sources", lambda uid: [
+    monkeypatch.setattr(search.db, "list_source_titles", lambda uid: [
         {"title": "Chain-of-Thought Prompting (Wei et al. 2022)"},
         {"title": "RAG: Retrieval-Augmented Generation (Lewis et al. 2020)"},
     ])
@@ -89,7 +89,7 @@ def test_check_named_source_catches_a_descriptive_title_with_no_short_form(monke
     shares no contiguous substring with what the model wrote ("CLIP ICML
     slide"), even though both plainly refer to the same source via the
     shared identity token "CLIP". Pure substring containment misses this."""
-    monkeypatch.setattr(search.db, "list_sources", lambda uid: [
+    monkeypatch.setattr(search.db, "list_source_titles", lambda uid: [
         {"title": "CLIP (Radford et al. 2021)", "kind": "paper"},
         {"title": "Official ICML 2021 author slides for the CLIP paper", "kind": "deck"},
     ])
@@ -106,7 +106,7 @@ def test_check_named_source_ignores_names_that_arent_in_the_corpus_at_all(monkey
     prompt-level fix already handles this well (verified live); this
     mechanical check shouldn't false-positive on names it can't find either
     way, since there's nothing in list_sources to flag."""
-    monkeypatch.setattr(search.db, "list_sources", lambda uid: [
+    monkeypatch.setattr(search.db, "list_source_titles", lambda uid: [
         {"title": "LoRA (Hu et al. 2021)"},
     ])
     citations = [{"title": "LoRA (Hu et al. 2021)"}]
