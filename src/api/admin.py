@@ -96,6 +96,14 @@ def _dispatch_document(doc_id: str, uid: str, kind: str, uri: str) -> None:
     alter a registered Prefect deployment. Fails open: no Redis just means an
     uncorrelated worker trace."""
     try:
+        # Found live: a caller may DELETE the document between the 202 and
+        # this task (bench's accept-latency probes do exactly that). Enqueueing
+        # anyway mints an orphan flow run that fails on 'no manifest row' and
+        # retries — wasted worker slots. Re-check before dispatching; the
+        # residual check-then-enqueue window is no wider than the pre-deferral
+        # insert-then-enqueue one.
+        if db.get_document(doc_id) is None:
+            return
         with tracing.span("register_document", doc_id=doc_id, tenant=uid,
                           kind=kind, uri=uri) as _sp:
             trace_link.stash(doc_id, tracing.current_trace_id() or "")

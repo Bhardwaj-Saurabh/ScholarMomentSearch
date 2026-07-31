@@ -93,7 +93,13 @@ def t_fetch(doc_id: str, user_id: str) -> str:
     db.set_document_status(doc_id, "fetching")
     row = db.get_document(doc_id)
     if row is None:
-        raise ValueError(f"no manifest row for {doc_id}")
+        # The document was deleted after acceptance (bench's accept-latency
+        # probes DELETE immediately after their 202; real users can too). The
+        # row will never come back, so raising here only made Prefect retry a
+        # hopeless task twice, 30-120s apart. Same clean no-op exit as the
+        # duplicate case (component 56, DESIGN.md §3m).
+        print(f"[ingest] {doc_id} manifest row gone (deleted after accept) — nothing to do")
+        return ""
 
     if row.get("storage_key"):
         path = fetch_mod.fetch_upload(row["storage_key"], doc_id)

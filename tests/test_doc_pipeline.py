@@ -404,3 +404,12 @@ def test_ingest_document_flow_sets_failed_on_error(monkeypatch, cleanup, tmp_pat
     row = db.get_document(doc_id)
     assert row["status"] == "failed"
     assert "corrupt PDF" in row["error"]
+
+
+def test_t_fetch_missing_row_is_a_clean_noop_not_a_retrying_failure():
+    """Component 56 (DESIGN.md §3m): a missing manifest row means the document
+    was deleted after acceptance (bench probes do this by design). The old
+    ValueError made Prefect retry the task twice, 30-120s apart — pure waste
+    for a row that will never come back. It must behave like the duplicate
+    case instead: return "" so the flow exits as a no-op."""
+    assert doc_pipeline.t_fetch.fn("doc_never_existed_xyz", "u_doc_test") == ""

@@ -305,3 +305,19 @@ def test_delete_document_502_when_vector_purge_fails_row_survives(client, monkey
     resp = client.delete(f"/admin/documents/{doc_id}", headers=AUTH)
     assert resp.status_code == 502
     assert db.get_document(doc_id) is not None  # row survives — not silently gone
+
+
+def test_background_dispatch_skips_a_row_deleted_before_it_ran(client, monkeypatch):
+    """Component 56 follow-up, found live: bench's accept-latency probes DELETE
+    each document immediately after its 202. The background dispatch can lose
+    that race — it must notice the row is gone and NOT mint an orphan Prefect
+    run (which would fail on 'no manifest row' and retry twice, eating worker
+    slots during the throughput measurement)."""
+    from src.api import admin as admin_module
+
+    called = []
+    monkeypatch.setattr(admin_module.jobs, "enqueue_document",
+                        lambda *a, **k: called.append(a) or "orphan-run")
+    admin_module._dispatch_document("doc_already_deleted_xyz", "default", "paper",
+                                    "https://example.com/x.pdf")
+    assert not called, "dispatch must not enqueue a run for a deleted row"
