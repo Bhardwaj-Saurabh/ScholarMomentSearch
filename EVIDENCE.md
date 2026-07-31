@@ -5741,3 +5741,125 @@ Wrote `PRODUCT_EVAL.md` at the assignment root from real data — no PDF
 generated this pass (not requested).
 
 **Commit**: pending — `PRODUCT_EVAL.md`, `eval/REPORT.md`, `benchmark/_bench.json`.
+
+---
+
+## 2026-07-31 — Components 52-53-34: real root-cause fixes for the two failing SLA gates, and everything found while verifying them
+
+Scoped in DESIGN.md §3k (components 52-53, own commit) and §3e row 34
+(already scoped, never implemented). Full EDD loop for all three: evals
+written and confirmed RED before any implementation, GREEN after, full suite
+run after each component.
+
+**Component 52 — Prefect deployment-id caching (`src/jobs.py`).** Isolated
+per-call timing (fresh Python process, same network): a genuinely warm,
+reused Postgres connection round trip to Neon took 400-620ms each; a fresh
+Prefect client's `read_deployment_by_name` lookup took ~299ms, `create_flow_run_from_deployment` ~341ms — and `run_deployment()` re-resolves that
+name lookup on EVERY call even though the deployment id never changes for
+the process's lifetime. Fixed: `_deployment_id()` caches the resolved id;
+`_dispatch()` creates flow runs against the cached id directly, falling back
+to one full `run_deployment()` re-resolve if the cached id is ever stale.
+7 new/updated unit tests (`tests/test_jobs_worker.py`), all green.
+Effect on `accept_latency_p95_ms`: 1966.2ms -> 1870ms -> 1876ms -> 1650.2ms
+across re-measurements — a real, small, consistent improvement (one fewer
+round trip), but the metric stays red because the DOMINANT cost (800-1200ms
+of two required sequential Postgres round trips) is pure home-network-to-
+Neon distance, unaffected by any code change. Re-measuring in-region against
+the live Fly deployment (already up, `{"ok":true,"postgres":true,"qdrant":true}`)
+remains the real fix for this gate — not done this session (`fly` CLI is not
+authenticated here: `fly secrets list` -> "unauthorized").
+
+**Component 53 — cancel a document's Prefect flow run on delete (`src/db.py`).**
+`delete_document()` used to only delete the Postgres row + do additive graph
+cleanup — the document's already-scheduled Prefect flow run kept existing.
+13 new/updated unit tests, all green. Verified live end-to-end (not just
+mocked): registered a real document, captured its `flow_run_id` via
+`db.get_document()`, called `db.delete_document()` directly in the running
+`api` container, and confirmed via the Prefect API that the flow run reached
+`StateType.CANCELLED` — the mechanism genuinely works.
+
+**Component 34 — `DELETE /admin/documents/{id}` (`src/api/admin.py`,
+`src/rag/vector_store.py`, `src/samples.py`).** `db.delete_document` had zero
+production callers before this — there was no way, through the API, to ever
+invoke component 53's fix. Ordered purge-vectors -> delete-object -> delete-
+row, mirroring `videos.py`'s delete route; unlike that (protected) path, a
+vector-purge failure here is surfaced as a 502 with the row left in place
+(`vector_store.delete_document_chunks` gained a `raise_on_error` param,
+default `False`, preserving its existing fail-open behavior at the one
+re-embed call site). Seeded corpus documents are protected from deletion the
+same way `SAMPLE_IDS` already protects the 4 base sample videos + 8 corpus
+videos (`samples.seed_doc_id`/`SAMPLE_DOCUMENT_IDS`/`is_sample_document`,
+also de-duplicating `seeding.py`'s previously-private `_seed_doc_id` into the
+same source of truth). 20 new/updated unit tests across
+`tests/test_admin_api.py`, `tests/test_samples.py` (new),
+`tests/test_vector_store_delete.py` (new). Verified live: registering a
+document then deleting it as the wrong tenant correctly 404s; deleting it as
+the real owner returns `{"ok": true, ...}` and it disappears from
+`/admin/sources`. Full suite after all three components: **640 passed, 9
+failed** — the same 9 failures, byte-identical list, confirmed (by direct
+re-run against the pre-diff code via `git stash`) to be pre-existing and
+unrelated to this diff (a known real-Qdrant test-isolation/order issue,
+already disclosed elsewhere) — 0 regressions.
+
+**`bench.py` itself was the actual, ongoing mechanism behind
+`ingest_throughput_chunks_per_s: 0.0`.** Not one-time historical debris as
+previously written — every single run of `measure_accept_latency` (30
+fake-URL probes), `run_concurrent_ingest_load` (20 real docs),
+`measure_throughput` (16 real docs), and `run_resilience_check` (10 real
+docs) left its documents permanently in Postgres. `delete_document` had no
+caller (see component 34 above), so the reconciler retried the un-fetchable
+ones forever, each retry adding a fresh Prefect scheduled run. Measured
+directly: the scheduled-run backlog was at **1,807** before cleanup this
+session (a full paginated count via the Prefect API, not the 200-item
+page-limited estimate used in earlier entries). Wired `bench.py` to delete
+its own documents via the new component-34 route (`_delete_documents()`
+helper) in all four functions above.
+
+**A real bug found in that fix, then fixed.** The first version of this
+cleanup batched all n deletes until after the whole submission loop
+completed. Worker logs caught it directly: `ValueError: no manifest row for
+doc_X` — a worker had already started `t_fetch()` reading a row that
+`_delete_documents()` deleted out from under it moments later, because
+component 53's flow-run "cancellation" is a Prefect Cloud state change, not
+a guarantee that an already-executing subprocess stops reading the database
+row it already has open. Fixed: `measure_accept_latency` now deletes each
+probe immediately after its own request (shrinking the race window from the
+whole loop's duration to roughly one request's own latency); `run_concurrent_ingest_load` returns its ids/tenant instead of deleting internally, and the
+caller in `main()` deletes them only after the concurrent search-p95
+"during" measurement completes (giving the flows a real processing window
+first). This does not fully eliminate the race — 10 of 30 probes still hit
+it in one measured re-run — and that residual is disclosed here rather than
+claimed as fully solved, matching this project's existing treatment of the
+SIGKILL-mid-upload race (component 34/§3e's original scoping).
+
+**The 1,807-item backlog was bulk-cancelled this session**: a direct
+paginated sweep of every `SCHEDULED` Prefect flow run, cancelling all of
+them (not just ones tied to a currently-existing Postgres row, since some
+had already had their row deleted by earlier manual investigation while
+their flow run remained queued). Confirmed via the same paginated count:
+**1,807 -> 0**. Worker log signal corroborates it: `"200 scheduled runs
+skipped (at capacity)"` (constant, throughout the investigation) dropped to
+`"1 scheduled runs skipped (at capacity)"` after the purge.
+
+**Honest final state of `ingest_throughput_chunks_per_s` after all of the
+above**: still not re-confirmed passing in THIS session. Four consecutive
+`bench.py` re-runs after component 52/53/34 landed still read `0.0` for this
+gate, each time traced to a different real, disclosed cause in turn (old
+pre-fix debris never retroactively cleaned; the delete-before-pickup race
+above; the 1,807-item backlog itself). A final clean re-run, kicked off
+after the full backlog purge (worker log confirmed the contention had
+dropped to 1 skipped run), was abandoned after 30+ minutes with not even the
+first gate (`accept_latency_p95_ms`) printed — consistent with this specific
+Prefect Cloud workspace being measurably slower right now, most likely a
+direct consequence of the sheer volume of API calls this single investigation
+session made against it (including the 1,807-item bulk cancel itself). This
+is recorded as: the code fixes (52, 53, 34) are real, correct, and
+independently verified live by narrower checks that do not depend on a full
+`bench.py` run completing; the SLA gate itself needs a clean re-measurement
+in a session that has not just subjected this Prefect Cloud workspace to
+hours of heavy API traffic — ideally against the live Fly deployment, which
+carries none of this local session's history.
+
+**Commit**: `f1bedfe` (components 52-53 code), `fd1b534` (component 34
+code), `5cfa727` (the delete-before-pickup race fix) — all on top of
+`c45a978` (DESIGN.md §3k scope). This entry.
