@@ -1,8 +1,9 @@
 > **Note:** this file is the original assignment brief, submission checklist, and
 > grading rubric, moved here verbatim from `README.md` so the repo root README
 > could become a clean project showcase. Nothing below this line was altered —
-> see [`README.md`](README.md) for the project overview, and `EVIDENCE.md` /
-> `PRODUCT_EVAL.md` for the real, dated evidence behind every checked box.
+> see [`README.md`](../README.md) for the project overview, and `EVIDENCE.md` /
+> `PRODUCT_EVAL.md` (same folder as this file) for the real, dated evidence
+> behind every checked box.
 
 <!--
 ════════════════════════════════════════════════════════════════════════════

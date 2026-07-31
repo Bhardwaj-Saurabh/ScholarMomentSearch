@@ -8,9 +8,9 @@ Ask a question — get one grounded answer citing the exact **video moment**, **
 [![Live App](https://img.shields.io/website?url=https%3A%2F%2Fscholarmomentsearch.fly.dev&up_message=online&down_message=offline&label=live%20app)](https://scholarmomentsearch.fly.dev)
 [![CI](https://img.shields.io/github/actions/workflow/status/Bhardwaj-Saurabh/ScholarMomentSearch/ci.yml?branch=main&label=CI)](https://github.com/Bhardwaj-Saurabh/ScholarMomentSearch/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-640%2F649%20passing-brightgreen)](EVIDENCE.md)
+[![Tests](https://img.shields.io/badge/tests-640%2F649%20passing-brightgreen)](docs/EVIDENCE.md)
 
-[Live demo](https://scholarmomentsearch.fly.dev) · [Video walkthrough](https://youtu.be/eMlx5fFNoYc) · [Product evaluation](PRODUCT_EVAL.md) · [Architecture](ARCHITECTURE.md) · [Design log](DESIGN.md)
+[Live demo](https://scholarmomentsearch.fly.dev) · [Video walkthrough](https://youtu.be/eMlx5fFNoYc) · [Product evaluation](docs/PRODUCT_EVAL.md) · [Architecture](docs/ARCHITECTURE.md) · [Design log](docs/DESIGN.md)
 
 </div>
 
@@ -26,10 +26,10 @@ question with citations that deep-link to the *exact* spot: a video
 timestamp, a paper page, a deck slide.
 
 It started as a course assignment (the original brief is preserved in
-[`ASSIGNMENT.md`](ASSIGNMENT.md)) and grew into a genuinely production-shaped
+[`ASSIGNMENT.md`](docs/ASSIGNMENT.md)) and grew into a genuinely production-shaped
 system: 53 scoped components spanning ingestion, hybrid retrieval, security,
 observability, and caching — each one built evaluation-first, with a dated,
-verbatim evidence trail in [`EVIDENCE.md`](EVIDENCE.md) rather than
+verbatim evidence trail in [`EVIDENCE.md`](docs/EVIDENCE.md) rather than
 inspection-only claims.
 
 > **Try it:** ask *"How does the attention mechanism avoid recurrence?"* at
@@ -62,8 +62,8 @@ inspection-only claims.
   Sentry error tracking, a `/metrics` + `/admin/metrics` dashboard, and
   optional Opik/OpenTelemetry tracing — every span a no-op until configured.
 - 🧪 **Evaluation-driven, throughout.** Every one of the 53 components in
-  [`DESIGN.md`](DESIGN.md) has a named eval that proved it before it shipped;
-  [`EVIDENCE.md`](EVIDENCE.md) is the dated, append-only log of real runs
+  [`DESIGN.md`](docs/DESIGN.md) has a named eval that proved it before it shipped;
+  [`EVIDENCE.md`](docs/EVIDENCE.md) is the dated, append-only log of real runs
   behind every claim on this page.
 
 ---
@@ -99,7 +99,7 @@ flowchart LR
 
 Full request-by-request low-level design, every SLA number from a real run,
 and section-by-section honesty about what's shipped vs. opt-in-and-off live
-in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+in [`ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
 
@@ -124,7 +124,7 @@ in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 Every figure below came from an actual `benchmark/bench.py` or test-suite run;
 `sla.json`'s targets are frozen and never loosened to pass (see
-[`EVIDENCE.md`](EVIDENCE.md) for every dated run this project has ever
+[`EVIDENCE.md`](docs/EVIDENCE.md) for every dated run this project has ever
 recorded, including the red ones).
 
 | Metric | Target | Latest result |
@@ -138,7 +138,7 @@ recorded, including the red ones).
 
 The two red rows are not swept under the rug — they're root-caused,
 partially fixed, and disclosed with full detail in
-[`PRODUCT_EVAL.md`](PRODUCT_EVAL.md) and `EVIDENCE.md`'s 2026-07-31 entry,
+[`PRODUCT_EVAL.md`](docs/PRODUCT_EVAL.md) and `docs/EVIDENCE.md`'s 2026-07-31 entry,
 consistent with this project's rule that a metric is fixed by fixing the
 system, never by relaxing the threshold.
 
@@ -157,7 +157,7 @@ The stack seeds a curated 8-triplet corpus (video + paper + deck, aligned
 topics) on first boot, so the UI is queryable the moment it comes up.
 
 ```bash
-uv run pytest tests/ -q            # 640/649 passing — see EVIDENCE.md for the 9 disclosed pre-existing failures
+uv run pytest tests/ -q            # 640/649 passing — see docs/EVIDENCE.md for the 9 disclosed pre-existing failures
 python benchmark/bench.py          # SLA gate: latency, decoupling, recall
 python benchmark/bench.py --resilience   # kill a worker mid-ingest, assert no loss
 ```
@@ -168,11 +168,11 @@ python benchmark/bench.py --resilience   # kill a worker mid-ingest, assert no l
 
 | Document | What's in it |
 |---|---|
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Production reference — every technology and why, request-by-request design, honest shipped-vs-not status |
-| [`DESIGN.md`](DESIGN.md) | The full 53-component build plan, each with its scope and primary eval |
-| [`EVIDENCE.md`](EVIDENCE.md) | Dated, append-only log of every real run behind every claim in this repo |
-| [`PRODUCT_EVAL.md`](PRODUCT_EVAL.md) | The submission's product evaluation — rubric, live cross-source test, dimension scorecard |
-| [`ASSIGNMENT.md`](ASSIGNMENT.md) | The original assignment brief, requirements checklist, and grading rubric this project was built against |
+| [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Production reference — every technology and why, request-by-request design, honest shipped-vs-not status |
+| [`DESIGN.md`](docs/DESIGN.md) | The full 53-component build plan, each with its scope and primary eval |
+| [`EVIDENCE.md`](docs/EVIDENCE.md) | Dated, append-only log of every real run behind every claim in this repo |
+| [`PRODUCT_EVAL.md`](docs/PRODUCT_EVAL.md) | The submission's product evaluation — rubric, live cross-source test, dimension scorecard |
+| [`ASSIGNMENT.md`](docs/ASSIGNMENT.md) | The original assignment brief, requirements checklist, and grading rubric this project was built against |
 | [`CLAUDE.md`](CLAUDE.md) | The engineering rules this repo is built under — evaluation-driven development, enforced |
 
 ---
