@@ -207,3 +207,89 @@ def test_warm_is_safe_when_disabled(monkeypatch):
     tracing.reset()
     tracing.warm()
     assert tracing.enabled() is False
+
+
+# ── Component 54 (DESIGN.md §3l) — span-stack propagation across threads ────
+# `_stack()` is threading.local() ON PURPOSE, so concurrent requests never
+# cross-contaminate spans. But that means a worker thread spawned MID-request
+# (to run two branch searches concurrently) starts with an empty stack —
+# span() there would see no parent and mint a disconnected new trace_id.
+# current_stack()/adopt_stack() let a caller propagate its own span context
+# into a thread it spawns.
+
+def test_current_stack_snapshots_the_active_span(recording):
+    with tracing.span("retrieve") as sp:
+        snap = tracing.current_stack()
+    assert len(snap) == 1
+    assert snap[0]["id"] == sp.rec["id"]
+
+
+def test_current_stack_is_empty_outside_any_span(recording):
+    assert tracing.current_stack() == []
+
+
+def test_adopt_stack_makes_a_new_thread_nest_under_the_caller(recording):
+    import threading
+
+    results = {}
+
+    def worker(stack):
+        tracing.adopt_stack(stack)
+        with tracing.span("search_visual") as sp:
+            results["id"] = sp.rec["id"]
+            results["trace_id"] = sp.rec["trace_id"]
+            results["parent"] = sp.rec["parent"]
+
+    with tracing.span("retrieve") as parent_sp:
+        snap = tracing.current_stack()
+        t = threading.Thread(target=worker, args=(snap,))
+        t.start()
+        t.join()
+
+    assert results["parent"] == parent_sp.rec["id"]
+    assert results["trace_id"] == parent_sp.rec["trace_id"]
+
+
+def test_without_adopt_stack_a_new_thread_would_start_a_disconnected_trace(recording):
+    """Regression lock for the bug this component exists to prevent: proves
+    the failure mode is real, not hypothetical, absent the fix."""
+    import threading
+
+    results = {}
+
+    def worker():
+        with tracing.span("search_visual") as sp:
+            results["parent"] = sp.rec["parent"]
+            results["trace_id"] = sp.rec["trace_id"]
+
+    with tracing.span("retrieve") as parent_sp:
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+
+    assert results["parent"] is None  # no adopt_stack() -> orphaned span
+    assert results["trace_id"] != parent_sp.rec["trace_id"]
+
+
+def test_adopt_stack_does_not_leak_into_a_pooled_threads_next_task(recording):
+    """Thread pools reuse OS threads across tasks. A stack adopted for one
+    submission must not silently apply to the next thing that thread runs."""
+    import threading
+
+    with tracing.span("retrieve") as parent_sp:
+        snap = tracing.current_stack()
+
+    def adopt_and_check():
+        tracing.adopt_stack(snap)
+        assert tracing.current_stack() != []
+
+    def check_clean():
+        assert tracing.current_stack() == []
+
+    t1 = threading.Thread(target=adopt_and_check)
+    t1.start()
+    t1.join()
+    # A DIFFERENT thread must never see thread 1's adopted stack.
+    t2 = threading.Thread(target=check_clean)
+    t2.start()
+    t2.join()

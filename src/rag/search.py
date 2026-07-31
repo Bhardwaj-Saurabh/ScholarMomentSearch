@@ -196,54 +196,76 @@ def _retrieve_impl(question: str, user_id: str, *, top_k: int | None = None,
             queries = enhance_query(question)
             _qe.set_attrs(sub_queries=len(queries), queries=list(queries))
 
-    # Visual branch — CLIP text→image.
-    with tracing.span("search_visual", queries=len(queries)) as _sv:
-        vhits = _merge_hits([
-            vector_store.search(embed_text(q), user_id, top_k=BRANCH_TOP_K,
-                               video_id=video_id, video_ids=video_ids)
-            for q in queries
-        ])
-        best_visual = vhits[0]["score"] if vhits else 0.0
-        _sv.set_attrs(candidates=len(vhits), best_score=best_visual)
+    # Visual and text branches have no data dependency on each other (neither
+    # reads the other's output before its own Qdrant call), so they run as
+    # two concurrent tasks instead of sequential calls (component 54,
+    # DESIGN.md §3l). `tracing._stack()` is threading.local() on purpose —
+    # concurrent REQUESTS must never cross-contaminate spans — which means a
+    # worker thread spawned here starts with an empty stack unless the
+    # current span context is explicitly propagated into it; each branch
+    # function below does that first thing via `tracing.adopt_stack()`.
+    parent_stack = tracing.current_stack()
 
-    # Text branch — bge query→transcript-chunk (only if transcript is enabled).
-    thits: list[dict] = []
-    best_text = 0.0
-    if config.ENABLE_TRANSCRIPT:
-        # Gate 1 needs a score on the SAME scale CONFIDENCE_THRESHOLD/
-        # TEXT_CONFIDENCE_THRESHOLD were calibrated against (a continuous,
-        # magnitude-based cosine similarity) — component 15's hybrid fusion
-        # score is Qdrant's own RRF, which is rank-quantized, not magnitude-
-        # based (verified live: an off-topic query's top RRF score can land
-        # nearly as high as an on-topic one's — RRF only encodes WHICH rank a
-        # hit got, never how strong the match actually was). So the plain
-        # dense-only top score for the ORIGINAL question (unchanged from
-        # before component 15/17) still powers the confidence gate; the
-        # hybrid, possibly-multi-query calls below only change WHICH
-        # candidates get returned for citations, never the gate.
-        with tracing.span("search_text", queries=len(queries),
-                          hybrid=config.ENABLE_HYBRID_TEXT_SEARCH) as _st:
-            gate_hits = vector_store.search_text(embed_query(question), user_id, top_k=1,
-                                                 video_id=video_id, video_ids=video_ids)
-            best_text = gate_hits[0]["score"] if gate_hits else 0.0
-            thits = _merge_hits([
-                vector_store.search_text(embed_query(q), user_id, top_k=BRANCH_TOP_K,
-                                         video_id=video_id, video_ids=video_ids, query_text=q)
+    def _search_visual() -> tuple[list[dict], float]:
+        # Visual branch — CLIP text→image.
+        tracing.adopt_stack(parent_stack)
+        with tracing.span("search_visual", queries=len(queries)) as _sv:
+            vhits = _merge_hits([
+                vector_store.search(embed_text(q), user_id, top_k=BRANCH_TOP_K,
+                                   video_id=video_id, video_ids=video_ids)
                 for q in queries
             ])
-            # best_score is the DENSE-ONLY gate score, deliberately: the hybrid
-            # score is rank-quantized RRF and not comparable to the thresholds
-            # (see the comment above). Recording both avoids a reader assuming
-            # the gate judged the fused number.
-            # `best_score` is the DENSE-ONLY gate score; `top_score` is the top
-            # score of whatever ranking actually produced these candidates —
-            # hybrid RRF when enabled, dense otherwise. Named neutrally because
-            # calling it `top_hybrid_score` while hybrid is off would be a
-            # mislabeled attribute, and a mislabeled attribute is worse than a
-            # missing one: it gets trusted.
-            _st.set_attrs(candidates=len(thits), best_score=best_text,
-                          top_score=thits[0]["score"] if thits else 0.0,
-                          top_score_is_hybrid=bool(config.ENABLE_HYBRID_TEXT_SEARCH))
+            best_visual = vhits[0]["score"] if vhits else 0.0
+            _sv.set_attrs(candidates=len(vhits), best_score=best_visual)
+        return vhits, best_visual
+
+    def _search_text() -> tuple[list[dict], float]:
+        # Text branch — bge query→transcript-chunk (only if transcript is enabled).
+        tracing.adopt_stack(parent_stack)
+        thits: list[dict] = []
+        best_text = 0.0
+        if config.ENABLE_TRANSCRIPT:
+            # Gate 1 needs a score on the SAME scale CONFIDENCE_THRESHOLD/
+            # TEXT_CONFIDENCE_THRESHOLD were calibrated against (a continuous,
+            # magnitude-based cosine similarity) — component 15's hybrid fusion
+            # score is Qdrant's own RRF, which is rank-quantized, not magnitude-
+            # based (verified live: an off-topic query's top RRF score can land
+            # nearly as high as an on-topic one's — RRF only encodes WHICH rank a
+            # hit got, never how strong the match actually was). So the plain
+            # dense-only top score for the ORIGINAL question (unchanged from
+            # before component 15/17) still powers the confidence gate; the
+            # hybrid, possibly-multi-query calls below only change WHICH
+            # candidates get returned for citations, never the gate.
+            with tracing.span("search_text", queries=len(queries),
+                              hybrid=config.ENABLE_HYBRID_TEXT_SEARCH) as _st:
+                gate_hits = vector_store.search_text(embed_query(question), user_id, top_k=1,
+                                                     video_id=video_id, video_ids=video_ids)
+                best_text = gate_hits[0]["score"] if gate_hits else 0.0
+                thits = _merge_hits([
+                    vector_store.search_text(embed_query(q), user_id, top_k=BRANCH_TOP_K,
+                                             video_id=video_id, video_ids=video_ids, query_text=q)
+                    for q in queries
+                ])
+                # best_score is the DENSE-ONLY gate score, deliberately: the hybrid
+                # score is rank-quantized RRF and not comparable to the thresholds
+                # (see the comment above). Recording both avoids a reader assuming
+                # the gate judged the fused number.
+                # `best_score` is the DENSE-ONLY gate score; `top_score` is the top
+                # score of whatever ranking actually produced these candidates —
+                # hybrid RRF when enabled, dense otherwise. Named neutrally because
+                # calling it `top_hybrid_score` while hybrid is off would be a
+                # mislabeled attribute, and a mislabeled attribute is worse than a
+                # missing one: it gets trusted.
+                _st.set_attrs(candidates=len(thits), best_score=best_text,
+                              top_score=thits[0]["score"] if thits else 0.0,
+                              top_score_is_hybrid=bool(config.ENABLE_HYBRID_TEXT_SEARCH))
+        return thits, best_text
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        visual_future = ex.submit(_search_visual)
+        text_future = ex.submit(_search_text)
+        vhits, best_visual = visual_future.result()
+        thits, best_text = text_future.result()
 
     with tracing.span("fuse") as _sf:
         windows = _fuse(vhits, thits)

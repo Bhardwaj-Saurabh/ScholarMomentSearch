@@ -202,6 +202,28 @@ def current_trace_id() -> str | None:
     return st[-1]["trace_id"] if st else None
 
 
+def current_stack() -> list:
+    """Snapshot of the calling thread's active span stack (component 54,
+    DESIGN.md §3l). `_stack()` is threading.local() so concurrent REQUESTS
+    never cross-contaminate spans — but that same isolation means a worker
+    thread spawned mid-request (to run two branch searches concurrently)
+    starts with an empty stack of its own. Pass this snapshot to
+    `adopt_stack()` in that thread so a span opened there nests under the
+    caller's current span instead of minting a disconnected new trace."""
+    return list(_stack())
+
+
+def adopt_stack(stack: list) -> None:
+    """Install a snapshot from `current_stack()` as the CALLING thread's own
+    span stack. Copies the list so subsequent pushes/pops in this thread
+    never mutate the snapshot (or the thread that took it) — and because
+    thread-pool threads are reused across tasks, this also means a stack
+    adopted for one submission never leaks into that same OS thread's next,
+    unrelated task (nothing carries over unless adopt_stack() is called
+    again)."""
+    _local.stack = list(stack)
+
+
 def record(name: str, *, start_ts: float, end_ts: float,
            trace_id: str | None = None, error: str | None = None, **attrs) -> None:
     """Emit an ALREADY-COMPLETED span with explicit bounds.

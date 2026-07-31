@@ -187,6 +187,79 @@ def test_results_are_identical_with_tracing_off(stub_retrieval, monkeypatch):
     assert off["citations"] == on["citations"]
 
 
+# ── Component 54 (DESIGN.md §3l) — visual + text branches run concurrently ──
+
+def test_visual_and_text_branches_run_concurrently_not_sequentially(monkeypatch):
+    """The two branches have no data dependency on each other (neither reads
+    the other's output before its own Qdrant call), so wall time should track
+    the SLOWER branch, not their sum. RED before component 54: the text
+    branch alone costs 2x SLEEP_S (a gate-score lookup + the real search), so
+    sequential = visual(1x) + text(2x) = 3x SLEEP_S; concurrent = max(1x, 2x)
+    = 2x SLEEP_S."""
+    import time
+
+    # Isolate the concurrency behavior from any real tracing backend — this
+    # test's timing must reflect ONLY the branches' own sleep, not network
+    # calls to a real Opik/OTel endpoint picked up from the environment.
+    monkeypatch.setattr(config, "OPIK_API_KEY", "")
+    monkeypatch.setattr(config, "OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    tracing.reset()
+
+    monkeypatch.setattr(config, "ENABLE_TRANSCRIPT", True)
+    monkeypatch.setattr(config, "QUERY_ENHANCEMENT_ENABLED", False)
+    # Irrelevant to what this test measures, but RERANK_ENABLED defaults to
+    # True and loads a real cross-encoder model on first use in a process —
+    # a one-time cost that would otherwise land inside this test's timing.
+    monkeypatch.setattr(config, "RERANK_ENABLED", False)
+    monkeypatch.setattr(rag_search, "embed_text", lambda q: np.zeros(4, dtype=np.float32))
+    monkeypatch.setattr(rag_search, "embed_query", lambda q: np.zeros(4, dtype=np.float32))
+
+    SLEEP_S = 0.2
+
+    def _slow_visual(*a, **k):
+        time.sleep(SLEEP_S)
+        return [{"video_id": "v1", "idx": 3, "ms": 1000, "score": 0.41}]
+
+    def _slow_text(vec, uid, *, top_k, video_id=None, video_ids=None, query_text=None):
+        time.sleep(SLEEP_S)
+        return [{"source_id": "doc_a", "kind": "paper", "page": 7,
+                 "text": "self-attention", "score": 0.64}][:top_k]
+
+    monkeypatch.setattr(rag_search.vector_store, "search", _slow_visual)
+    monkeypatch.setattr(rag_search.vector_store, "search_text", _slow_text)
+
+    t0 = time.perf_counter()
+    rag_search._retrieve_impl("q", "u_test")
+    elapsed = time.perf_counter() - t0
+    tracing.reset()
+
+    sequential_expected = 3 * SLEEP_S
+    parallel_expected = 2 * SLEEP_S
+    # Generous margin above the parallel expectation (thread-scheduling
+    # overhead varies) while staying clearly below the sequential baseline —
+    # the two are 0.2s apart, wide enough not to flake either direction.
+    assert elapsed < parallel_expected + 0.15, (
+        f"took {elapsed:.3f}s — branches are still running sequentially "
+        f"(sequential would be ~{sequential_expected:.3f}s, "
+        f"concurrent should be ~{parallel_expected:.3f}s)")
+
+
+def test_branch_spans_still_nest_correctly_when_run_concurrently(sink, stub_retrieval, monkeypatch):
+    """Regression lock for the bug component 54 exists to prevent:
+    `tracing._stack()` is threading.local(), so a worker thread spawned to
+    run a branch concurrently starts with an empty stack unless the current
+    span context is explicitly propagated into it (tracing.current_stack()/
+    adopt_stack()) — without that, search_visual/search_text would silently
+    become disconnected trace roots instead of children of `retrieve`."""
+    monkeypatch.setattr(rag_search, "resolve_llm", lambda uid: (None, "none"))
+    rag_search.ask("q", "u_test")
+    s = _spans(sink)
+    assert s["search_visual"]["parent"] == s["retrieve"]["id"]
+    assert s["search_text"]["parent"] == s["retrieve"]["id"]
+    # One trace tree, not two disconnected ones from the parallel branches.
+    assert len({r["trace_id"] for r in sink.spans}) == 1
+
+
 def test_a_failing_backend_does_not_break_ask(stub_retrieval, monkeypatch):
     class _Exploding:
         def start(self, *a, **k): raise RuntimeError("down")
