@@ -184,3 +184,103 @@ def test_retry_document_404_for_wrong_tenant(client, cleanup):
     resp = client.post(f"/admin/documents/{doc_id}/retry",
                        headers={**AUTH, "X-User-Id": "someone-else"})
     assert resp.status_code == 404
+
+
+# ── Component 34 (DESIGN.md §3e) — DELETE /admin/documents/{id} ─────────────
+# db.delete_document had zero production callers before this: a paper or deck
+# was permanent through the API. Ordered purge-vectors -> delete-object ->
+# delete-row, surfacing a purge failure instead of swallowing it (component
+# 53's cancel-on-delete rides along inside db.delete_document already).
+
+def test_delete_document_requires_auth(client, cleanup):
+    resp = client.post("/admin/documents", json={
+        "uri": "https://arxiv.org/pdf/1706.03762", "kind": "paper"}, headers=AUTH)
+    doc_id = resp.json()["id"]
+    cleanup.append(doc_id)
+
+    resp = client.delete(f"/admin/documents/{doc_id}")
+    assert resp.status_code == 401
+
+
+def test_delete_document_purges_vectors_storage_and_row(client, monkeypatch):
+    resp = client.post("/admin/documents", json={
+        "uri": "https://arxiv.org/pdf/1706.03762", "kind": "paper"}, headers=AUTH)
+    doc_id = resp.json()["id"]
+    db.set_document_storage_key(doc_id, "docs/default/somefile.pdf")
+
+    from src.api import admin as admin_module
+    purged = {}
+    monkeypatch.setattr(
+        admin_module.vector_store, "delete_document_chunks",
+        lambda uid, sid, **kw: purged.update(uid=uid, sid=sid, kwargs=kw))
+    deleted_keys = []
+    monkeypatch.setattr(admin_module.storage, "delete_key", deleted_keys.append)
+
+    resp = client.delete(f"/admin/documents/{doc_id}", headers=AUTH)
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "id": doc_id}
+    assert purged == {"uid": "default", "sid": doc_id, "kwargs": {"raise_on_error": True}}
+    assert deleted_keys == ["docs/default/somefile.pdf"]
+    assert db.get_document(doc_id) is None
+
+
+def test_delete_document_skips_storage_delete_when_no_storage_key(client, monkeypatch):
+    resp = client.post("/admin/documents", json={
+        "uri": "https://arxiv.org/pdf/1706.03762", "kind": "paper"}, headers=AUTH)
+    doc_id = resp.json()["id"]
+
+    from src.api import admin as admin_module
+    monkeypatch.setattr(admin_module.vector_store, "delete_document_chunks",
+                        lambda uid, sid, **kw: None)
+    deleted_keys = []
+    monkeypatch.setattr(admin_module.storage, "delete_key", deleted_keys.append)
+
+    resp = client.delete(f"/admin/documents/{doc_id}", headers=AUTH)
+    assert resp.status_code == 200
+    assert deleted_keys == []
+
+
+def test_delete_document_404_when_missing(client):
+    resp = client.delete("/admin/documents/doc_does_not_exist", headers=AUTH)
+    assert resp.status_code == 404
+
+
+def test_delete_document_404_for_wrong_tenant(client, cleanup):
+    resp = client.post("/admin/documents", json={
+        "uri": "https://arxiv.org/pdf/1706.03762", "kind": "paper"}, headers=AUTH)
+    doc_id = resp.json()["id"]
+    cleanup.append(doc_id)
+
+    resp = client.delete(f"/admin/documents/{doc_id}",
+                         headers={**AUTH, "X-User-Id": "someone-else"})
+    assert resp.status_code == 404
+
+
+def test_delete_document_403_for_seeded_sample(client):
+    from src.samples import CORPUS, seed_doc_id
+    if not CORPUS:
+        pytest.skip("benchmark/corpus.json not present in this checkout")
+    sample_id = seed_doc_id(CORPUS[0]["id"], "paper")
+    resp = client.delete(f"/admin/documents/{sample_id}", headers=AUTH)
+    assert resp.status_code == 403
+
+
+def test_delete_document_502_when_vector_purge_fails_row_survives(client, monkeypatch, cleanup):
+    """RED-today scenario (DESIGN.md's primary eval for component 34): a purge
+    failure must not leave a successful-looking delete with orphaned vectors —
+    the row has to survive so the document is still visibly present/retryable
+    rather than silently vanishing while its vectors linger."""
+    resp = client.post("/admin/documents", json={
+        "uri": "https://arxiv.org/pdf/1706.03762", "kind": "paper"}, headers=AUTH)
+    doc_id = resp.json()["id"]
+    cleanup.append(doc_id)
+
+    from src.api import admin as admin_module
+
+    def _boom(uid, sid, **kw):
+        raise RuntimeError("Qdrant unreachable")
+    monkeypatch.setattr(admin_module.vector_store, "delete_document_chunks", _boom)
+
+    resp = client.delete(f"/admin/documents/{doc_id}", headers=AUTH)
+    assert resp.status_code == 502
+    assert db.get_document(doc_id) is not None  # row survives — not silently gone

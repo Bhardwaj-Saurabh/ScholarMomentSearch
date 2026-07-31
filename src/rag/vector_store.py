@@ -336,9 +336,15 @@ def count_video_chunks(user_id: str, video_id: str) -> int:
     return client().count(collection_name=QDRANT_COLLECTION, count_filter=f, exact=True).count
 
 
-def delete_document_chunks(user_id: str, source_id: str) -> None:
+def delete_document_chunks(user_id: str, source_id: str, raise_on_error: bool = False) -> None:
     """Purge a document's chunks before re-embedding, mirroring delete_video's
-    role for the video branches — keeps a re-run idempotent."""
+    role for the video branches — keeps a re-run idempotent. Fails open
+    (swallows) by default, since a transient Qdrant hiccup during a re-embed
+    shouldn't crash the whole ingest flow. Component 34 (DESIGN.md §3e) needs
+    the opposite for the admin DELETE route: a purge failure there must be
+    visible, so the row can be left in place rather than deleted out from
+    under vectors that are still searchable — raise_on_error=True does that
+    without duplicating this function."""
     sel = qm.FilterSelector(filter=qm.Filter(must=[
         qm.FieldCondition(key="user_id", match=qm.MatchValue(value=user_id)),
         qm.FieldCondition(key="source_id", match=qm.MatchValue(value=source_id)),
@@ -346,7 +352,8 @@ def delete_document_chunks(user_id: str, source_id: str) -> None:
     try:
         client().delete(collection_name=TEXT_COLLECTION, points_selector=sel, wait=True)
     except Exception:
-        pass
+        if raise_on_error:
+            raise
 
 
 def delete_video(user_id: str, video_id: str) -> None:

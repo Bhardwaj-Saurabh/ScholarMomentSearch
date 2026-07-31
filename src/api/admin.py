@@ -10,8 +10,10 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from .. import db, jobs, trace_link, tracing
+from .. import db, jobs, storage, trace_link, tracing
 from ..config import DOC_KEY_PREFIX, FRAME_KEY_PREFIX, UPLOAD_KEY_PREFIX
+from ..rag import vector_store
+from ..samples import is_sample_document
 from .videos import require_auth
 from .videos import user_id as user_id_dep
 
@@ -134,3 +136,30 @@ def retry_document(doc_id: str, uid: str = Depends(user_id_dep)):
     flow_run_id = jobs.enqueue_document(doc_id, uid, row["kind"])
     db.set_document_flow_run_id(doc_id, flow_run_id)
     return {"id": doc_id, "status": "pending", "flow_run_id": flow_run_id}
+
+
+@router.delete("/documents/{doc_id}", dependencies=[Depends(require_auth)])
+def delete_document_route(doc_id: str, uid: str = Depends(user_id_dep)):
+    """Component 34 (DESIGN.md §3e): db.delete_document had zero production
+    callers before this — a paper or deck was permanent through the API.
+    Ordered purge-vectors -> delete-object -> delete-row, mirroring the video
+    path's delete() in src/api/videos.py. Unlike that (protected) path, a
+    vector-purge failure here is surfaced (502) rather than swallowed: the
+    row survives so the document stays visible/retryable instead of vanishing
+    behind orphaned, still-searchable vectors. db.delete_document itself
+    handles the Prefect flow-run cancellation (component 53) and graph
+    cleanup (component 50) — both already fail-open internally."""
+    if is_sample_document(doc_id):
+        raise HTTPException(403, "Seeded corpus documents can't be deleted — "
+                                 "unselect it from your query instead.")
+    row = db.get_document(doc_id)
+    if row is None or row["user_id"] != uid:
+        raise HTTPException(404, "Document not found.")
+    try:
+        vector_store.delete_document_chunks(uid, doc_id, raise_on_error=True)
+    except Exception as exc:
+        raise HTTPException(502, "Failed to purge vectors; document not deleted.") from exc
+    if row.get("storage_key"):
+        storage.delete_key(row["storage_key"])
+    db.delete_document(doc_id)
+    return {"ok": True, "id": doc_id}

@@ -217,3 +217,53 @@ def test_fresh_bench_tenant_is_unique_per_call_and_labeled():
     assert a != b  # two runs (or two calls) must never collide with each other
     assert a.startswith("bench-throughput-")
     assert "default" not in a  # must never accidentally land on the seeded tenant
+
+
+# ── Component 34 (DESIGN.md §3e) — bench.py cleans up its own test documents ─
+# Without this, every measurement that creates fresh-tenant documents left
+# them permanently in Postgres; the reconciler retried the un-fetchable ones
+# (accept-latency's fake example.com URLs) forever, each retry adding a fresh
+# Prefect scheduled run. That ongoing leak — not one-time debris — was the
+# actual mechanism behind ingest_throughput_chunks_per_s reading 0.0
+# (EVIDENCE.md 2026-07-31).
+
+def test_delete_documents_calls_the_delete_route_for_every_id(monkeypatch):
+    calls = []
+
+    def _fake_req(method, path, body=None, token=None, timeout=30, user=None):
+        calls.append((method, path, user))
+        return 200, "{}", 1.0
+
+    monkeypatch.setattr(bench, "_req", _fake_req)
+    bench._delete_documents(["doc_a", "doc_b"], user="bench-test-1")
+
+    assert sorted(calls) == [
+        ("DELETE", "/admin/documents/doc_a", "bench-test-1"),
+        ("DELETE", "/admin/documents/doc_b", "bench-test-1"),
+    ]
+
+
+def test_delete_documents_empty_list_makes_no_calls(monkeypatch):
+    calls = []
+    monkeypatch.setattr(bench, "_req", lambda *a, **k: calls.append(1) or (200, "{}", 1.0))
+    bench._delete_documents([])
+    assert calls == []
+
+
+def test_delete_documents_one_failure_does_not_stop_the_rest(monkeypatch):
+    """`_req` already swallows HTTP-level failures (returns status 0 rather
+    than raising) — this just confirms _delete_documents doesn't need its own
+    try/except to get that guarantee, and that one bad id can't short-circuit
+    cleanup of the others."""
+    calls = []
+
+    def _fake_req(method, path, body=None, token=None, timeout=30, user=None):
+        calls.append(path)
+        if "doc_a" in path:
+            return 0, "connection reset", 1.0
+        return 200, "{}", 1.0
+
+    monkeypatch.setattr(bench, "_req", _fake_req)
+    bench._delete_documents(["doc_a", "doc_b", "doc_c"])  # must not raise
+
+    assert len(calls) == 3

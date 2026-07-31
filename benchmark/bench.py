@@ -64,14 +64,22 @@ def p95(xs):
 
 
 def measure_accept_latency(n=30):
-    """POST /admin/documents should enqueue-and-return fast (no parsing in-request)."""
-    lat = []
+    """POST /admin/documents should enqueue-and-return fast (no parsing in-request).
+    Deletes its own probe documents afterward (component 34's DELETE route) —
+    without this, every bench.py run permanently littered Postgres with
+    fake-URL documents the reconciler retried forever, each retry adding a
+    fresh Prefect scheduled run. That ongoing leak, not one-time debris, is
+    what was actually starving ingest_throughput_chunks_per_s
+    (EVIDENCE.md 2026-07-31)."""
+    lat, ids = [], []
     for i in range(n):
-        st, _, ms = _req("POST", "/admin/documents", token=ADMIN,
-                         body={"uri": f"https://example.com/probe_{i}.pdf",
-                               "kind": "paper", "title": f"probe {i}"})
+        st, body, ms = _req("POST", "/admin/documents", token=ADMIN,
+                            body={"uri": f"https://example.com/probe_{i}.pdf",
+                                  "kind": "paper", "title": f"probe {i}"})
         if st == 202:
             lat.append(ms)
+            ids.append(json.loads(body)["id"])
+    _delete_documents(ids)
     return p95(lat) if lat else float("inf")
 
 
@@ -284,6 +292,21 @@ def _submit_documents(uris: list[dict], user: str | None = None) -> list[str]:
     return [i for i in ids if i]
 
 
+def _delete_documents(ids: list[str], user: str | None = None) -> None:
+    """Component 34's DELETE route, called for THIS run's own throwaway
+    documents once a measurement no longer needs them. Best-effort: `_req`
+    already swallows failures (returns status 0 rather than raising), so
+    cleanup failing never turns a passing measurement into a bench.py crash —
+    it just leaves that one document for a later cleanup pass, same as today."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def delete(i):
+        _req("DELETE", f"/admin/documents/{i}", token=ADMIN, user=user)
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(delete, ids))
+
+
 _TERMINAL = {"indexed", "skipped", "failed"}
 
 
@@ -320,14 +343,29 @@ def run_concurrent_ingest_load(n: int = 20) -> None:
     URLs) so search-during-ingest measures genuine fetch/parse/embed
     contention, not just a fast-failing HTTP GET. Runs under its own fresh
     tenant (see _fresh_bench_tenant) so these actually parse+embed instead of
-    deduping against the seeded corpus."""
+    deduping against the seeded corpus. The submitted flows keep running in
+    the worker process independently of this function's return, so the
+    contention window for the caller's concurrent search-p95 measurement is
+    unaffected by deleting right away — component 34's DELETE route (via
+    component 53) cleanly cancels whatever stage each is at. No wait-for-
+    terminal here on purpose: this measurement never needed these documents
+    to finish, only to be in flight, and waiting would add real wall-clock
+    time to every bench.py run for no benefit."""
     user = _fresh_bench_tenant("load")
-    _submit_documents(_cycle_to_n(_load_corpus_uris(), n), user=user)
+    ids = _submit_documents(_cycle_to_n(_load_corpus_uris(), n), user=user)
+    _delete_documents(ids, user=user)
 
 
 def measure_throughput(n: int = 16, timeout_s: float = 600.0) -> float:
     """Submit n documents under a fresh tenant, poll until all reach a
-    terminal state, return total indexed chunk_count / elapsed seconds."""
+    terminal state, return total indexed chunk_count / elapsed seconds.
+    Deletes its own documents afterward (component 34) — chunk counts are
+    read BEFORE the delete, since the row (and its chunk_count) is gone once
+    component 34's route runs. Without this cleanup, every run of this exact
+    function permanently added n more zombie documents that the reconciler
+    retried forever, each retry adding a fresh Prefect scheduled run — the
+    real, ongoing mechanism behind this gate reading 0.0 (EVIDENCE.md
+    2026-07-31), not a one-time historical backlog."""
     user = _fresh_bench_tenant("throughput")
     t0 = time.perf_counter()
     ids = _submit_documents(_cycle_to_n(_load_corpus_uris(), n), user=user)
@@ -341,6 +379,7 @@ def measure_throughput(n: int = 16, timeout_s: float = 600.0) -> float:
     if st == 200:
         counts = {s["id"]: (s.get("chunk_count") or 0) for s in json.loads(body)["sources"]}
     total = sum(counts.get(i, 0) for i in ids if final.get(i) == "indexed")
+    _delete_documents(ids, user=user)
     return (total / elapsed) if elapsed > 0 else 0.0
 
 
@@ -361,7 +400,10 @@ def run_resilience_check(n: int = 10, kill_after_s: float = 8.0,
     stream, and assert every source still reaches a terminal state. Docker
     Compose's `restart: unless-stopped` on the worker service brings it back
     automatically; Prefect redelivers the interrupted run once a worker is
-    polling again — this asserts that promise holds, it doesn't manufacture it."""
+    polling again — this asserts that promise holds, it doesn't manufacture it.
+    Deletes its own documents afterward (component 34) once the terminal-state
+    assertion is captured, same reasoning as measure_throughput: leaving them
+    behind would just feed the reconciler's perpetual-retry backlog."""
     import subprocess
 
     user = _fresh_bench_tenant("resilience")
@@ -375,6 +417,7 @@ def run_resilience_check(n: int = 10, kill_after_s: float = 8.0,
     if not cid:
         print("[resilience] could not find the worker container via "
              "'docker compose ps -q worker' — is the stack up?")
+        _delete_documents(ids, user=user)
         return False
     subprocess.run(["docker", "kill", cid], timeout=15)
     print(f"[resilience] killed worker container {cid[:12]} mid-ingest")
@@ -383,6 +426,7 @@ def run_resilience_check(n: int = 10, kill_after_s: float = 8.0,
     lost = [i for i, s in final.items() if s not in _TERMINAL]
     if lost:
         print(f"[resilience] {len(lost)} source(s) never reached a terminal state: {lost}")
+    _delete_documents(ids, user=user)
     return not lost
 
 

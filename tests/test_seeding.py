@@ -50,9 +50,9 @@ def cleanup():
 
 
 def test_seed_doc_id_is_deterministic_and_kind_specific():
-    a1 = seeding._seed_doc_id("attention", "paper")
-    a2 = seeding._seed_doc_id("attention", "paper")
-    b = seeding._seed_doc_id("attention", "deck")
+    a1 = seeding.seed_doc_id("attention", "paper")
+    a2 = seeding.seed_doc_id("attention", "paper")
+    b = seeding.seed_doc_id("attention", "deck")
     assert a1 == a2  # same triplet+kind -> same id every time (idempotency)
     assert a1 != b   # different kind -> different id
 
@@ -62,14 +62,14 @@ def test_not_indexed_documents_lists_every_corpus_paper_and_deck_when_fresh():
     ids = {t["id"] for t in todo}
     # 8 triplets * 2 kinds = 16, none indexed yet in a fresh DB
     assert len(todo) == 16
-    assert seeding._seed_doc_id("attention", "paper") in ids
-    assert seeding._seed_doc_id("attention", "deck") in ids
+    assert seeding.seed_doc_id("attention", "paper") in ids
+    assert seeding.seed_doc_id("attention", "deck") in ids
     assert all(t["kind"] in ("paper", "deck") for t in todo)
     assert all(t["uri"].startswith("http") for t in todo)
 
 
 def test_not_indexed_documents_excludes_already_indexed(cleanup):
-    doc_id = seeding._seed_doc_id("attention", "paper")
+    doc_id = seeding.seed_doc_id("attention", "paper")
     cleanup[1].append(doc_id)
     db.upsert_pending_document({"id": doc_id, "user_id": config.DEFAULT_USER_ID,
                                "kind": "paper", "uri": "https://arxiv.org/pdf/1706.03762",
@@ -108,12 +108,12 @@ def test_seed_to_completion_indexes_everything_on_first_pass(monkeypatch, cleanu
         cleanup[0].append(seeding.sample_video_id(v["url"]))
     for t in seeding.CORPUS:
         cleanup[0].append(seeding.sample_video_id(t["video_url"]))
-        cleanup[1].append(seeding._seed_doc_id(t["id"], "paper"))
-        cleanup[1].append(seeding._seed_doc_id(t["id"], "deck"))
+        cleanup[1].append(seeding.seed_doc_id(t["id"], "paper"))
+        cleanup[1].append(seeding.seed_doc_id(t["id"], "deck"))
 
 
 def test_seed_to_completion_retries_a_transient_failure_then_succeeds(monkeypatch, cleanup):
-    target_doc = seeding._seed_doc_id("bert", "paper")
+    target_doc = seeding.seed_doc_id("bert", "paper")
     attempts = {"n": 0}
 
     def fake_ingest_video(video_id, user_id):
@@ -139,12 +139,12 @@ def test_seed_to_completion_retries_a_transient_failure_then_succeeds(monkeypatc
         cleanup[0].append(seeding.sample_video_id(v["url"]))
     for t in seeding.CORPUS:
         cleanup[0].append(seeding.sample_video_id(t["video_url"]))
-        cleanup[1].append(seeding._seed_doc_id(t["id"], "paper"))
-        cleanup[1].append(seeding._seed_doc_id(t["id"], "deck"))
+        cleanup[1].append(seeding.seed_doc_id(t["id"], "paper"))
+        cleanup[1].append(seeding.seed_doc_id(t["id"], "deck"))
 
 
 def test_seed_to_completion_returns_false_but_seeds_everything_else_on_permanent_failure(monkeypatch, cleanup):
-    poison_doc = seeding._seed_doc_id("gpt3", "deck")
+    poison_doc = seeding.seed_doc_id("gpt3", "deck")
 
     def fake_ingest_video(video_id, user_id):
         db.set_status(video_id, "indexed")
@@ -168,8 +168,8 @@ def test_seed_to_completion_returns_false_but_seeds_everything_else_on_permanent
         cleanup[0].append(seeding.sample_video_id(v["url"]))
     for t in seeding.CORPUS:
         cleanup[0].append(seeding.sample_video_id(t["video_url"]))
-        cleanup[1].append(seeding._seed_doc_id(t["id"], "paper"))
-        cleanup[1].append(seeding._seed_doc_id(t["id"], "deck"))
+        cleanup[1].append(seeding.seed_doc_id(t["id"], "paper"))
+        cleanup[1].append(seeding.seed_doc_id(t["id"], "deck"))
 
 
 def test_seed_corpus_flag_skips_documents_but_still_seeds_sample_videos(monkeypatch, cleanup):

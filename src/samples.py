@@ -60,3 +60,21 @@ SAMPLE_IDS = frozenset(sample_video_id(v["url"]) for v in SAMPLE_VIDEOS) | froze
 
 def is_sample(video_id: str) -> bool:
     return video_id in SAMPLE_IDS
+
+
+def seed_doc_id(corpus_id: str, kind: str) -> str:
+    """Deterministic — a re-run must target the SAME row (idempotency), unlike
+    the admin API's random uuid4 for one-off user registrations. Single source
+    of truth for src/seeding.py and the sample-protection set below."""
+    return f"doc_seed_{corpus_id}_{kind}"
+
+
+# Component 34 (DESIGN.md §3e): the 16 seeded paper/deck documents (8 corpus
+# triplets x 2 kinds), protected the same way SAMPLE_IDS protects videos —
+# deletable-looking but the seed gate would just re-add them on next boot.
+SAMPLE_DOCUMENT_IDS = frozenset(
+    seed_doc_id(t["id"], kind) for t in CORPUS for kind in ("paper", "deck"))
+
+
+def is_sample_document(doc_id: str) -> bool:
+    return doc_id in SAMPLE_DOCUMENT_IDS

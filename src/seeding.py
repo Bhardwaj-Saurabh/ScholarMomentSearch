@@ -22,7 +22,7 @@ from . import config, db
 from .ingest.doc_pipeline import ingest_document
 from .ingest.pipeline import ingest_video
 from .rag import vector_store
-from .samples import CORPUS, SAMPLE_VIDEOS, sample_video_id
+from .samples import CORPUS, SAMPLE_VIDEOS, sample_video_id, seed_doc_id
 
 _MAX_PASSES = 3  # re-attempt sources that fail (e.g. a transient network hiccup)
 
@@ -86,21 +86,15 @@ def _not_indexed_videos() -> list[dict]:
     return out
 
 
-def _seed_doc_id(corpus_id: str, kind: str) -> str:
-    """Deterministic — a re-run must target the SAME row (idempotency), unlike
-    the admin API's random uuid4 for one-off user registrations."""
-    return f"doc_seed_{corpus_id}_{kind}"
-
-
 def _corpus_documents() -> list[dict]:
     """The 16 seed documents (paper + deck per triplet), or [] if disabled."""
     if not config.SEED_CORPUS:
         return []
     docs = []
     for t in CORPUS:
-        docs.append({"id": _seed_doc_id(t["id"], "paper"), "kind": "paper",
+        docs.append({"id": seed_doc_id(t["id"], "paper"), "kind": "paper",
                      "uri": t["paper_pdf"], "title": t["paper_title"]})
-        docs.append({"id": _seed_doc_id(t["id"], "deck"), "kind": "deck",
+        docs.append({"id": seed_doc_id(t["id"], "deck"), "kind": "deck",
                      "uri": t["deck_pdf"], "title": t["deck_note"]})
     return docs
 
