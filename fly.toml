@@ -79,12 +79,14 @@ primary_region = 'lhr'
     grace_period = '10s'
 
 [[vm]]
-  size = 'shared-cpu-1x'
-  # Bumped from 512mb: the live deploy's api machine was OOM-killed under a
-  # real /api/ask query (uvicorn total-vm 1.7GB, anon-rss 388MB — the
-  # transformers/torch import surface alone leaves little headroom at 512mb,
-  # even though embedding itself runs in the clip service).
-  memory = '1gb'
+  size = 'shared-cpu-2x'
+  # Bumped from 512mb once already (uvicorn total-vm 1.7GB under a real
+  # /api/ask query), then from shared-cpu-1x/1gb 2026-07-31: OOM-killed twice
+  # within minutes under bench.py's full suite (concurrent registrations +
+  # searches + load test all landing on one machine) — total-vm hit
+  # 2.5-2.6GB, past shared-cpu-1x's 2gb ceiling. shared-cpu-2x/3gb gives real
+  # headroom instead of chasing the exact peak.
+  memory = '3gb'
   processes = ['api']
 
 [[vm]]
