@@ -132,6 +132,9 @@ class _FakeOpenAIClient:
 
 def _patch_openai(monkeypatch, text, in_tok, out_tok):
     response = _FakeOpenAIResponse(text, in_tok, out_tok)
+    # Component 58 made clients process-cached; without clearing, the first
+    # test's fake would be served to every later test with the same config.
+    llm._openai_client.cache_clear()
     monkeypatch.setattr("openai.OpenAI", lambda **k: _FakeOpenAIClient(response))
 
 

@@ -168,9 +168,14 @@ def ask(req: AskRequest, x_user_id: str | None = Header(default=None)):
     # Empty list == "nothing selected" -> treat as all (None); avoids a
     # confusing zero-results answer when the user unchecks everything.
     video_ids = req.video_ids or None
-    return rag_search.ask(req.question.strip(), _uid(x_user_id),
-                          top_k=req.top_k, video_id=req.video_id,
-                          video_ids=video_ids)
+    try:
+        return rag_search.ask(req.question.strip(), _uid(x_user_id),
+                              top_k=req.top_k, video_id=req.video_id,
+                              video_ids=video_ids)
+    except llm.LLMUnavailable as exc:
+        # Component 58: the contract's 502-upstream-failure, not a raw 500.
+        raise HTTPException(502, "The answer model is temporarily unavailable — "
+                                 "retrieval succeeded; try again shortly.") from exc
 
 
 def _sse(event: str, data: dict) -> str:
@@ -200,7 +205,21 @@ def ask_stream(q: str = Query(min_length=1, max_length=config.ASK_MAX_QUESTION_C
 
     def gen():
         yield _sse("trace", {"stage": "retrieving"})
-        result = rag_search.ask(q.strip(), uid, video_id=video_id, video_ids=video_ids or None)
+        # Component 58: by the time anything in here fails, the 200 + SSE
+        # headers are already on the wire — a raised exception just truncates
+        # the stream mid-air, which the UI (and bench) see as a connection
+        # reset, not an error. A terminal `error` event is the only way an
+        # SSE endpoint can actually report failure.
+        try:
+            result = rag_search.ask(q.strip(), uid, video_id=video_id,
+                                    video_ids=video_ids or None)
+        except llm.LLMUnavailable:
+            yield _sse("error", {"detail": "The answer model is temporarily "
+                                           "unavailable — try again shortly."})
+            return
+        except Exception as exc:
+            yield _sse("error", {"detail": f"Search failed: {type(exc).__name__}"})
+            return
         yield _sse("citations", {"citations": result["citations"]})
         yield _sse("answer", {
             "answer": result["answer"],

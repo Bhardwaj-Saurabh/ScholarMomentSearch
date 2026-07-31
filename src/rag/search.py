@@ -664,7 +664,18 @@ def _ask_impl(question: str, user_id: str, *, top_k: int | None = None,
         result["injection_flags"] = injection_flags
     with tracing.span("llm_answer", model=cfg.model, llm_source=source,
                       prompt_version=prompts.get("answer").version) as _sl:
-        raw = llm.answer(question, moments, cfg)
+        # Component 58: EVERY provider failure leaves here as the one typed
+        # error the API layer maps to the contract's 502 — retryable ones have
+        # already been retried inside llm.answer, and a non-retryable one
+        # (bad key, malformed request) is still an upstream failure from the
+        # caller's point of view, not our 500.
+        try:
+            raw = llm.answer(question, moments, cfg)
+        except llm.LLMUnavailable:
+            raise
+        except Exception as exc:
+            raise llm.LLMUnavailable(
+                f"model call failed: {type(exc).__name__}: {exc}") from exc
         _sl.set_attrs(answer_chars=len(raw or ""))
     # The two backstops can silently rewrite or withhold an answer. Whether
     # they fired is exactly what you need when an answer looks wrong.

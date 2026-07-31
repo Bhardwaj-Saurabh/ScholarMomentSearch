@@ -422,6 +422,10 @@ LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip()
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "").strip()
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini").strip()
 LLM_MAX_TOKENS = _int("LLM_MAX_TOKENS", 1024)
+# Component 58 (DESIGN.md §3m): every provider call gets an explicit deadline.
+# The SDK default (600s) is longer than any request budget — bench reads
+# /ask_stream with a 30s timeout, so a hung generation must fail before that.
+LLM_TIMEOUT_S = _float("LLM_TIMEOUT_S", 25.0)
 LLM_IMAGE_MAX_PX = _int("LLM_IMAGE_MAX_PX", 512)  # frames are downscaled again before the LLM
 
 

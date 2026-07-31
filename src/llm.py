@@ -24,9 +24,77 @@ from __future__ import annotations
 
 import base64
 import io
+import random
+import time
 from dataclasses import dataclass
+from functools import lru_cache
 
 from . import config, injection, metrics
+
+
+class LLMUnavailable(Exception):
+    """Component 58 (DESIGN.md §3m): the answer model could not be reached
+    after bounded retries. The API layer maps this — and only this — to the
+    contract's 502; everything below raises or wraps into it so there is
+    exactly one type to catch."""
+
+
+# Bounded backoff: two retries, short and front-loaded. A retryable failure is
+# usually a 429 or a connection blip that clears in well under a second; a
+# longer ladder would just push /ask past the caller's own timeout (bench
+# reads /ask_stream with a 30s budget — the old no-timeout, no-retry calls are
+# where its two HTTP-0 zeros came from).
+_RETRY_DELAYS_S = (0.5, 1.5)
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504, 529}
+# Connection-level SDK errors carry no status_code; both the openai and
+# anthropic SDKs use these class names, so matching on the name avoids
+# importing either SDK eagerly.
+_RETRYABLE_TYPES = {"APIConnectionError", "APITimeoutError", "InternalServerError",
+                    "RateLimitError"}
+
+
+def _retryable(exc: Exception) -> bool:
+    if getattr(exc, "status_code", None) in _RETRYABLE_STATUS:
+        return True
+    return type(exc).__name__ in _RETRYABLE_TYPES
+
+
+def _call_with_retries(fn):
+    """Run one provider call with bounded, jittered backoff on retryable
+    failures. Non-retryable errors (a 401 bad key won't get better) re-raise
+    unchanged so the settings ping can surface the provider's real message;
+    exhaustion raises LLMUnavailable."""
+    for attempt, delay in enumerate(_RETRY_DELAYS_S + (None,)):
+        try:
+            return fn()
+        except Exception as exc:
+            if not _retryable(exc):
+                raise
+            if delay is None:
+                raise LLMUnavailable(
+                    f"model call failed after {len(_RETRY_DELAYS_S) + 1} attempts: "
+                    f"{type(exc).__name__}: {exc}") from exc
+            time.sleep(delay * (1 + random.random() * 0.25))
+
+
+@lru_cache(maxsize=32)
+def _openai_client(api_key: str, base_url: str | None):
+    """One client per (key, endpoint) for the process lifetime — a fresh
+    client per call meant a fresh TLS handshake per answer/caption. Explicit
+    timeout (the SDK default is 600s, longer than any request budget) and
+    SDK retries OFF: the policy lives in _call_with_retries, in one place."""
+    from openai import OpenAI
+
+    return OpenAI(api_key=api_key or "not-needed", base_url=base_url,
+                  timeout=config.LLM_TIMEOUT_S, max_retries=0)
+
+
+@lru_cache(maxsize=32)
+def _anthropic_client(api_key: str, base_url: str | None):
+    import anthropic
+
+    return anthropic.Anthropic(api_key=api_key, base_url=base_url or None,
+                               timeout=config.LLM_TIMEOUT_S, max_retries=0)
 
 # NVIDIA's hosted inference endpoint (OpenAI-compatible).
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
@@ -225,9 +293,7 @@ def _label(i: int, m: dict) -> str:
 
 
 def _answer_openai(cfg: LLMConfig, question: str, moments: list[dict], kind: str) -> str:
-    from openai import OpenAI
-
-    client = OpenAI(api_key=cfg.api_key or "not-needed", base_url=_base_url(cfg))
+    client = _openai_client(cfg.api_key, _base_url(cfg))
     content: list[dict] = [{"type": "text", "text": _intro(question, len(moments))}]
     # Component 49: mark where untrusted retrieved text begins and ends, so
     # SYSTEM rule 6 has a boundary to refer to.
@@ -238,13 +304,13 @@ def _answer_openai(cfg: LLMConfig, question: str, moments: list[dict], kind: str
             uri = f"data:image/jpeg;base64,{base64.b64encode(_downscale(m['image'])).decode()}"
             content.append({"type": "image_url", "image_url": {"url": uri}})
     content.append({"type": "text", "text": injection.EVIDENCE_CLOSE})
-    resp = client.chat.completions.create(
+    resp = _call_with_retries(lambda: client.chat.completions.create(
         model=cfg.model,
         messages=[{"role": "system", "content": SYSTEM},
                   {"role": "user", "content": content}],
         temperature=0.2,
         max_tokens=cfg.max_tokens,
-    )
+    ))
     usage = getattr(resp, "usage", None)
     if usage:
         metrics.record_llm_usage(cfg.model, usage.prompt_tokens or 0,
@@ -253,9 +319,7 @@ def _answer_openai(cfg: LLMConfig, question: str, moments: list[dict], kind: str
 
 
 def _answer_anthropic(cfg: LLMConfig, question: str, moments: list[dict], kind: str) -> str:
-    import anthropic
-
-    client = anthropic.Anthropic(api_key=cfg.api_key, base_url=cfg.base_url or None)
+    client = _anthropic_client(cfg.api_key, cfg.base_url)
     blocks: list[dict] = [{"type": "text", "text": _intro(question, len(moments))}]
     blocks.append({"type": "text", "text": injection.EVIDENCE_OPEN})   # component 49
     for i, m in enumerate(moments, 1):
@@ -265,12 +329,12 @@ def _answer_anthropic(cfg: LLMConfig, question: str, moments: list[dict], kind: 
                 "type": "base64", "media_type": "image/jpeg",
                 "data": base64.b64encode(_downscale(m["image"])).decode()}})
     blocks.append({"type": "text", "text": injection.EVIDENCE_CLOSE})
-    resp = client.messages.create(
+    resp = _call_with_retries(lambda: client.messages.create(
         model=cfg.model,
         max_tokens=cfg.max_tokens,
         system=SYSTEM,
         messages=[{"role": "user", "content": blocks}],
-    )
+    ))
     usage = getattr(resp, "usage", None)
     if usage:
         metrics.record_llm_usage(cfg.model, usage.input_tokens or 0,
@@ -279,15 +343,13 @@ def _answer_anthropic(cfg: LLMConfig, question: str, moments: list[dict], kind: 
 
 
 def _complete_openai(cfg: LLMConfig, system: str, prompt: str) -> str:
-    from openai import OpenAI
-
-    client = OpenAI(api_key=cfg.api_key or "not-needed", base_url=_base_url(cfg))
-    resp = client.chat.completions.create(
+    client = _openai_client(cfg.api_key, _base_url(cfg))
+    resp = _call_with_retries(lambda: client.chat.completions.create(
         model=cfg.model,
         messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
         temperature=0,
         max_tokens=cfg.max_tokens,
-    )
+    ))
     usage = getattr(resp, "usage", None)
     if usage:
         metrics.record_llm_usage(cfg.model, usage.prompt_tokens or 0,
@@ -296,13 +358,11 @@ def _complete_openai(cfg: LLMConfig, system: str, prompt: str) -> str:
 
 
 def _complete_anthropic(cfg: LLMConfig, system: str, prompt: str) -> str:
-    import anthropic
-
-    client = anthropic.Anthropic(api_key=cfg.api_key, base_url=cfg.base_url or None)
-    resp = client.messages.create(
+    client = _anthropic_client(cfg.api_key, cfg.base_url)
+    resp = _call_with_retries(lambda: client.messages.create(
         model=cfg.model, max_tokens=cfg.max_tokens, system=system,
         messages=[{"role": "user", "content": prompt}],
-    )
+    ))
     usage = getattr(resp, "usage", None)
     if usage:
         metrics.record_llm_usage(cfg.model, usage.input_tokens or 0,
