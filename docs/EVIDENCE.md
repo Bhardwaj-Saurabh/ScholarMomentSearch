@@ -6002,3 +6002,56 @@ identically, so 0 regressions from this component.
 
 **Still red** (expected — later components): accept p95, throughput, recall gates
 unchanged by this component; re-measured at the end of the program.
+
+---
+
+## 2026-07-31 — Component 56: accept-path fast 202 (deferred dispatch + DB diet)
+
+**Root causes measured** (audit, this session): 8 Postgres round trips per accept
+(2 single-statement writes × [checkout ping + BEGIN + statement + COMMIT] at Neon's
+57-68ms RTT) + a synchronous Prefect Cloud create on a brand-new client (fresh
+TCP+TLS to a US control plane) inside the request path.
+
+**Evals (RED first)**:
+- `test_register_document_stays_202_when_enqueue_fails` — the discriminating eval
+  for the deferral (old behavior: 502). Confirmed RED.
+- `test_one_prefect_client_reused_across_dispatches` — 3 dispatches must construct
+  ONE client. Confirmed RED (one per dispatch before).
+- `test_reconcile_restarts_a_stale_pending_row_that_was_never_dispatched` — the
+  crash-safety net the deferral requires: 'pending' + flow_run_id NULL + stale must
+  be re-enqueued (the old sweep skipped ALL NULL-flow_run_id rows). Confirmed RED.
+  Guard kept GREEN: `test_reconcile_still_skips_non_pending_rows_with_no_flow_run_id`
+  (in-process seeding shape untouched).
+
+**Implementation**: `admin.py` registration = one insert → 202; enqueue +
+`set_document_flow_run_id` moved to a Starlette background task (`_dispatch_document`);
+a dispatch failure lands on the row (`status='failed'`), recoverable via retry.
+`jobs.py`: one long-lived Prefect sync client per process (`_get_sync_client` +
+`_reset_client` on dispatch failure; stale-id fallback kept). `db.py`: pool is
+`autocommit=True` (drops BEGIN/COMMIT — 2 of every 4 round trips per checkout;
+checkout ping KEPT deliberately — removing it risks sporadic 500s against the frozen
+`error_rate_max_pct` gate); `wfq_claim` keeps its original semantics under an explicit
+`conn.transaction()` since the protected dispatcher depends on it.
+
+**Found live after deploy**: bench's accept probes DELETE immediately after the 202,
+and the deferred dispatch can lose that race — orphan flow runs failing on
+`ValueError('no manifest row …')` with 2 retries each (seen verbatim in `fly logs`).
+Fixed same component: `_dispatch_document` re-checks the row before enqueueing
+(RED test: `test_background_dispatch_skips_a_row_deleted_before_it_ran`), and
+`t_fetch` treats a missing manifest row as the same clean no-op exit as a duplicate
+(RED test: `test_t_fetch_missing_row_is_a_clean_noop_not_a_retrying_failure`).
+
+**GREEN (unit)**: full suite `658 passed, 10 failed` — identical 10 pre-existing
+environment failures as before this component (verified against unmodified HEAD
+earlier this session), 0 regressions.
+
+**GREEN (live, production)** after `fly deploy`:
+```
+BASE_URL=https://scholarmomentsearch.fly.dev  bench.measure_accept_latency(n=30)
+accept_latency_p95_ms: 127.8   (gate: <= 300 — PASS; was 774.7 this morning, 2354.4 pre-migration)
+```
+Measured from the same laptop/home network as every previous number — the gate
+passes WITH client RTT included, no in-region asterisk needed.
+
+**Commits**: `41ade70` (deferred dispatch, autocommit pool, persistent client),
+`1280f6b` (delete-race close, found live).
