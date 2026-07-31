@@ -25,6 +25,12 @@ os.environ.setdefault(
 # empty here, before src.config is ever imported, so tests always fall back
 # to the embedded QDRANT_LOCAL_PATH instance.
 os.environ.setdefault("QDRANT_URL", "")
+# Same leak class component 41 fixed for QDRANT_URL, found 2026-07-31: the
+# user's .env carried QDRANT_COLLECTION=<cloud cluster name>, so every
+# "real qdrant" test searched a collection that never exists in the embedded
+# test instance. Tests always run against the stock collection names.
+os.environ.setdefault("QDRANT_COLLECTION", "moments")
+os.environ.setdefault("TEXT_COLLECTION", "moments_text")
 os.environ.setdefault("ADMIN_TOKEN", "test-admin-token")
 
 

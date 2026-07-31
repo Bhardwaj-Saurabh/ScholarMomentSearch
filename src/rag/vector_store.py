@@ -103,6 +103,16 @@ def _user_filter(user_id: str, video_id: str | None = None,
     return qm.Filter(must=must)
 
 
+# Component 57 (DESIGN.md §3m): ensure_* used to fire ~5 Qdrant round trips
+# per call — and the document flow calls it once per RUN, in a fresh Prefect
+# subprocess each time, so every single ingest paid for index-creation calls
+# that have been no-ops since the collection was first created. Two-level fix:
+# a process-local memo (repeat calls in one process are free), and payload
+# indexes created only WITH the collection (an existing collection already has
+# them — every deployment of this code creates the two together).
+_ensured: set[str] = set()
+
+
 def _ensure(collection: str, dim: int, sparse_vector_name: str | None = None) -> None:
     """Create a collection (low-RAM profile) + tenant/video payload indexes.
 
@@ -110,25 +120,32 @@ def _ensure(collection: str, dim: int, sparse_vector_name: str | None = None) ->
     Qdrant server version rejects adding a sparse vector config to an
     already-populated collection (verified live, EVIDENCE.md), so a sparse
     config missing here can't be retrofitted later without a drop+recreate."""
+    if collection in _ensured:
+        return
     c = client()
-    if not c.collection_exists(collection):
-        c.create_collection(
-            collection_name=collection,
-            vectors_config=qm.VectorParams(
-                size=dim,
-                distance=qm.Distance.COSINE,
-                on_disk=QDRANT_ON_DISK,
-            ),
-            hnsw_config=qm.HnswConfigDiff(on_disk=QDRANT_HNSW_ON_DISK),
-            quantization_config=(
-                qm.ScalarQuantization(scalar=qm.ScalarQuantizationConfig(
-                    type=qm.ScalarType.INT8, always_ram=True))
-                if QDRANT_QUANTIZATION else None
-            ),
-            sparse_vectors_config=(
-                {sparse_vector_name: qm.SparseVectorParams()} if sparse_vector_name else None
-            ),
-        )
+    if c.collection_exists(collection):
+        # Already provisioned (by app startup, worker boot, or a previous
+        # deployment of this same code) — its payload indexes were created
+        # together with it below, so there is nothing left to do.
+        _ensured.add(collection)
+        return
+    c.create_collection(
+        collection_name=collection,
+        vectors_config=qm.VectorParams(
+            size=dim,
+            distance=qm.Distance.COSINE,
+            on_disk=QDRANT_ON_DISK,
+        ),
+        hnsw_config=qm.HnswConfigDiff(on_disk=QDRANT_HNSW_ON_DISK),
+        quantization_config=(
+            qm.ScalarQuantization(scalar=qm.ScalarQuantizationConfig(
+                type=qm.ScalarType.INT8, always_ram=True))
+            if QDRANT_QUANTIZATION else None
+        ),
+        sparse_vectors_config=(
+            {sparse_vector_name: qm.SparseVectorParams()} if sparse_vector_name else None
+        ),
+    )
     # Tenant index on user_id: co-locates a tenant's points so per-user
     # searches touch a small slice of the index. video_id for delete/filter.
     try:
@@ -147,6 +164,7 @@ def _ensure(collection: str, dim: int, sparse_vector_name: str | None = None) ->
                                field_schema=qm.PayloadSchemaType.KEYWORD)
     except Exception:
         pass
+    _ensured.add(collection)
 
 
 def ensure_collection() -> None:
@@ -157,7 +175,11 @@ def ensure_collection() -> None:
 def ensure_text_collection() -> None:
     """Transcript (bge text) collection — the second branch, now also home to
     paper/deck chunks. source_id gets its own index attempt here (not in
-    _ensure): frame payloads in the visual collection never carry that field."""
+    _ensure): frame payloads in the visual collection never carry that field.
+    Same component-57 rule as _ensure: the index attempt only happens when
+    this process hasn't already confirmed the collection."""
+    if TEXT_COLLECTION in _ensured:
+        return
     _ensure(TEXT_COLLECTION, TEXT_EMBED_DIM,
            sparse_vector_name=SPARSE_VECTOR_NAME if ENABLE_HYBRID_TEXT_SEARCH else None)
     try:
@@ -197,7 +219,9 @@ def search(vector: np.ndarray, user_id: str, *, top_k: int,
     except Exception as exc:
         # Empty deployment (collection not created yet) is a "no results"
         # situation, not a 500 — the UI shows "no moments found".
-        if "doesn't exist" in str(exc) or "Not found" in str(exc):
+        if ("doesn't exist" in str(exc).lower() or "not found" in str(exc).lower()):
+            # (case-insensitive: server mode says "Not found", embedded local
+            # mode says "Collection X not found" — both mean the same thing)
             return []
         raise
     return [{"score": float(h.score), **(h.payload or {})} for h in hits]
@@ -288,7 +312,9 @@ def search_text(vector: np.ndarray, user_id: str, *, top_k: int,
                 ),
             ).points
     except Exception as exc:
-        if "doesn't exist" in str(exc) or "Not found" in str(exc):
+        if ("doesn't exist" in str(exc).lower() or "not found" in str(exc).lower()):
+            # (case-insensitive: server mode says "Not found", embedded local
+            # mode says "Collection X not found" — both mean the same thing)
             return []
         raise
     return [{"score": float(h.score), **(h.payload or {})} for h in hits]
