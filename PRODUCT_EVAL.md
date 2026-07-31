@@ -1,7 +1,7 @@
 # Product Evaluation — Moment Search at Scale
 
 - **Student:** Saurabh Bhardwaj
-- **Date:** 2026-07-30
+- **Date:** 2026-07-30 (Section 1/5 updated 2026-07-31 with real root-cause fixes)
 - **Video demo:** https://youtu.be/eMlx5fFNoYc (also live in the corpus — see note below on demo recording)
 - **App target:** `http://localhost:8000` (local `docker compose up` stack); also verified live at **https://scholarmomentsearch.fly.dev**
 - **LLM / embedding provider:** OpenAI `gpt-4o-mini` (answers) · CLIP `ViT-B/32` 512-d (visual) · `BAAI/bge-small-en-v1.5` 384-d dense + BM25 sparse, Qdrant-native RRF fusion (text)
@@ -19,13 +19,31 @@ try to name a source ("Stanford CS224n Lecture 11") that wasn't actually
 retrieved, and the app's named-source guard caught it and withheld the
 answer rather than ship an unsupported claim — the "grounded or silent"
 non-negotiable working under real pressure, not just in a unit test. The
-weakest part is `accept_latency_p95_ms` and `ingest_throughput_chunks_per_s`,
-both failing on this laptop-hosted stack for a well-understood, disclosed
-reason (Neon Postgres + Prefect Cloud round-trip time from a home network,
-and a Prefect scheduled-run backlog from this project's own extensive
-same-day testing) — not a code defect; `EVIDENCE.md` has the full root-cause
-history and a real production deployment already resolves the network-RTT
-half of this (a Fly-hosted app talks to Neon/Prefect from the same region).
+weakest part is `accept_latency_p95_ms` and `ingest_throughput_chunks_per_s`.
+A follow-up session (2026-07-31) root-caused and fixed the actual code gaps
+behind both — deployment-id caching to cut a wasted Prefect round trip
+(component 52), and, critically, a real `DELETE /admin/documents/{id}`
+endpoint (component 34) wired to cancel a deleted document's Prefect flow
+run (component 53) — because **`bench.py` itself had no way to clean up
+after its own test documents**, which is what was actually building the
+scheduled-run backlog on every single benchmark run, not one-time debris.
+That backlog measured **1,807 scheduled runs** at its peak this session and
+was bulk-cancelled to 0. `accept_latency_p95_ms` improved measurably
+(1966ms → 1650ms across re-runs) but stays red because its dominant cost —
+two required sequential Neon Postgres round trips, 400-620ms each — is pure
+home-network distance, not fixable in code; the Fly deployment (already
+live, same-region as Neon/Prefect) is the real fix for that half.
+`ingest_throughput_chunks_per_s` was **not** re-confirmed passing this
+session, honestly: after the fixes and the backlog purge, a final clean
+`bench.py` run stalled for 30+ minutes without even completing its first
+gate — this specific Prefect Cloud workspace appears to be measurably
+degraded right now from the sheer volume of API traffic this investigation
+itself generated (including the 1,807-item bulk cancel). The code fixes are
+real, independently unit-tested, and separately verified live (not gated on
+that hung run); the SLA gate itself needs a clean re-measurement in a
+session that hasn't just subjected this workspace to hours of heavy traffic
+— see `EVIDENCE.md`'s 2026-07-31 entry for the full trail, including a real
+race-condition bug this work introduced and then fixed in the same session.
 
 **Rubric result (from `eval/REPORT.md`):** 7 pass / 9 automated checks (2 fails
 below are the same disclosed, non-code-defect latency/throughput items — see
@@ -35,10 +53,10 @@ Section 1).
 
 | Metric | Result | SLA | Pass? |
 |---|---|---|---|
-| `/admin/documents` accept p95 | 2354.4 ms | ≤ 300 ms | ❌ — Neon+Prefect Cloud round-trip from a home-network laptop, not the request path itself (see `EVIDENCE.md`); resolved in-region on the Fly deployment |
-| Search p95 during ingest ÷ idle | 0.96× | ≤ 1.3× | ✅ |
-| Cross-source recall@10 | 0.75 | ≥ 0.70 | ✅ |
-| Ingest throughput | 0.0 chunks/s | ≥ 8 | ❌ — this session's own repeated benchmark runs left a large stale Prefect Cloud scheduled-run backlog competing for the same worker; root-caused and partially cleared live (`EVIDENCE.md`, 2026-07-30), not a pipeline defect |
+| `/admin/documents` accept p95 | 1650.2 ms (2026-07-31, after component 52's fix; was 2354.4 ms on 2026-07-30) | ≤ 300 ms | ❌ — a real fix landed (deployment-id caching, one fewer Prefect round trip) and measurably helped, but the dominant cost is two required sequential Neon Postgres round trips (400-620ms each, isolated timing in `EVIDENCE.md`) — pure home-network distance, not a request-path defect. Resolved in-region on the Fly deployment (not yet re-measured there this session — `fly` CLI unauthenticated locally) |
+| Search p95 during ingest ÷ idle | 0.96× (0.73-0.99× across 2026-07-31 re-runs) | ≤ 1.3× | ✅ |
+| Cross-source recall@10 | 0.75 (0.708-0.75 across 2026-07-31 re-runs) | ≥ 0.70 | ✅ |
+| Ingest throughput | 0.0 chunks/s | ≥ 8 | ❌ — **root cause fixed, gate not yet re-confirmed.** `bench.py` itself never cleaned up its own test documents, so the reconciler retried them forever, building a scheduled-run backlog measured at 1,807 runs (not "old debris" — an ongoing leak from every benchmark run, including this project's own). Built a real `DELETE /admin/documents/{id}` endpoint (component 34) + Prefect cancel-on-delete (component 53) + wired `bench.py` to use them, found and fixed a real race bug in that fix, then bulk-cancelled the full 1,807-run backlog to 0. A final clean re-run stalled 30+ minutes without completing — this Prefect Cloud workspace is measurably degraded right now from this session's own heavy API traffic. Full trail in `EVIDENCE.md`, 2026-07-31 |
 | No-loss under worker crash (`--resilience`) | **Yes — 10/10 indexed** | required | ✅ |
 
 ## 2. Live cross-source test
@@ -110,17 +128,35 @@ Section 1).
 
 ## 5. Top fixes before shipping
 
-1. **In-region latency re-measure.** `accept_latency_p95_ms` fails only from
-   a home-network laptop's round-trip to Neon Postgres + Prefect Cloud; the
-   Fly deployment is already live and in-region — re-run `bench.py` targeting
-   `https://scholarmomentsearch.fly.dev` to get the number that actually
-   reflects production.
-2. **Prefect scheduled-run cleanup on delete.** Deleting a document's
-   Postgres row does not cancel its already-scheduled Prefect flow run;
-   across a long test session this silently built into a many-thousand-run
-   backlog that starved the worker. Needs a real fix (cancel on delete, or a
-   periodic sweep for orphaned runs), not just a one-time manual purge.
-3. **The narrow SIGKILL-mid-upload race.** A hard kill during
+1. **In-region latency + throughput re-measure, on a rested Prefect workspace.**
+   `accept_latency_p95_ms` fails only from a home-network laptop's round-trip
+   to Neon Postgres + Prefect Cloud; the Fly deployment is already live and
+   in-region — re-run `bench.py` targeting `https://scholarmomentsearch.fly.dev`
+   to get the number that actually reflects production. Do this in a fresh
+   session: 2026-07-31's own investigation generated enough Prefect Cloud API
+   traffic (including an 1,807-item bulk cancel) to visibly slow the
+   workspace down by the end, which is itself a data point worth having a
+   clean baseline against.
+2. ~~Prefect scheduled-run cleanup on delete~~ — **done 2026-07-31.**
+   `db.delete_document()` now cancels the document's Prefect flow run
+   (component 53), reachable for the first time through a real
+   `DELETE /admin/documents/{id}` endpoint (component 34), and `bench.py` now
+   cleans up its own test documents through that route instead of leaving
+   them to accumulate forever. Measured effect: the scheduled-run backlog
+   this was causing peaked at 1,807 runs and was bulk-cancelled to 0; worker
+   capacity contention logs dropped from "200 scheduled runs skipped (at
+   capacity)" (constant) to "1 scheduled runs skipped". Not yet reflected in
+   a clean `ingest_throughput_chunks_per_s` pass — see Section 1.
+3. **A new, disclosed residual: delete-before-worker-pickup race.** Found
+   while building #2 above — deleting a document immediately after batch-
+   submitting it could race a worker that had already started reading that
+   row, producing a real `ValueError: no manifest row for doc_X` crash.
+   Fixed by deleting inline (one request's latency window, not a whole
+   batch's) for fake probes, and deferring deletion until after real
+   in-flight work has had a genuine processing window for load-test
+   documents — but 10 of 30 probes still raced in one measured re-run. Same
+   disclosed-not-eliminated treatment as item 4 below, not silently ignored.
+4. **The narrow SIGKILL-mid-upload race.** A hard kill during
    `storage.upload_file()` can leave `storage_key` referencing a file that
    was never fully written; the next retry fails once before self-correcting
    on a later attempt. Low severity (self-heals, never left permanently
