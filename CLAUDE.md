@@ -16,7 +16,7 @@ what the design says — no more, no less — with every claim backed by an eval
 
 | Doc | Authority over |
 |---|---|
-| `README.md` | the assignment: API contract, Definition of Done, grading, SLAs |
+| `ASSIGNMENT.md` | the assignment: API contract, Definition of Done, grading, SLAs (moved here from `README.md` 2026-07-31 so the root README could become a project showcase — content unchanged) |
 | `DESIGN.md` | WHAT we build: the 11 components, build order, decided scope |
 | `ARCHITECTURE.md` | HOW it fits: payloads, lifecycles, crash-safety, NFRs |
 | `benchmark/sla.json` | the hard numbers (frozen — never edit to pass) |
