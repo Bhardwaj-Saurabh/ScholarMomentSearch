@@ -6055,3 +6055,65 @@ passes WITH client RTT included, no in-region asterisk needed.
 
 **Commits**: `41ade70` (deferred dispatch, autocommit pool, persistent client),
 `1280f6b` (delete-race close, found live).
+
+---
+
+## 2026-07-31/08-01 — Component 57: ingest throughput (verbatim, still RED) + five real defects found and fixed
+
+**Unit evals (RED→GREEN)**: reconciler heartbeat discriminator
+(`test_reconcile_leaves_scheduled_backlog_alone_when_a_worker_is_alive` RED →
+GREEN; PENDING/RUNNING restart shapes pinned for the resilience gate), caption
+parallelism (4 mocked 0.2s captions in <0.55s vs 0.8s serial, RED first),
+per-chunk caption failure isolation, `src/liveness.py` fail-open trio,
+embed sub-batching (`test_embed_docs_splits_large_batches` RED first),
+`_post` connection-reset retry (RED first). Full suite: **700 passed, 0 failed**.
+
+**Throughput measurements, verbatim, in order** (16 corpus docs, bench method):
+| run | conditions | result |
+|---|---|---|
+| 13:0x | concurrency 2, pre-C57 | 1.89 (recorded this morning) |
+| 16:2x | 6/machine ×1, first Redis-live run | 1.28 |
+| 17:0x | +2nd worker machine | 0.67, statuses flapping backward |
+| 17:4x | retune 3/machine ×2, metrics-crash fixed | 0.93, 3 docs failed FileNotFoundError |
+| 18:2x | local docker worker STOPPED | invalid (measuring laptop slept mid-run) |
+| 21:2x | warm caches | 1.76 — 766 chunks in 436s, 4 failures: clip OOM (`exit_code=137, oom_killed=true`) |
+| 23:2x | embed batching deployed, cold post-deploy | 0.70, zero failures |
+| 00:4x | 6/machine ×2, on-machine measurement | 0.00 — every `doc-embed-index` timed out at 600s; clip service fully wedged (single 1-text embed timed out at 120s), restarted |
+
+**Defects found by these runs — each verified, fixed, and unit-locked:**
+1. **A local docker-compose worker (up 7h) was polling the SAME Prefect Cloud
+   deployment as production**, executing prod runs with dev config: local-mode
+   storage (`FileNotFoundError: /app/data/docs/...` — the smoking gun), 90s
+   reconciler window (duplicate runs at exactly +~130s, confirmed via Prefect
+   Cloud's created-at records). Stopped; every number before 18:00 is tainted.
+2. **Prefect 3.8's per-flow-run resource-metrics exporter** (ON by default
+   against Prefect Cloud) crashed flow error handling with
+   `ModuleNotFoundError: opentelemetry.instrumentation.system_metrics`
+   (traceback verbatim in logs). Disabled via
+   `PREFECT_TELEMETRY_ENABLE_RESOURCE_METRICS=false`.
+3. **Whole-document embed requests OOM-killed the 4GB clip machine**
+   (189-chunk doc = one request; `exit_code=137, oom_killed=true` in Fly event
+   log). Fixed: client-side sub-batching at `EMBED_DOCS_BATCH=64`.
+4. **`_post` didn't retry connection-reset** (`RemoteDisconnected`) during the
+   clip machine's restart window — in-flight ingests hard-failed instead of
+   riding out ~60s. Fixed: `ConnectionError` joins `URLError` in the retry.
+5. **Reconciler over-admission under load**: healthy in-flight work >90s
+   between status writes was re-enqueued (duplicate runs racing the original).
+   Fixed: heartbeat discriminator for SCHEDULED + stale window 240s.
+
+**Verdict — gate still RED, and here is the honest ceiling**: with the bugs
+fixed, the constraint is the single clip machine (one embed service, one lock,
+2 shared vCPUs) serving 12 concurrent ingests plus all search traffic, the
+OpenAI org's 200k TPM cap on vision captions (verbatim 429s in logs), and —
+after a full day of benchmarking — Fly shared-CPU burst-credit exhaustion
+(progressive collapse across runs ending in a wedged clip service that
+recovered only on restart). `sla.json` stays frozen; the number stands as
+measured. The next real levers, deliberately NOT built tonight: horizontal
+clip scaling (the `.internal` DNS already returns every clip machine),
+performance-class CPUs for clip/workers, or load-shedding in clip_service.
+
+Also fixed this session (test-env, commit `d2a5bc4`): the 10 "pre-existing"
+suite failures were a stale local Qdrant fixture + the user's
+`QDRANT_COLLECTION=proud-aqua-swordtail` (cluster name) leaking from `.env`
+into tests — conftest now pins collection names; the full suite is green for
+the first time (`681 passed` then, `700 passed` now).
