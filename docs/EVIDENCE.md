@@ -6117,3 +6117,45 @@ suite failures were a stale local Qdrant fixture + the user's
 `QDRANT_COLLECTION=proud-aqua-swordtail` (cluster name) leaking from `.env`
 into tests — conftest now pins collection names; the full suite is green for
 the first time (`681 passed` then, `700 passed` now).
+
+---
+
+## 2026-08-01 — Components 58, 59, 60: unit GREEN + C59 live GREEN; answer-path evals blocked on OpenAI credits
+
+**Component 59 (retrieval recall package) — LIVE, gate GREEN:**
+Corpus re-seeded on the api machine via component 51's integrity path (vectors
+deleted, rows left `indexed`, `seed_to_completion -> True`; rebuilt payloads
+verified to carry the new `chunk` ordinal — `payload keys: ['chunk', ...]`).
+Then all 16 labeled queries run ON the api machine through `rag_search.ask`
+with the LLM resolver disabled — the OpenAI org has **zero credits**
+(`credit_balance_exhausted`, verbatim in the reseed log), and recall@10 /
+precision@10 read CITATIONS only, which the answer model never influences.
+Verbatim:
+```
+queries: 16, zero-citation: 0
+recall_at_10: 0.8333    (gate >= 0.70 — PASS; was 0.646, clean-subset 0.738)
+precision_at_10: 0.7083 (gate >= 0.70 — PASS)
+```
+12/16 queries surfaced all three kinds in the top-10. Caveats, disclosed:
+measured in-process (not over HTTP /ask_stream — the LLM-less run makes SSE
+impossible), and the reseeded corpus lost SOME captions to the exhausted
+credits (caption fail-open kept extracted text), so these numbers were earned
+on a slightly WEAKER corpus than a fully-captioned one — if anything the gate
+pass is understated.
+
+**Component 58 (LLM resilience) — unit GREEN (8 new tests, RED-first),
+deployed.** Its live eval ("full labeled-query run with zero HTTP-0s") needs a
+working answer model — blocked on credits. Ironically the exhausted-credits
+state itself demonstrates the component live: every `/api/ask` now returns the
+contract's 502 ("model temporarily unavailable") instead of the old raw 500,
+and `/ask_stream` emits a terminal `error` event instead of dying mid-stream.
+
+**Component 60 (read-latency polish) — unit GREEN (3 new tests, RED-first),
+deployed.** Live span-timing before/after comparison requires answered
+requests — blocked on credits alongside 58's run.
+
+**Blocked pending user action (add OpenAI credits):** C58 zero-HTTP-0 labeled
+run · `answer_quality.py` re-run (required by C59's scope — the TOP_K 6→10
+prompt change invalidates component 13's old numbers) · the full end-to-end
+`bench.py` finale. Optionally after credits: re-run seeding once more to
+restore the captions the exhausted account dropped.
