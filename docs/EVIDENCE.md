@@ -6159,3 +6159,58 @@ run · `answer_quality.py` re-run (required by C59's scope — the TOP_K 6→10
 prompt change invalidates component 13's old numbers) · the full end-to-end
 `bench.py` finale. Optionally after credits: re-run seeding once more to
 restore the captions the exhausted account dropped.
+
+---
+
+## 2026-08-02 — Program finale: full production re-measure after credits restored
+
+Preconditions: OpenAI credits restored by the user; corpus re-seeded ONCE MORE
+so the captions dropped during the zero-credit window were regenerated
+(`[seed] corpus complete — everything indexed`); the stale `TOP_K=6` Fly
+secret (bulk-imported from `.env` long ago) found overriding component 59's
+approved default and unset — the 0.833 recall recorded yesterday was earned
+at k=6; `.env` updated to `TOP_K=10` to match the user-approved decision.
+
+**`python benchmark/bench.py` against https://scholarmomentsearch.fly.dev
+(verbatim):**
+```
+[PASS] accept_latency_p95_ms: 140.5 (target 300)
+[PASS] search_p95_during_ingest_ratio: 1.01 (target 1.3)
+[PASS] recall_at_10: 0.896 (target 0.7)
+[FAIL] ingest_throughput_chunks_per_s: 4.44 (target 8)
+```
+recall measured over real `/ask_stream` with the LLM answering — **zero HTTP-0
+failures across all 16 labeled queries**, which is component 58's live eval
+satisfied inside the same run (the two HTTP-0 zeros were the original recall
+gate's killer). Throughput 4.44 is 2.3× the 1.89 baseline and stays honestly
+red; ceiling analysis in the component 57 entry stands.
+
+**`bench.py --quality` (verbatim):** `[FAIL] precision_at_10: 0.688 (target 0.7)`
+— a 0.012 miss against the SELF-IMPOSED quality gate, and the direct, expected
+trade of serving 10 citations instead of 6: recall on the GRADED gate rose
+0.833→0.896 while precision fell 0.708→0.688 (larger denominator admits more
+off-topic tail citations). Recorded, not tuned: `quality_gates.json` stays
+frozen, TOP_K stays at the user-approved 10 — trading the graded gate's pass
+away to polish a self-imposed one would be backwards.
+
+**`benchmark/answer_quality.py` (verbatim):**
+```
+queries judged: 16 / 16, citations checked: 65
+[PASS] answer_relevancy: 5.0 (target 4.0)
+[PASS] answer_faithfulness: 0.985 (target 0.85)
+```
+This re-run was REQUIRED by component 59's scope (the 10-citation prompt
+invalidated component 13's old numbers) — both gates pass on the new prompt.
+Recorded in Opik: experiments 019fc3e3-c97c (precision) and 019fc3e6-8124
+(answer quality) on dataset scholarmomentsearch-labeled-queries.
+
+**Final scoreboard for the §3m program** (start of program → now):
+| gate | before | after |
+|---|---|---|
+| accept_latency_p95_ms ≤ 300 | 774.7 RED | **140.5 GREEN** |
+| search_p95_during_ingest_ratio ≤ 1.3 | 1.0 GREEN | 1.01 GREEN |
+| recall_at_10 ≥ 0.70 | 0.646 RED | **0.896 GREEN** |
+| ingest_throughput ≥ 8 | 1.89 RED | 4.44 RED (2.3×, ceiling documented) |
+| precision_at_10 ≥ 0.70 (self-imposed) | 0.64-0.71 | 0.688 (k=10 trade, disclosed) |
+| answer_relevancy ≥ 4.0 | 4.x | **5.0 GREEN** |
+| answer_faithfulness ≥ 0.85 | 0.9x | **0.985 GREEN** |
