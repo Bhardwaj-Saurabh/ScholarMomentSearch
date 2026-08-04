@@ -107,3 +107,29 @@ def test_final_citation_slice_falls_back_to_frames_when_no_text_exists():
                "frame": {"idx": i, "ms": i * 1000}, "text": None} for i in range(3)]
     chosen = rag_search._citation_windows(frames, k=2)
     assert len(chosen) == 2, "a transcript-less corpus still gets visual citations"
+
+
+def test_video_citations_expose_text_field_like_document_citations(monkeypatch):
+    """Second half of the rubric fix: eval.py's grounded check reads
+    `citation["text"]`, which document citations carried but video citations
+    spelled `transcript` — so any video citation in the top-k failed the
+    graded check regardless of how well-grounded it was."""
+    import numpy as np
+
+    monkeypatch.setattr(config, "ENABLE_TRANSCRIPT", True)
+    monkeypatch.setattr(config, "QUERY_ENHANCEMENT_ENABLED", False)
+    monkeypatch.setattr(config, "RERANK_ENABLED", False)
+    monkeypatch.setattr(rag_search, "embed_text", lambda q: np.zeros(4, dtype=np.float32))
+    monkeypatch.setattr(rag_search, "embed_query", lambda q: np.zeros(4, dtype=np.float32))
+    monkeypatch.setattr(rag_search.vector_store, "search", lambda *a, **k: [])
+    monkeypatch.setattr(rag_search.vector_store, "search_text",
+                        lambda *a, **k: [{"video_id": "v1", "idx": None, "ms": 5000,
+                                          "text": "the spoken evidence", "score": 0.9}])
+    monkeypatch.setattr(rag_search.db, "videos_by_ids",
+                        lambda ids: {"v1": {"title": "A Talk", "url": None, "source": "youtube"}})
+    monkeypatch.setattr(rag_search.db, "documents_by_ids", lambda ids: {})
+    out = rag_search._retrieve_impl("q", "u_test")
+    (cite,) = out["citations"]
+    assert cite["kind"] == "video"
+    assert cite.get("text") == "the spoken evidence"
+    assert cite.get("transcript") == "the spoken evidence"  # existing UI field stays

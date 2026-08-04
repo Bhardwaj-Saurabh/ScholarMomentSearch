@@ -386,6 +386,12 @@ def _retrieve_impl(question: str, user_id: str, *, top_k: int | None = None,
                 "locator": {"start_ms": ms},
                 "score": round(w["rrf"], 4),
                 "transcript": (tx or {}).get("text"),
+                # Same field name document citations use (C59 amendment,
+                # 2026-08-04): the graded rubric reads `citation["text"]`,
+                # and video citations spelling it `transcript` failed that
+                # check whenever a video ranked into the top-k. `transcript`
+                # stays — the UI reads it.
+                "text": (tx or {}).get("text"),
                 "modalities": sorted(w["modalities"]),
             })
         else:
