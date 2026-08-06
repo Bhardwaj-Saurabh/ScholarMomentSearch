@@ -6214,3 +6214,46 @@ Recorded in Opik: experiments 019fc3e3-c97c (precision) and 019fc3e6-8124
 | precision_at_10 ≥ 0.70 (self-imposed) | 0.64-0.71 | 0.688 (k=10 trade, disclosed) |
 | answer_relevancy ≥ 4.0 | 4.x | **5.0 GREEN** |
 | answer_faithfulness ≥ 0.85 | 0.9x | **0.985 GREEN** |
+
+---
+
+## 2026-08-04/06 — Rubric re-run: 7/9 → 8/9, two citation-contract gaps found and fixed; final in-region confirmation
+
+Re-running `eval/eval.py` against the live deployment (for the PRODUCT_EVAL
+refresh) flipped its `grounded` check RED — "10 citations, all with
+text+locator: False" — a real regression signal the graded rubric caught that
+the unit suite had not. Two distinct causes, each fixed EDD-style (rubric =
+the red eval; unit locks added first):
+
+1. **Frame-only windows reached the citation list.** §3m's rerank fairness
+   made pure-visual windows rankable into the top-k, and they genuinely carry
+   no text. Fix: `_citation_windows()` — frame-only windows stay fully
+   rankable but the served slice takes text-bearing windows; frame-only fills
+   in only when no text exists at all (transcript-less corpora keep visual
+   citations). Unit: `test_final_citation_slice_*` (RED first).
+2. **Video citations spelled their text field `transcript`.** The rubric —
+   and document citations — read `citation["text"]`; any video citation in
+   the top-k failed the check regardless of grounding. The check passed in
+   July only because that query's top-6 happened to be all documents. Fix:
+   video citations now carry `text` alongside the UI's `transcript`. Unit:
+   `test_video_citations_expose_text_field_like_document_citations` (RED
+   first). Suite: **703 passed, 0 failed**.
+
+**Rubric after fixes (verbatim, live Fly):** 8 PASS / 9 — `grounded: 10
+citations, all with text+locator: True`; `documents_async: 202 in 124ms`;
+the one FAIL (`decoupled`) is eval.py's structural "run bench.py" pointer,
+and bench passes it.
+
+**Final full `bench.py`, run ON the api machine** (in-region; the from-laptop
+run was invalidated by the measuring machine sleeping — same clock-jump
+artifact documented on 2026-07-31, now avoided entirely by running on-box):
+```
+[PASS] accept_latency_p95_ms: 14.8 (target 300)
+[PASS] search_p95_during_ingest_ratio: 0.8 (target 1.3)
+[PASS] recall_at_10: 0.906 (target 0.7)
+[FAIL] ingest_throughput_chunks_per_s: 4.19 (target 8)
+```
+recall ticked 0.896 → 0.906 after the citation amendment (excluding text-less
+windows made room for text-bearing kind coverage). `benchmark/_bench.json`
+updated from this run. README.md and docs/PRODUCT_EVAL.md refreshed with
+these numbers, dated.

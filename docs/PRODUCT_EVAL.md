@@ -1,7 +1,10 @@
 # Product Evaluation — Moment Search at Scale
 
 - **Student:** Saurabh Bhardwaj
-- **Date:** 2026-07-30 (Section 1/5 updated 2026-07-31 with real root-cause fixes)
+- **Date:** 2026-07-30 (Section 1/5 updated 2026-07-31 with real root-cause fixes;
+  Sections 1/3/5 and the Verdict refreshed 2026-08-02/04 after the DESIGN.md §3m
+  optimization program, with every number re-measured against the LIVE Fly
+  deployment — full trail in `EVIDENCE.md`)
 - **Video demo:** https://youtu.be/eMlx5fFNoYc (also live in the corpus — see note below on demo recording)
 - **App target:** `http://localhost:8000` (local `docker compose up` stack); also verified live at **https://scholarmomentsearch.fly.dev**
 - **LLM / embedding provider:** OpenAI `gpt-4o-mini` (answers) · CLIP `ViT-B/32` 512-d (visual) · `BAAI/bge-small-en-v1.5` 384-d dense + BM25 sparse, Qdrant-native RRF fusion (text)
@@ -18,8 +21,20 @@ strongest part is grounding: a live query in this exact session had the LLM
 try to name a source ("Stanford CS224n Lecture 11") that wasn't actually
 retrieved, and the app's named-source guard caught it and withheld the
 answer rather than ship an unsupported claim — the "grounded or silent"
-non-negotiable working under real pressure, not just in a unit test. The
-weakest part is `accept_latency_p95_ms` and `ingest_throughput_chunks_per_s`.
+non-negotiable working under real pressure, not just in a unit test.
+
+**2026-08-02/06 update — the two weak gates were attacked head-on** (DESIGN.md
+§3m optimization program, components 55-60): `accept_latency_p95_ms` is now
+GREEN at **140.5 ms** client-side / **14.8 ms** in-region, recall@10 rose to
+**0.906**, LLM-judged answer relevancy/faithfulness pass at **5.0 / 0.985**,
+and the automated rubric improved from 7/9 to **8/9**. The one remaining red
+is `ingest_throughput_chunks_per_s` (4.19-4.44 vs ≥8, up 2.3× from 1.89) —
+its residual ceiling (single embedding-service machine, vision-caption API
+rate limits, shared-CPU burst budgets) is root-caused in `EVIDENCE.md` rather
+than hidden. The paragraph below is the original 2026-07-31 assessment,
+retained for the audit trail.
+
+The weakest part WAS `accept_latency_p95_ms` and `ingest_throughput_chunks_per_s`.
 A follow-up session (2026-07-31) root-caused and fixed the actual code gaps
 behind both — deployment-id caching to cut a wasted Prefect round trip
 (component 52), and, critically, a real `DELETE /admin/documents/{id}`
@@ -45,18 +60,33 @@ session that hasn't just subjected this workspace to hours of heavy traffic
 — see `EVIDENCE.md`'s 2026-07-31 entry for the full trail, including a real
 race-condition bug this work introduced and then fixed in the same session.
 
-**Rubric result (from `eval/REPORT.md`):** 7 pass / 9 automated checks (2 fails
-below are the same disclosed, non-code-defect latency/throughput items — see
-Section 1).
+**Rubric result (from `eval/REPORT.md`, re-run 2026-08-04/06 against the live
+Fly deployment):** **8 pass / 9 automated checks** — including `grounded`
+(10/10 citations with text+locator) and `documents_async` (202 in 124 ms).
+The one remaining "FAIL" row, `decoupled`, is structural: `eval.py` can't
+measure it and its evidence string just says "run `bench.py`" — which passes
+it at 0.8× (≤1.3 target). Getting `grounded` green surfaced and fixed two
+real citation-contract gaps (2026-08-04): frame-only visual windows, made
+reachable by the §3m rerank-fairness change, carry no text and are now
+excluded from the served citation slice (still rankable; visual-only corpora
+keep their fallback), and video citations spelled their text field
+`transcript` where the rubric — and document citations — use `text`.
 
 ## 1. Performance & scale (from `benchmark/bench.py`)
 
+**2026-08-02 — full benchmark against the LIVE Fly deployment
+(`https://scholarmomentsearch.fly.dev`), after the DESIGN.md §3m optimization
+program (components 55-60):**
+
 | Metric | Result | SLA | Pass? |
 |---|---|---|---|
-| `/admin/documents` accept p95 | 1650.2 ms (2026-07-31, after component 52's fix; was 2354.4 ms on 2026-07-30) | ≤ 300 ms | ❌ — a real fix landed (deployment-id caching, one fewer Prefect round trip) and measurably helped, but the dominant cost is two required sequential Neon Postgres round trips (400-620ms each, isolated timing in `EVIDENCE.md`) — pure home-network distance, not a request-path defect. Resolved in-region on the Fly deployment (not yet re-measured there this session — `fly` CLI unauthenticated locally) |
-| Search p95 during ingest ÷ idle | 0.96× (0.73-0.99× across 2026-07-31 re-runs) | ≤ 1.3× | ✅ |
-| Cross-source recall@10 | 0.75 (0.708-0.75 across 2026-07-31 re-runs) | ≥ 0.70 | ✅ |
-| Ingest throughput | 0.0 chunks/s | ≥ 8 | ❌ — **root cause fixed, gate not yet re-confirmed.** `bench.py` itself never cleaned up its own test documents, so the reconciler retried them forever, building a scheduled-run backlog measured at 1,807 runs (not "old debris" — an ongoing leak from every benchmark run, including this project's own). Built a real `DELETE /admin/documents/{id}` endpoint (component 34) + Prefect cancel-on-delete (component 53) + wired `bench.py` to use them, found and fixed a real race bug in that fix, then bulk-cancelled the full 1,807-run backlog to 0. A final clean re-run stalled 30+ minutes without completing — this Prefect Cloud workspace is measurably degraded right now from this session's own heavy API traffic. Full trail in `EVIDENCE.md`, 2026-07-31 |
+| `/admin/documents` accept p95 | **140.5 ms** from a home-network client; **14.8 ms** in-region (2026-08-06 re-confirmation run on the Fly machine itself). Was 2,354 → 1,650 → 774 → 140.5 across the program | ≤ 300 ms | ✅ — deferred queue dispatch out of the request path (Starlette background task, mirroring the provided video path's fair-dispatch shape), autocommit DB pool, one persistent Prefect client, and the full London region alignment (Fly + Neon + Qdrant). Passes WITH client RTT included — no in-region asterisk needed |
+| Search p95 during ingest ÷ idle | **1.01×** | ≤ 1.3× | ✅ |
+| Cross-source recall@10 | **0.906** (2026-08-06 in-region re-confirmation; 0.896 on 2026-08-02) — 16/16 labeled queries over the real `/ask_stream` SSE endpoint with the LLM answering, zero transport failures (the old number's killer was two HTTP-0 dropped connections, fixed by component 58's LLM retry/timeout layer) | ≥ 0.70 | ✅ |
+| Ingest throughput | **4.44 chunks/s** (was 0.0 → 1.89 → 4.44) | ≥ 8 | ❌ — 2.3× the pre-program baseline after five real defects were found and fixed (a local dev worker stealing production queue runs, a Prefect 3.8 telemetry crash, whole-document embed payloads OOM-killing the embedding service, a missing connection-reset retry, reconciler duplicate-run churn). The remaining ceiling is root-caused and documented, not hidden: a single embedding-service machine serializing all embed work, vision-caption API rate limits, and shared-CPU burst budgets. Next levers (horizontal embed scaling, performance-class CPUs) are infrastructure spend, recorded in `EVIDENCE.md` |
+| Answer relevancy (LLM judge, `answer_quality.py`) | **5.0** (16/16 judged) | ≥ 4.0 | ✅ |
+| Answer faithfulness (LLM judge) | **0.985** (65 citations checked) | ≥ 0.85 | ✅ |
+| Retrieval precision@10 (self-imposed gate) | **0.688** | ≥ 0.70 | ❌ by 0.012 — the disclosed trade of serving 10 citations instead of 6 (user-approved), which bought recall 0.833→0.896 on the graded gate above. Recorded, not tuned away: `quality_gates.json` stays frozen |
 | No-loss under worker crash (`--resilience`) | **Yes — 10/10 indexed** | required | ✅ |
 
 ## 2. Live cross-source test
@@ -115,7 +145,7 @@ Section 1).
 | Multi-format ingestion (paper + deck) | ✅ Pass | 8 papers + 8 decks fully indexed with page/slide-aware chunking; a fresh live paper registration also reached an indexed, citable state this session |
 | Correct locators (page / slide / timestamp) | ✅ Pass | Verified live: paper p.3/p.4, deck slide 1, video `t=7`/`t=413060ms`, all deep-linking correctly |
 | One shared index | ✅ Pass | All three kinds live in one `moments_text` Qdrant collection; one query above retrieved all three together |
-| Cross-source recall vs SLA | ✅ Pass | `recall_at_10: 0.75` (target ≥ 0.70); re-measured twice same-day (`0.698`, `0.771`) confirming the ~0.70+ range is stable, not a fluke |
+| Cross-source recall vs SLA | ✅ Pass | `recall_at_10: 0.906` (target ≥ 0.70; 2026-08-06 in-region run, 0.896 on 2026-08-02 — was 0.75 before the §3m program) |
 | Grounded answers (no invented locators) | ✅ Pass | Live-caught, not hypothetical: the named-source guard withheld a real misattribution attempt in this exact session (Section 2) |
 | Queue decoupling (search fast during ingest) | ✅ Pass | `search_p95_during_ingest_ratio: 0.96` (≤ 1.3 target) |
 | Resilience (no loss on crash) | ✅ Pass | Worker `docker kill`ed mid-ingest; 10/10 sources reached `indexed`. Getting a clean result required fixing two real environmental problems first — a self-inflicted stale Prefect Cloud backlog (~6,300 scheduled runs from repeated same-day testing, purged at the source) and a local Docker Desktop quirk where `restart: unless-stopped` wasn't reviving a killed container (worked around manually; Fly's own production restart policy is unaffected and separately verified live). One narrow, disclosed, unfixed gap: a hard `SIGKILL` mid-upload can occasionally cause one retry to trust a not-yet-written file — reproduced twice, both times self-recovered to `indexed` on a later retry rather than staying lost. Full root-cause trail in `EVIDENCE.md`. |
@@ -128,15 +158,15 @@ Section 1).
 
 ## 5. Top fixes before shipping
 
-1. **In-region latency + throughput re-measure, on a rested Prefect workspace.**
-   `accept_latency_p95_ms` fails only from a home-network laptop's round-trip
-   to Neon Postgres + Prefect Cloud; the Fly deployment is already live and
-   in-region — re-run `bench.py` targeting `https://scholarmomentsearch.fly.dev`
-   to get the number that actually reflects production. Do this in a fresh
-   session: 2026-07-31's own investigation generated enough Prefect Cloud API
-   traffic (including an 1,807-item bulk cancel) to visibly slow the
-   workspace down by the end, which is itself a data point worth having a
-   clean baseline against.
+1. ~~In-region latency + throughput re-measure~~ — **done 2026-08-02/06.**
+   Full `bench.py` against the live Fly deployment: accept p95 **140.5 ms**
+   from a home client and **14.8 ms** run in-region (≤300 target, GREEN both
+   ways), recall@10 **0.906**, decoupling ratio **0.8×**. Throughput reached
+   **4.19-4.44 chunks/s** (from 1.89) and stays the one red gate — remaining
+   ceiling root-caused in `EVIDENCE.md` (single embed-service machine,
+   caption API rate limits, shared-CPU burst budgets); next levers are
+   infrastructure spend (horizontal embed scaling, performance CPUs), not
+   code.
 2. ~~Prefect scheduled-run cleanup on delete~~ — **done 2026-07-31.**
    `db.delete_document()` now cancels the document's Prefect flow run
    (component 53), reachable for the first time through a real

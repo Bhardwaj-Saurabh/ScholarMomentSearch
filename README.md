@@ -8,11 +8,13 @@ Ask a question — get one grounded answer citing the exact **video moment**, **
 [![Live App](https://img.shields.io/website?url=https%3A%2F%2Fscholarmomentsearch.fly.dev&up_message=online&down_message=offline&label=live%20app)](https://scholarmomentsearch.fly.dev)
 [![CI](https://img.shields.io/github/actions/workflow/status/Bhardwaj-Saurabh/ScholarMomentSearch/ci.yml?branch=main&label=CI)](https://github.com/Bhardwaj-Saurabh/ScholarMomentSearch/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-640%2F649%20passing-brightgreen)](docs/EVIDENCE.md)
+[![Tests](https://img.shields.io/badge/tests-703%2F703%20passing-brightgreen)](docs/EVIDENCE.md)
 
 [Live demo](https://scholarmomentsearch.fly.dev) · [Video walkthrough](https://youtu.be/eMlx5fFNoYc) · [Product evaluation](docs/PRODUCT_EVAL.md) · [Architecture](docs/ARCHITECTURE.md) · [Design log](docs/DESIGN.md)
 
 </div>
+
+![](images/scholarmomentsearch.png)
 
 ---
 
@@ -127,18 +129,23 @@ Every figure below came from an actual `benchmark/bench.py` or test-suite run;
 [`EVIDENCE.md`](docs/EVIDENCE.md) for every dated run this project has ever
 recorded, including the red ones).
 
+All figures below are from the 2026-08-02/06 full benchmark runs against the
+**live Fly.io production deployment** (not localhost):
+
 | Metric | Target | Latest result |
 |---|---|---|
-| Cross-source recall@10 | ≥ 0.70 | **0.75** (0.698–0.771 across re-measurements — stable, not a fluke) |
-| Search p95 during a large ingest ÷ idle | ≤ 1.3× | **0.73–0.99×** — ingestion never starves search |
+| `/admin/documents` accept p95 | ≤ 300 ms | **140.5 ms** from a home-network client, **14.8 ms** in-region — was 2,354 ms before the optimization program (deferred queue dispatch, autocommit DB pool, persistent Prefect client, London region alignment) |
+| Cross-source recall@10 | ≥ 0.70 | **0.906** — 16/16 labeled queries answered over the real SSE endpoint, zero transport failures |
+| Search p95 during a large ingest ÷ idle | ≤ 1.3× | **1.01×** — ingestion never starves search |
+| Answer relevancy (LLM judge) | ≥ 4.0 | **5.0** (16/16 queries judged) |
+| Answer faithfulness (LLM judge) | ≥ 0.85 | **0.985** (65 citations checked) |
 | No-loss under worker crash | 100% | **10/10** sources reached `indexed` after a mid-ingest kill |
-| Test suite | — | **640 / 649 passing** — the 9 failures are pre-existing and disclosed (a known real-Qdrant test-isolation ordering issue, unrelated to recent changes; confirmed by re-running against the pre-diff code) |
-| `/admin/documents` accept p95 | ≤ 300 ms | ❌ network-bound on a home connection (Neon + Prefect Cloud RTT), root-caused and disclosed — resolves in-region on the Fly deployment |
-| Ingest throughput | ≥ 8 chunks/s | ❌ root cause fixed this session (a real cleanup-on-delete leak that starved the worker); gate not yet re-confirmed clean |
+| Test suite | — | **703 / 703 passing** — the suite is fully green; 10 formerly-disclosed environment failures were root-caused (stale local fixture + a config leak) and fixed |
+| Ingest throughput | ≥ 8 chunks/s | ❌ **4.44 chunks/s** — 2.3× the pre-program baseline; remaining ceiling (single embed-service machine, vision-caption rate limits) is root-caused and documented, not hidden |
+| Retrieval precision@10 (self-imposed) | ≥ 0.70 | **0.688** — a disclosed 0.012 trade: serving 10 citations instead of 6 bought recall 0.83→0.91 on the graded gate |
 
-The two red rows are not swept under the rug — they're root-caused,
-partially fixed, and disclosed with full detail in
-[`PRODUCT_EVAL.md`](docs/PRODUCT_EVAL.md) and `docs/EVIDENCE.md`'s 2026-07-31 entry,
+The red row is not swept under the rug — it's root-caused and disclosed with
+full detail in [`PRODUCT_EVAL.md`](docs/PRODUCT_EVAL.md) and `docs/EVIDENCE.md`,
 consistent with this project's rule that a metric is fixed by fixing the
 system, never by relaxing the threshold.
 
@@ -157,7 +164,7 @@ The stack seeds a curated 8-triplet corpus (video + paper + deck, aligned
 topics) on first boot, so the UI is queryable the moment it comes up.
 
 ```bash
-uv run pytest tests/ -q            # 640/649 passing — see docs/EVIDENCE.md for the 9 disclosed pre-existing failures
+uv run pytest tests/ -q            # 703/703 passing
 python benchmark/bench.py          # SLA gate: latency, decoupling, recall
 python benchmark/bench.py --resilience   # kill a worker mid-ingest, assert no loss
 ```
