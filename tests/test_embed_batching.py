@@ -10,7 +10,6 @@ out the ~60s restart the retry loop was built for.
 """
 from __future__ import annotations
 
-import numpy as np
 import pytest
 
 from src import config

@@ -276,7 +276,7 @@ def test_adopt_stack_does_not_leak_into_a_pooled_threads_next_task(recording):
     submission must not silently apply to the next thing that thread runs."""
     import threading
 
-    with tracing.span("retrieve") as parent_sp:
+    with tracing.span("retrieve"):
         snap = tracing.current_stack()
 
     def adopt_and_check():
